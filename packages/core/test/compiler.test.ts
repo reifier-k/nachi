@@ -880,7 +880,10 @@ describe('emitter kernel compiler', () => {
     const program = compileEmitter(
       baseEmitter({
         integration: 'none',
-        update: [gravity(parameter('Particles.mass', 1)), gravity(parameter('Emitter.age', 1))],
+        update: [
+          gravity(parameter('Particles.mass', 1)),
+          gravity(parameter('Emitter.spawnCount', 1)),
+        ],
       }),
     );
 

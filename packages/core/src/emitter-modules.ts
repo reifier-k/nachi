@@ -127,3 +127,51 @@ export function collectParameterDeclarationDiagnostics(
   }
   return diagnostics;
 }
+
+export function collectEmitterLifecycleDiagnostics(
+  config: EmitterConfig<AttributeSchema, ParameterSchema>,
+): VfxDiagnostic[] {
+  const lifecycle = config.lifecycle;
+  if (!lifecycle) return [];
+  const diagnostics: VfxDiagnostic[] = [];
+  const nonNegativeFinite = (
+    value: number | undefined,
+    field: 'duration' | 'prewarm' | 'startDelay',
+  ) => {
+    if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+      diagnostics.push(
+        compileDiagnostic(
+          'NACHI_LIFECYCLE_VALUE_INVALID',
+          `Emitter lifecycle ${field} must be a non-negative finite number.`,
+          `lifecycle.${field}`,
+        ),
+      );
+    }
+  };
+  nonNegativeFinite(lifecycle.duration, 'duration');
+  nonNegativeFinite(lifecycle.prewarm, 'prewarm');
+  nonNegativeFinite(lifecycle.startDelay, 'startDelay');
+  if (
+    lifecycle.loopCount !== undefined &&
+    lifecycle.loopCount !== 'infinite' &&
+    (!Number.isSafeInteger(lifecycle.loopCount) || lifecycle.loopCount <= 0)
+  ) {
+    diagnostics.push(
+      compileDiagnostic(
+        'NACHI_LIFECYCLE_LOOP_COUNT_INVALID',
+        'Emitter lifecycle loopCount must be a positive safe integer or "infinite".',
+        'lifecycle.loopCount',
+      ),
+    );
+  }
+  if ((lifecycle.duration ?? 0) === 0 && (lifecycle.loopCount ?? 1) !== 1) {
+    diagnostics.push(
+      compileDiagnostic(
+        'NACHI_LIFECYCLE_LOOP_DURATION_REQUIRED',
+        'A looping emitter requires a positive lifecycle duration.',
+        'lifecycle.duration',
+      ),
+    );
+  }
+  return diagnostics;
+}

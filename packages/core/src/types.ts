@@ -340,10 +340,10 @@ export interface EmitToOptions {
 export type ParticleEventName = 'onCollision' | 'onCustom' | 'onDeath' | 'onSpawn' | (string & {});
 
 export interface EmitterLifecycle {
-  readonly delay?: number;
   readonly duration?: number;
-  readonly loop?: boolean | number;
+  readonly loopCount?: number | 'infinite';
   readonly prewarm?: number;
+  readonly startDelay?: number;
 }
 
 export type EmitterIntegration = 'euler' | 'none';
@@ -378,7 +378,9 @@ export interface VisualElementDefinition<Config extends object = object> {
   readonly version: number;
 }
 
-export type EffectElementDefinition = EmitterDefinition | VisualElementDefinition;
+export type EffectElementDefinition =
+  | EmitterDefinition<AttributeSchema, ParameterSchema>
+  | VisualElementDefinition;
 export type EffectElements = Readonly<Record<string, EffectElementDefinition>>;
 
 export interface PlayAction<Target extends string = string> {
@@ -474,13 +476,18 @@ export type EffectInstanceState = 'active' | 'complete' | 'error' | 'released' |
 
 export interface EffectInstance<Definition = EffectDefinition> {
   readonly definition: Definition;
+  readonly diagnostics: readonly VfxDiagnostic[];
   readonly id: string;
+  readonly localTime: number;
   readonly state: EffectInstanceState;
+  readonly timeScale: number;
+  applyHitStop(durationMs: number, timeScale?: number): void;
   release(): void;
   setParameter<Path extends UserParameterKeys<Definition>>(
     path: Path,
     value: DefinitionParameterValue<Definition, Path>,
   ): void;
+  setTimeScale(timeScale: number): void;
   stop(): void;
 }
 

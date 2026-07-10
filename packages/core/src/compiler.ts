@@ -2,6 +2,7 @@ import { resolveAttributeSchema, resolveTslStorageType } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
+  collectEmitterLifecycleDiagnostics,
   collectEmitterModuleLabelDiagnostics,
   collectEmitterModules,
   collectParameterDeclarationDiagnostics,
@@ -278,7 +279,10 @@ const EMITTER_PATHS = new Set<ParameterPath>([
 const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
   'System.deltaTime',
   'System.time',
+  'Emitter.age',
   'Emitter.deltaTime',
+  'Emitter.localTime',
+  'Emitter.loopIndex',
   'Emitter.seed',
   'Emitter.spawnGeneration',
   'Emitter.transform',
@@ -720,7 +724,10 @@ function uniformDescriptions(
   const uniforms: CompiledUniformDescription[] = [
     describe('System.time', 0, 'f32'),
     describe('System.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
+    describe('Emitter.age', 0, 'f32'),
     describe('Emitter.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
+    describe('Emitter.localTime', 0, 'f32'),
+    describe('Emitter.loopIndex', 0, 'u32'),
     describe('Emitter.seed', options.emitterSeed ?? 0, 'u32'),
     describe('Emitter.spawnGeneration', options.spawnGeneration ?? 0, 'u32'),
     describe('Emitter.transform', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
@@ -1059,6 +1066,7 @@ export function compileEmitter<
   const diagnostics: VfxDiagnostic[] = [];
   const registry = options.registry ?? createCoreKernelModuleRegistry();
   const untypedDefinition = definition as EmitterDefinition<AttributeSchema, ParameterSchema>;
+  diagnostics.push(...collectEmitterLifecycleDiagnostics(untypedDefinition));
   diagnostics.push(...collectEmitterModuleLabelDiagnostics(untypedDefinition));
   diagnostics.push(...collectParameterDeclarationDiagnostics(untypedDefinition.parameters));
   const normalized = normalizeModules(untypedDefinition, options);

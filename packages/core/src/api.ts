@@ -1,6 +1,7 @@
 import { resolveAttributeSchema } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
 import {
+  collectEmitterLifecycleDiagnostics,
   collectEmitterModuleLabelDiagnostics,
   collectParameterDeclarationDiagnostics,
 } from './emitter-modules.js';
@@ -20,8 +21,6 @@ import type {
   EffectConfig,
   EffectDefinition,
   EffectElements,
-  EffectInstance,
-  EffectSpawnOptions,
   EmitToOptions,
   EmitterConfig,
   EmitterDefinition,
@@ -201,6 +200,7 @@ export function defineEmitter<
   const normalizedConfig = events === undefined ? config : { ...config, events };
   const diagnostics = [
     ...resolveAttributeSchema<Attributes, Parameters>(normalizedConfig).diagnostics,
+    ...collectEmitterLifecycleDiagnostics(normalizedConfig),
     ...collectEmitterModuleLabelDiagnostics(normalizedConfig),
     ...collectParameterDeclarationDiagnostics(normalizedConfig.parameters),
   ];
@@ -427,23 +427,4 @@ export function defineEffect<
     throw new VfxDiagnosticError(diagnostics);
   }
   return { ...config, kind: 'effect' } as EffectDefinition<Elements, Parameters>;
-}
-
-export class VFXSystem<Renderer = unknown, Scene = unknown> {
-  constructor(
-    readonly renderer: Renderer,
-    readonly scene: Scene,
-  ) {}
-
-  spawn<
-    const Elements extends EffectElements,
-    const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
-  >(
-    _definition: EffectDefinition<Elements, Parameters>,
-    _options: EffectSpawnOptions<EffectDefinition<Elements, Parameters>> = {},
-  ): EffectInstance<EffectDefinition<Elements, Parameters>> {
-    void _definition;
-    void _options;
-    throw new Error('VFXSystem runtime is not implemented yet.');
-  }
 }

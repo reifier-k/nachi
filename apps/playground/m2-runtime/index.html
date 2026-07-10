@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#02050d" />
+    <link rel="icon" href="data:," />
+    <title>nachi M2 Runtime Smoke</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="spike-hud" aria-label="M2 runtime smoke status">
+        <p class="eyebrow">M2 runtime smoke</p>
+        <h1>VFXSystem Runtime</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing…</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <div id="scene" aria-label="M2 runtime smoke renderer"></div>
+    </main>
+    <script type="module" src="/src/m2-runtime.ts"></script>
+  </body>
+</html>

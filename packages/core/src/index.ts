@@ -6,4 +6,5 @@ export * from './attributes.js';
 export * from './compiler.js';
 export * from './diagnostics.js';
 export * from './random.js';
+export * from './system.js';
 export type * from './types.js';
