@@ -317,6 +317,12 @@ function traceCoreImplementation(
 function fakeAdapter(): KernelTslAdapter {
   const node = () => new FakeNode();
   return {
+    capabilities: {
+      atomics: true,
+      backend: 'webgpu',
+      indirectDispatch: true,
+      indirectDraw: true,
+    },
     instanceIndex: node(),
     atomicAdd: node,
     atomicLoad: node,
@@ -866,6 +872,87 @@ describe('emitter kernel compiler', () => {
     );
   });
 
+  it('rejects a WebGL2 spawn varying with more than four components', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        attributes: {
+          transform: attribute('transform', {
+            default: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+            type: 'mat4',
+          }),
+        },
+        capacity: 1,
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    let caught: unknown;
+    try {
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+        deviceLimits: { maxTransformFeedbackSeparateAttribs: 4 },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(VfxDiagnosticError);
+    expect(caught instanceof VfxDiagnosticError ? caught.diagnostics : []).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+        path: 'attributeSchema.byName.transform.components',
+      }),
+    );
+  });
+
+  it.each([
+    ['multi-cycle burst', { spawn: burst({ count: 1, cycles: 2, interval: 0.1 }) }],
+    [
+      'looping burst',
+      {
+        lifecycle: { duration: 1, loopCount: 2 as const, startDelay: 0.1 },
+        spawn: burst({ count: 1 }),
+      },
+    ],
+    [
+      'infinite burst loop',
+      {
+        lifecycle: { duration: 1, loopCount: 'infinite' as const },
+        spawn: burst({ count: 1 }),
+      },
+    ],
+  ])('rejects WebGL2 %s re-firing', (_name, overrides) => {
+    const program = compileEmitter({ ...baseEmitter({ integration: 'none' }), ...overrides });
+
+    let caught: unknown;
+    try {
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(VfxDiagnosticError);
+    expect(caught instanceof VfxDiagnosticError ? caught.diagnostics : []).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED' }),
+    );
+  });
+
   it('rejects missing WebGPU lifecycle capabilities instead of silently falling back', () => {
     let caught: unknown;
     try {
@@ -1048,6 +1135,29 @@ describe('emitter kernel compiler', () => {
       );
     },
   );
+
+  it('diagnoses a burst count parameter whose declaration is not a numeric scalar', () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      parameters: {
+        'User.count': defineParameter('User.count', {
+          default: [1, 2, 3],
+          type: 'vec3',
+        }),
+      },
+      render: computeRender,
+      spawn: burst({ count: parameter('User.count', 1) }),
+    });
+    const program = compileEmitter(emitter);
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BURST_COUNT_INVALID',
+        path: 'spawn[0].config.count',
+      }),
+    );
+  });
 
   it('requires an interval for multi-cycle bursts', () => {
     const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count: 1, cycles: 2 }) });

@@ -37,10 +37,10 @@
 | System/Emitter階層・エミッタ継承 | M9 | ⬜ |
 | 動的パーティクル属性(カスタム属性→バッファコンパイル) | M1 | ✅ 2026-07-11監査確認 |
 | 名前空間パラメータ (System/Emitter/Particles/User) | M1 | ✅ 2026-07-11監査確認(User.*のGPU反映まで実証。Emitter時間系uniformはM2) |
-| GPUシミュレーション(コンピュート) | M1–M2 | ⬜ |
-| Spawn: rate / burst / per-distance | M2 | ⬜ |
-| エミッタライフサイクル(duration/loop/prewarm) | M2 | ⬜ |
-| ローカル時間・タイムスケール(ヒットストップ) | M2 | ⬜ |
+| GPUシミュレーション(コンピュート) | M1–M2 | ✅ 2026-07-11監査確認(フリーリスト/compaction/間接描画まで) |
+| Spawn: rate / burst / per-distance | M2 | ✅ 2026-07-11監査確認(WebGPU。WebGL2は単発burstのみ) |
+| エミッタライフサイクル(duration/loop/prewarm) | M2 | ✅ 2026-07-11監査確認(prewarmビット一致実証) |
+| ローカル時間・タイムスケール(ヒットストップ) | M2 | ✅ 2026-07-11監査確認(hitStop API含む。タイムライン統合はM9) |
 | スプライトレンダラ(整列モード・cutout・フリップブック) | M3 | ⬜ |
 | メッシュレンダラ(インスタンス・向きモード) | M3 | ⬜ |
 | ソフトパーティクル | M3 | ⬜ |
@@ -94,15 +94,15 @@
 - [x] コンパイラのユニットテスト(生成カーネルのスナップショット+数値検証)— 54テスト(スナップショット・LUT数値・トレース・乱数ストリーム回帰含む)
 - [x] 🔍 **マイルストーン監査** — 2026-07-11実施。Codex(fresh)+Claude(新規)の独立監査→統括裁定: **条件付きPASS**(詳細はセッションログ)
 
-## M2 — スポーンとライフサイクル
+## M2 — スポーンとライフサイクル ✅(PASS)
 
 - [x] GPUフリーリスト(アトミックカウンタによる確保/解放)— スナップショット分割割当(フレーム内レース排除)、per-particle spawnGeneration、枯渇時クランプ+診断
-- [ ] 生存数駆動のdrawIndirect(WebGL2フォールバック方針含む)— 🚧 M2監査で差し戻し: WebGL2 burstがTF varyings超過で無音全滅(実ブラウザ実証)、バッファ予算超過でm1-kernel回帰。WebGPU側の実証(3系統照合)は維持
+- [x] 生存数駆動のdrawIndirect(WebGL2フォールバック方針含む)— aliveカウント→instanceCount(3系統照合)、ライフサイクルバッファ2本構成(状態+間接引数、同期スコープ分離)、WebGL2はTF varyings/コンポーネント予算の静的検算で明示診断(単発burstのみ許可)
 - [x] spawn: rate / burst / per-distance(移動量比例)— 端数アキュムレータ(分割不変)、GPU生成dispatch引数のdispatchIndirect、ステージ書込権限検証(RFC§4.1全表=M1監査先送り分消化)
 - [x] エミッタライフサイクル:startDelay、duration、loopCount('infinite'可)、prewarm(cold経路とビット一致を実証)— ループ世代→spawnGeneration接続
 - [x] エフェクトローカル時間、タイムスケール、fixed timestepオプション — System.timeはワールド維持・Emitter.deltaTimeのみスケール、hitStop API、アキュムレータ(スパイラル防止+破棄明示)、分割不変性テスト済み
 - [x] VFXSystemスケジューラ(複数エフェクト・複数エミッタの更新統括)— update直列化、WeakMapコンパイルキャッシュ(3インスタンス共有を実証)、状態機械(error遷移・デバイスロスト伝播込み)
-- [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
+- [x] 🔍 **マイルストーン監査** — 2026-07-11実施(初回FAIL→修正→再監査)。再監査はCodex=FAIL/Claude=PASS(実GPU3層実証)で対立→統括裁定: Claudeの解消実証を主判定とし、Codexの残存4指摘(mat3コンポーネント予算/WebGL2再発火/capabilities必須化/parameter型検査)を最終修正で全て閉じて **PASS**。§16のvec4パッキング判断も記録済み(M3バッチ1で実装)
 
 ## M3 — レンダラ第一陣
 
@@ -235,6 +235,7 @@
 | 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
 | 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |
+| 2026-07-11 | **M2マイルストーン監査**: 初回=両監査FAIL(バッファ予算回帰でm1-kernel崩壊/WebGL2無音全滅/専有パス無保護)→修正4ラウンド(ライフサイクルバッファ5→2本統合、mat3物理ストライド48B、同期スコープ分離、所有権表、WebGL2正直ゲート)→再監査Codex=FAIL/Claude=PASS→裁定: 残存4指摘を最終修正で閉じて**PASS**。テスト151本、全GPUスモーク緑、性能劣化なし(spike-compute 3.8ms)。**M3への引き継ぎ**: vec4属性パッキングはM3バッチ1でレンダラ頂点ステージ予算と統合設計(§16に決定記録)、GPU overflow既定報告の要否はM3判断、Emitter.spawnCount書込許可のcore限定はRFC注記済み |
 | 2026-07-11 | M2完成バッチ:GPUフリーリスト+スポーンモード+生存数駆動描画(テスト127本、GPUスモーク7検証全緑=rate30厳密/世代再利用の乱数非相関/3系統カウント照合/枯渇安全/決定論)→ClaudeレビューPASS(独立再現)→監査前SHOULD3+NIT6解消(決定論境界のRFC明文化、overflow readbackのinterval同梱化、WebGL2 rate/perDistance明示拒否)→コミット。**Codex運用ノート**: resumeでwrite承認が落ちる場合はbroker再起動+--fresh --writeで復旧 |
 | 2026-07-11 | M2バッチ1完了:VFXSystemランタイム+時間管理+エミッタライフサイクル(system.ts、/m2-runtime/スモーク6検証全緑、テスト98本)→ClaudeレビューPASS(prewarmビット一致・タイムスケール厳密性を独立再現)→コミット。**バッチ2へ持ち越し**: [SHOULD] maximumLifetimeがcore/lifetime以外のlifetime書込を無視(tslModule時にInfinityフォールバック)/releasedインスタンス使用のNACHI_INSTANCE_RELEASED化、[NIT] prewarm等価性の適用範囲文書化/timeScaleのdtスケール方式文書化/stop()既定意味論/lifetime無宣言エミッタの扱い/デバイスロストのラッチ/RotationInput単位文書化。per-particle世代管理の要否をバッチ2設計で確認 |
 | 2026-07-11 | **M1マイルストーン監査実施**(Codex=fresh/Claude=新規の独立監査→統括裁定)。Codex判定FAIL/Claude判定条件付きPASS→裁定: ①Codexのビルド・テスト失敗はread-onlyサンドボックス起因で**却下**(実環境54/54+build全緑をClaude監査が独立確認) ②Codex実質指摘を採用: $ageマニフェストにParticles.age read追加/二重積分検出(NACHI_INTEGRATION_DOUBLE_APPLY)/gradientのGPU readback検証/名前空間パラメータのGPU反映検証 ③統合VfxRegistryはM12へ・ステージ書込権限検証はM2/M5へ**明示的に先送り**(RFC注記で黙認解消) ④Claude実証指摘を全採用: 乱数ステージ衝突(stage hash混合で解消)/capacity検証/parameterサイレント定数化のエラー化/compileEmitter直呼びラベル検証/vec range成分独立化/WebGL2クリーンゲート。修正後: **テスト68本・GPUスモーク9検証全合格**。パフォーマンス(SwiftShader): spike-compute 100k=3.7ms(前回4.2-5.0msから劣化なし)、m1-kernel 64粒子=0.56ms/4096粒子=2.7ms(M1ベースライン)。ゴールデン回帰は改名前の陳腐化1件のみ(再取得済み)。**最終判定: 条件付きPASS** — M2着手可、ただし**Windows実GPU目視(M0の3項目+float32-filterable)が未消化のままM2の生存数駆動実装に入ることは不可** |

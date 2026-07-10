@@ -14,6 +14,7 @@ import type {
   CurveGenerator,
   DataReference,
   EmitterDefinition,
+  EmitterLifecycle,
   EmptyParameterSchema,
   GradientGenerator,
   InitModule,
@@ -225,7 +226,7 @@ export interface KernelAdapterCapabilities {
 }
 
 export interface KernelTslAdapter {
-  readonly capabilities?: KernelAdapterCapabilities;
+  readonly capabilities: KernelAdapterCapabilities;
   readonly deviceLimits?: {
     readonly maxStorageBuffersPerShaderStage?: number;
     readonly maxTransformFeedbackSeparateAttribs?: number;
@@ -849,7 +850,10 @@ function validateStageWrites(
   return diagnostics;
 }
 
-function validateSpawnConfigs(modules: readonly CompiledSpawnModule[]): VfxDiagnostic[] {
+function validateSpawnConfigs(
+  modules: readonly CompiledSpawnModule[],
+  parameters: ParameterSchema | undefined,
+): VfxDiagnostic[] {
   const diagnostics: VfxDiagnostic[] = [];
   for (const module of modules) {
     if (module.type === 'core/rate' || module.type === 'core/per-distance') {
@@ -876,8 +880,18 @@ function validateSpawnConfigs(modules: readonly CompiledSpawnModule[]): VfxDiagn
             invalidCount(range.min) ||
             invalidCount(range.max) ||
             (range.min as number) > (range.max as number);
-        } else if (config.count.kind === 'parameter' && 'fallback' in config.count) {
-          countInvalid = invalidCount(config.count.fallback);
+        } else if (config.count.kind === 'parameter') {
+          const generator = config.count as { fallback?: unknown; path?: unknown };
+          const parameterDefinition =
+            typeof generator.path === 'string'
+              ? parameters?.[generator.path as ParameterPath]
+              : undefined;
+          countInvalid =
+            (generator.fallback !== undefined && invalidCount(generator.fallback)) ||
+            parameterDefinition === undefined ||
+            !(['f32', 'i32', 'u32'] as const).includes(
+              parameterDefinition.type as 'f32' | 'i32' | 'u32',
+            );
         }
       } else {
         countInvalid = invalidCount(config.count);
@@ -1229,10 +1243,11 @@ function createBuildKernels(
   program: Omit<CompiledEmitterProgram, 'buildKernels'>,
   registry: KernelModuleRegistry,
   factories: ReadonlyMap<string, TslModuleFactory>,
+  lifecycle: EmitterLifecycle | undefined,
 ): (adapter: KernelTslAdapter) => BuiltEmitterKernels {
   return (adapter) => {
     const buildDiagnostics = [...program.diagnostics];
-    const backend = adapter.capabilities?.backend ?? 'webgpu';
+    const backend = adapter.capabilities.backend;
     if (backend === 'webgl2') {
       for (const module of program.spawn.modules) {
         if (module.type !== 'core/rate' && module.type !== 'core/per-distance') continue;
@@ -1258,15 +1273,55 @@ function createBuildKernels(
           severity: 'error',
         });
       }
+      for (const varying of program.meta.backendBudgets.webgl2.spawnVaryings) {
+        const attribute = program.attributeSchema.byName[varying.slice('Particles.'.length)];
+        if (!attribute || attribute.components <= 4) continue;
+        buildDiagnostics.push({
+          code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+          hint: 'Use the WebGPU backend. WebGL2 SEPARATE_ATTRIBS varyings may contain at most four components.',
+          message: `WebGL2 spawn/init varying ${varying} has ${attribute.components} components (${attribute.logicalType}), exceeding the per-varying SEPARATE_ATTRIBS limit of 4.`,
+          path: `attributeSchema.byName.${attribute.name}.components`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      for (const module of program.spawn.modules) {
+        if (module.type !== 'core/burst') continue;
+        const cycles = (module.config as { cycles?: unknown }).cycles;
+        if (typeof cycles === 'number' && cycles > 1) {
+          buildDiagnostics.push({
+            code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+            hint: 'Use a single-cycle burst on WebGL2 or select the WebGPU backend.',
+            message:
+              'WebGL2 prefix spawning cannot safely re-fire a burst because later dispatches overwrite the same particle prefix.',
+            path: `${module.path}.config.cycles`,
+            phase: 'compile',
+            severity: 'error',
+          });
+        }
+      }
+      const loopCount = lifecycle?.loopCount ?? 1;
+      if (
+        program.spawn.modules.some(({ type }) => type === 'core/burst') &&
+        (loopCount === 'infinite' || loopCount > 1)
+      ) {
+        buildDiagnostics.push({
+          code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+          hint: 'Use a one-loop burst emitter on WebGL2 or select the WebGPU backend.',
+          message:
+            'WebGL2 prefix spawning cannot safely re-activate burst emission because each loop overwrites the same particle prefix.',
+          path: 'lifecycle.loopCount',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
     } else {
       const capabilities = adapter.capabilities;
-      const missing = capabilities
-        ? [
-            capabilities.atomics ? undefined : 'atomics',
-            capabilities.indirectDispatch ? undefined : 'indirectDispatch',
-            capabilities.indirectDraw ? undefined : 'indirectDraw',
-          ].filter((value): value is string => value !== undefined)
-        : [];
+      const missing = [
+        capabilities.atomics ? undefined : 'atomics',
+        capabilities.indirectDispatch ? undefined : 'indirectDispatch',
+        capabilities.indirectDraw ? undefined : 'indirectDraw',
+      ].filter((value): value is string => value !== undefined);
       if (missing.length > 0) {
         buildDiagnostics.push({
           code: 'NACHI_BACKEND_CAPABILITY_MISSING',
@@ -1767,7 +1822,7 @@ export function compileEmitter<
   diagnostics.push(
     ...validateReferences([...spawnModules, ...initialModules], definition.parameters),
   );
-  diagnostics.push(...validateSpawnConfigs(spawnModules));
+  diagnostics.push(...validateSpawnConfigs(spawnModules, definition.parameters));
   const locatedNonKernelModules = collectEmitterModules(normalizedDefinition).filter(
     ({ module }) =>
       module.stage !== 'init' && module.stage !== 'update' && module.stage !== 'spawn',
@@ -1896,7 +1951,12 @@ export function compileEmitter<
   };
   return {
     ...description,
-    buildKernels: createBuildKernels(description, registry, normalized.factories),
+    buildKernels: createBuildKernels(
+      description,
+      registry,
+      normalized.factories,
+      definition.lifecycle,
+    ),
   };
 }
 

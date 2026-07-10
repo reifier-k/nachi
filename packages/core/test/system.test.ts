@@ -143,6 +143,12 @@ class FakeCompute implements KernelComputeBuilder, KernelComputeNode {
 function fakeAdapter(): KernelTslAdapter {
   const node = () => new FakeNode();
   return {
+    capabilities: {
+      atomics: true,
+      backend: 'webgpu',
+      indirectDispatch: true,
+      indirectDraw: true,
+    },
     instanceIndex: node(),
     atomicAdd: node,
     atomicLoad: node,
