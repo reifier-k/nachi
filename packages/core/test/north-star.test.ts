@@ -211,6 +211,15 @@ describe('PLAN.md north-star API', () => {
     if (Array.isArray(handlers)) {
       expect(handlers[0]?.access?.writes).toContain('Emitter.events.onDeath');
       expect(handlers[1]?.access?.writes).toContain('Emitter.events.onDeath');
+      expect(handlers[0]?.access?.writes).not.toContain('Emitter.events.pending');
+      expect(handlers[1]?.access?.writes).not.toContain('Emitter.events.pending');
+    }
+  });
+
+  it('uses emitter-local scaled time for force integration', () => {
+    for (const module of [gravity(-9.8), drag(0.5), curlNoise({ strength: 1, frequency: 2 })]) {
+      expect(module.access?.reads).toContain('Emitter.deltaTime');
+      expect(module.access?.reads).not.toContain('System.deltaTime');
     }
   });
 });

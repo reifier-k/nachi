@@ -66,8 +66,8 @@
 - [x] リポジトリ初期化:git init、pnpmモノレポ、TypeScript strict、vitest、ESLint/Prettier、CI雛形
 - [x] playground雛形(Vite + three.js WebGPURenderer + tweakpane)— TSLマテリアル、`?backend=webgl`切替、device.lost監視HUD付き
 - [x] **API RFC**:理想のAPIを型定義+README-drivenで書き切る(`docs/rfc/001-api.md`)。実装より先に型を固める — 全16章+Niagara対応表+未解決事項(スパイク待ち)。型定義(types.ts/api.ts)と北極星コンパイルテスト(正例+@ts-expect-error負例)付き
-- [ ] スパイク1:TSLコンピュートで10万パーティクル(ストレージバッファ、instanced描画)
-- [ ] スパイク2:drawIndirect / dispatchIndirect の可否と生存数駆動描画
+- [x] スパイク1:TSLコンピュートで10万パーティクル(ストレージバッファ、instanced描画)— /spike-compute/ ページ+tools/spike-runner.mjs。ヘッドレス実証済み(数値の詳細はPLAN決定事項ログ)
+- [ ] スパイク2:drawIndirect / dispatchIndirect の可否と生存数駆動描画 — 🚧 間接描画引数のGPU駆動(atomicAdd生存数→instanceCount)はreadback実証済み。**残**: dispatchIndirectの実証、drawIndexedIndirect実行のWindows実GPU目視確認
 - [ ] スパイク3:WebGL2バックエンドでの同コードの動作範囲実測(アトミック・间接描画の制約を文書化)
 - [ ] スパイク4:深度テクスチャアクセス(ソフトパーティクル)とTSLポストパイプラインの共存確認
 - [ ] パフォーマンス計測ハーネス(FPS/フレーム時間/VRAMをplaygroundに常設)
@@ -222,4 +222,5 @@
 | 2026-07-10 | エコシステム調査、計画策定、PLAN.md/ROADMAP.md作成 |
 | 2026-07-10 | 環境セットアップ:Playwright+Chromium導入、ヘッドレスWebGPU動作確認(SwiftShader・compute成功・要localhost)、監査プロトコル+FA新設、.mcp.json(Playwright MCP)作成 |
 | 2026-07-10 | M0項目1/2/9完了:雛形実装(Codex, thread 019f4b46)→検収→Claudeレビュー(FAIL: tweakpane型崩壊+ヘッドレスcanvas提示不可)→Codex修正→再レビューPASS→コミット。持ち越しNIT2件(probe引数検証のObject.hasOwn化、screenshotのバックエンド一致検証)は次回委譲に含める。Codexジョブランナーが2回ともゾンビ化(実体turnは完走)→rolloutログ直接監視で運用 |
-| 2026-07-10 | M0項目3完了:API RFC起草(Codex)+前回NIT2件修正→Claude設計レビュー(FAIL: BLOCKER2件=defineEffectパラメータ制約バグ・tslModule空マニフェスト自己矛盾、SHOULD7・NIT9)→Codex全件修正→再レビューPASS(検証パスで型プローブ+実行スモーク)→コミット。**次回委譲への持ち越し**: [SHOULD] coreフォースのreadsがSystem.deltaTimeでhitStop/timeScaleと不整合の疑い(M2着手前までに解消)、[NIT] $プレフィックスのコンパイラ予約明記/Emitter.events.pendingの正規化後残存の説明/writeキータイポはトレース検証で捕捉の注記 |
+| 2026-07-10 | M0項目3完了:API RFC起草(Codex)+前回NIT2件修正→Claude設計レビュー(FAIL: BLOCKER2件=defineEffectパラメータ制約バグ・tslModule空マニフェスト自己矛盾、SHOULD7・NIT9)→Codex全件修正→再レビューPASS(検証パスで型プローブ+実行スモーク)→コミット |
+| 2026-07-10 | スパイク1完了・スパイク2ほぼ完了:/spike-compute/実装(Codex)+RFC持ち越し4件解消→統括検収(ヘッドレス実測: atomicOk/indirectOk全true、aliveCount=91327一致)→Claudeレビュー PASS(独立再現済み)→コミット。**次回委譲への持ち越し**: [SHOULD] headlessのfps/computeMsは誇大(encode壁時間のみ)→headlessでfps出力廃止・encodeMs改名/drawExecutedフラグ追加/dispatchIndirect実証カーネル追加、[NIT] $プレフィックス拒否のdefineEmitter実装+テスト/computeOk検証強化(センチネル・age前進)/visualモードframesの意味ずれ/runnerに実選択アダプタ報告+devサーバ前提のusage明記 |

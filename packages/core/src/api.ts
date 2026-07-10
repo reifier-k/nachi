@@ -111,12 +111,15 @@ function collectParameterReads(value: unknown): DataReference[] {
 
 function addEventQueueWrite(module: EventModule, eventName: string): EventModule {
   const queue = `Emitter.events.${eventName}` as const;
+  const normalizedWrites = (module.access?.writes ?? []).filter(
+    (reference) => reference !== 'Emitter.events.pending',
+  );
   return {
     ...module,
     access: {
       ...module.access,
       reads: module.access?.reads ?? [],
-      writes: [...new Set([...(module.access?.writes ?? []), queue])],
+      writes: [...new Set([...normalizedWrites, queue])],
     },
   };
 }
@@ -237,7 +240,7 @@ export function gravity(value: ValueInput<number | Vec3>): UpdateModule {
     'core/gravity',
     { value },
     {
-      reads: ['System.deltaTime', 'Particles.velocity'],
+      reads: ['Emitter.deltaTime', 'Particles.velocity'],
       writes: ['Particles.velocity'],
     },
   );
@@ -249,7 +252,7 @@ export function drag(value: ValueInput<number>): UpdateModule {
     'core/drag',
     { value },
     {
-      reads: ['System.deltaTime', 'Particles.velocity'],
+      reads: ['Emitter.deltaTime', 'Particles.velocity'],
       writes: ['Particles.velocity'],
     },
   );
@@ -257,7 +260,7 @@ export function drag(value: ValueInput<number>): UpdateModule {
 
 export function curlNoise(options: CurlNoiseOptions): UpdateModule {
   return createModule('update', 'core/curl-noise', options, {
-    reads: ['System.deltaTime', 'Particles.position', 'Particles.velocity'],
+    reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
     writes: ['Particles.velocity'],
   });
 }

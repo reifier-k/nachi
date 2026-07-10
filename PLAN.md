@@ -187,6 +187,7 @@ apps/
 - 2026-07-10: 監査プロトコル導入。全マイルストーンに監査項目(実装と別セッションで実施)+ M12後に最終監査FA(1.0リリースゲート)。手順はROADMAP.md冒頭に定義
 - 2026-07-10: 検証は三層(ヘッドレスCPU=正しさ/Windows実GPU=性能/実機=モバイル)。WSL2から実GPUのWebGPUは不可と実測確認
 - 2026-07-10: 開発体制確定 — Claude本体=統括(実装しない)/Codex=実装(`/codex:rescue --model gpt-5.6-sol --effort xhigh` 厳守)/Claudeサブエージェント=実装レビュー/監査=Codex+Claude両サブエージェントの独立実施を統括が統合判定
+- 2026-07-10: **スパイク1/2の実証結果(three 0.185.1、SwiftShaderヘッドレス)**:①TSLコンピュートで10万粒子シミュレーションが公開APIで成立(`instancedArray`(SoA)+`Fn().compute()`+複数カーネル順序投入)②アトミクス動作確認(`.toAtomic()`+atomicAdd、91,327並行加算の完全一致)③間接描画引数のGPU駆動を実証(`IndirectStorageBufferAttribute`+`geometry.setIndirect`、readbackで引数内容確認。**描画実行自体の確認はWindows実GPU目視待ち**)④`renderer.getArrayBufferAsync`でreadback可。**未回答**: dispatchIndirect実証(APIは存在確認済み)、SoA vs interleaved比較、free-list vs compaction(スパイクは連続prefix生存で回避)、GPU timestamp計測(computeAsync壁時間はencodeのみで性能指標にならない)
 
 ## 未決事項
 

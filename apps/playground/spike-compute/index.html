@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#02050d" />
+    <link rel="icon" href="data:," />
+    <title>VFX Compute Spike</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="spike-hud" aria-label="Compute spike statistics">
+        <p class="eyebrow">Technical spikes 1 + 2</p>
+        <h1>TSL Compute Particles</h1>
+        <dl>
+          <div>
+            <dt>Particles</dt>
+            <dd id="particle-value">--</dd>
+          </div>
+          <div>
+            <dt>Alive</dt>
+            <dd id="alive-value">--</dd>
+          </div>
+          <div>
+            <dt>FPS</dt>
+            <dd id="fps-value">--</dd>
+          </div>
+          <div>
+            <dt>Frame avg</dt>
+            <dd id="frame-value">-- ms</dd>
+          </div>
+          <div>
+            <dt>computeAsync</dt>
+            <dd id="compute-value">-- ms</dd>
+          </div>
+          <div>
+            <dt>Draw path</dt>
+            <dd id="draw-value">Indirect</dd>
+          </div>
+          <div class="status-row">
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <div id="scene" aria-label="GPU-computed particle scene"></div>
+    </main>
+    <script type="module" src="/src/spike-compute.ts"></script>
+  </body>
+</html>
