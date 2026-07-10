@@ -107,10 +107,10 @@
 ## M3 — レンダラ第一陣
 
 - [x] スプライトレンダラ:カメラフェーシング/速度整列/カスタム軸/velocity stretch — billboard()コンパイル+InstancedMesh間接描画、/m3-sprites/でピクセル実証(基盤。フリップブック/cutoutは残)
-- [ ] フリップブック再生(補間、モーションベクタブレンディング)
-- [ ] cutout(オーバードロー削減ポリゴン)
+- [x] フリップブック再生(補間、モーションベクタブレンディング)— discrete/補間/MVワープ、ピクセル検証済み。**行順序規約(flipY)は次バッチで確定**
+- [x] cutout(オーバードロー削減ポリゴン)— 4〜8角形、前景比削減をピクセル実証(N=8の位相NITは次バッチ)
 - [ ] メッシュレンダラ(インスタンス、向きモード、per-particleカラー/スケール)
-- [ ] ソフトパーティクル(depthFade)
+- [x] ソフトパーティクル(depthFade)— 交差フェードをピクセル実証(soft/hard寄与比較)。fadeDistanceのAPI公開は次バッチ
 - [x] ブレンドモード一式(additive/alpha/multiply/premultiplied)— ピクセル差検証済み、multiplyはpremultipliedAlpha
 - [ ] 🎯 ゴールデン#2「爆発」(歪みなし版)がplaygroundで動く
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
