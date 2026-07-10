@@ -122,6 +122,38 @@ export interface AttributeDefinition<
 
 export type AttributeSchema = Readonly<Record<string, AttributeDefinition>>;
 
+export type AttributeComponentCount = 1 | 2 | 3 | 4 | 9 | 16;
+export type TslStorageType = 'float' | 'int' | 'mat3' | 'mat4' | 'uint' | 'vec2' | 'vec3' | 'vec4';
+export type ResolvedAttributeSource = 'built-in' | 'custom';
+
+export interface ResolvedAttribute {
+  readonly components: AttributeComponentCount;
+  readonly logicalType: AttributeType;
+  readonly name: string;
+  readonly path: ParticleAttributePath;
+  readonly source: ResolvedAttributeSource;
+  readonly storageIndex: number;
+  readonly storageType: TslStorageType;
+  readonly transient: boolean;
+}
+
+export interface ResolvedAttributeStorage {
+  readonly attribute: string;
+  readonly index: number;
+  readonly kind: 'instanced-array';
+  readonly length: number;
+  readonly type: TslStorageType;
+}
+
+export interface ResolvedAttributeSchema {
+  readonly attributes: readonly ResolvedAttribute[];
+  readonly byName: Readonly<Record<string, ResolvedAttribute>>;
+  readonly capacity: number;
+  readonly kind: 'resolved-attribute-schema';
+  readonly layout: 'soa';
+  readonly storageArrays: readonly ResolvedAttributeStorage[];
+}
+
 export interface ParameterDefinition<
   Path extends ParameterPath = ParameterPath,
   Type extends AttributeType = AttributeType,

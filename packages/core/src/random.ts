@@ -1,0 +1,99 @@
+import type { ModuleDefinition } from './types.js';
+
+export const PCG_RANDOM_CONSTANTS = {
+  emitterSeedMix: 0x85ebca77,
+  moduleSlotMix: 0xc2b2ae3d,
+  outputMultiplier: 277_803_737,
+  outputShift: 22,
+  particleIndexMix: 0x9e3779b1,
+  stateIncrement: 2_891_336_453,
+  stateMultiplier: 747_796_405,
+  stateShift: 28,
+  stateShiftOffset: 4,
+  uint32ToUnitFloat: 1 / 2 ** 32,
+} as const;
+
+export interface TslPcgFloatNode<FloatNode> {
+  mul(value: number): FloatNode;
+}
+
+export interface TslPcgUintNode<UintNode, FloatNode> {
+  add(value: number | UintNode): UintNode;
+  bitXor(value: number | UintNode): UintNode;
+  mul(value: number | UintNode): UintNode;
+  shiftRight(value: number | UintNode): UintNode;
+  toFloat(): FloatNode;
+}
+
+function moduleSlotSalt(moduleSlot: number): number {
+  return Math.imul(moduleSlot >>> 0, PCG_RANDOM_CONSTANTS.moduleSlotMix) >>> 0;
+}
+
+export function hashModuleLabel(label: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < label.length; index += 1) {
+    hash ^= label.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
+export function resolveModuleSlot(
+  module: Pick<ModuleDefinition, 'label'>,
+  normalizedStageIndex: number,
+): number {
+  return module.label === undefined || module.label.length === 0
+    ? normalizedStageIndex >>> 0
+    : hashModuleLabel(module.label);
+}
+
+export function pcgHashUint32(input: number): number {
+  const state =
+    (Math.imul(input >>> 0, PCG_RANDOM_CONSTANTS.stateMultiplier) +
+      PCG_RANDOM_CONSTANTS.stateIncrement) >>>
+    0;
+  const dynamicShift = (state >>> PCG_RANDOM_CONSTANTS.stateShift) + 4;
+  const word = Math.imul(
+    ((state >>> dynamicShift) ^ state) >>> 0,
+    PCG_RANDOM_CONSTANTS.outputMultiplier,
+  );
+  return ((word >>> PCG_RANDOM_CONSTANTS.outputShift) ^ word) >>> 0;
+}
+
+export function pcgRandomFloat(
+  particleIndex: number,
+  emitterSeed: number,
+  moduleSlot: number,
+): number {
+  const mixedInput =
+    (Math.imul(particleIndex >>> 0, PCG_RANDOM_CONSTANTS.particleIndexMix) ^
+      Math.imul(emitterSeed >>> 0, PCG_RANDOM_CONSTANTS.emitterSeedMix) ^
+      moduleSlotSalt(moduleSlot)) >>>
+    0;
+  return pcgHashUint32(mixedInput) * PCG_RANDOM_CONSTANTS.uint32ToUnitFloat;
+}
+
+/** Builds the PCG operations on Three.js TSL-compatible uint nodes without importing Three.js. */
+export function pcgRandomFloatNode<
+  FloatNode extends TslPcgFloatNode<FloatNode>,
+  UintNode extends TslPcgUintNode<UintNode, FloatNode>,
+>(particleIndex: UintNode, emitterSeed: UintNode, moduleSlot: number): FloatNode {
+  const mixedInput = particleIndex
+    .mul(PCG_RANDOM_CONSTANTS.particleIndexMix)
+    .bitXor(emitterSeed.mul(PCG_RANDOM_CONSTANTS.emitterSeedMix))
+    .bitXor(moduleSlotSalt(moduleSlot));
+  const state = mixedInput
+    .mul(PCG_RANDOM_CONSTANTS.stateMultiplier)
+    .add(PCG_RANDOM_CONSTANTS.stateIncrement);
+  const word = state
+    .shiftRight(
+      state.shiftRight(PCG_RANDOM_CONSTANTS.stateShift).add(PCG_RANDOM_CONSTANTS.stateShiftOffset),
+    )
+    .bitXor(state)
+    .mul(PCG_RANDOM_CONSTANTS.outputMultiplier);
+  return word
+    .shiftRight(PCG_RANDOM_CONSTANTS.outputShift)
+    .bitXor(word)
+    .toFloat()
+    .mul(PCG_RANDOM_CONSTANTS.uint32ToUnitFloat);
+}

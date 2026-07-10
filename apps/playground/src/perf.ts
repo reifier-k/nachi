@@ -78,6 +78,8 @@ export type PerformanceMonitorOptions = {
 //   heap:{status,usedBytes,totalBytes,limitBytes,reason},
 //   renderer:{drawCalls,renderCalls,computeCalls,triangles,points,lines} }
 // Numeric metrics always carry {status,value,reason}; unavailable values are null, never silent 0.
+// renderer.computeCalls is Three.js's current-frame counter. Three resets it at frame boundaries,
+// so headless spike-compute can publish 0 after submitted compute work has already been reset.
 export class PerformanceMonitor {
   readonly #renderer: THREE.WebGPURenderer;
   readonly #options: Required<PerformanceMonitorOptions>;

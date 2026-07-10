@@ -229,6 +229,13 @@ try {
     const noFadePng = await page.screenshot({ path: comparisonPath, type: 'png' });
     depthFadeComparison = await page.evaluate(
       async ({ fadeSource, noFadeSource }) => {
+        // spike-depth publishes the calibrated source of truth used by both comparison paths.
+        const partialVisibilityThreshold = Number(
+          document.documentElement.dataset.depthFadePartialVisibilityThreshold,
+        );
+        if (!Number.isFinite(partialVisibilityThreshold)) {
+          throw new Error('Missing depth-fade partial-visibility threshold.');
+        }
         const decode = async (source) => {
           const image = new Image();
           image.src = source;
@@ -278,7 +285,7 @@ try {
 
         const meanAbsoluteDifference = totalDifference / pixelCount;
         const changedPixelRatio = changedPixels / pixelCount;
-        const fadeOnPartiallyVisible = changedPixelRatio < 0.35;
+        const fadeOnPartiallyVisible = changedPixelRatio < partialVisibilityThreshold;
         return {
           changedPixelRatio: Number(changedPixelRatio.toFixed(5)),
           comparisonPath: null,
