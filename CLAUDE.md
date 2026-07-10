@@ -4,7 +4,7 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 
 ## Repository layout
 
-- `packages/core`: public `@vfx/core` API types and future compiler/runtime.
+- `packages/core`: public `@nachi/core` API types and future compiler/runtime.
 - `apps/playground`: Vite/TypeScript playground plus compute and depth spikes.
 - `tools`: Playwright-based WebGPU probes, spike collection, and screenshots.
 - `docs/rfc`: normative design RFCs; keep implementation and RFC terminology aligned.
