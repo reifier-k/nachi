@@ -1,8 +1,11 @@
 # dependencies
 node_modules/
+.pnpm-store/
 
 # build outputs
 dist/
+build/
+.vite/
 *.tsbuildinfo
 
 # test artifacts
@@ -10,6 +13,7 @@ coverage/
 test-results/
 playwright-report/
 __screenshots__/*-actual.png
+artifacts/
 
 # env / local
 .env

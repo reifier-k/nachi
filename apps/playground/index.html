@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#050813" />
+    <link rel="icon" href="data:," />
+    <title>VFX Playground</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="hud" aria-label="Renderer statistics">
+        <p class="eyebrow">@vfx/playground</p>
+        <h1>TSL Render Spike</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing…</dd>
+          </div>
+          <div>
+            <dt>FPS</dt>
+            <dd id="fps-value">--</dd>
+          </div>
+          <div>
+            <dt>Frame</dt>
+            <dd id="frame-value">-- ms</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <div id="scene" aria-label="Animated three.js scene"></div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

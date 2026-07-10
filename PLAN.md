@@ -153,6 +153,8 @@ apps/
   - `navigator.gpu` は **Secure Context のみ** — テストは必ず localhost URL 経由(`about:blank` / `data:` では undefined になる)
   - launch は `channel: 'chromium'`(フルChromiumの新ヘッドレス)+ `--enable-unsafe-webgpu`。headless shell は使わない
   - lavapipe は選択されず SwiftShader にフォールバックする(どちらもCPUで実用差なし)
+  - **ヘッドレスWebGPUはコンピュート/readbackのみ可。canvas提示は不可**(初回present直後にデバイス破棄、2026-07-10にthree.js抜きの素WebGPUで切り分け済み)。スクリーンショット回帰は `forceWebGL: true`(WebGL2バックエンド)で行う — TSLは両バックエンドにコンパイルされるため同一シーンで検証可能。WebGPUバックエンドの目視はWindows実GPU層で実施
+- **Codexサンドボックスの制約(実測)**:ネットワーク不可(pnpm install不可)・localhostリッスン不可(devサーバ/プローブ実行不可)。ローカルバイナリ実行は可(node_modules導入済みなら typecheck/lint/test は実行可能)。インストールとブラウザ検証は統括の検収工程で実施する
 - **MCP**:`.mcp.json` に Playwright MCP を設定(ブラウザ操作・コンソール読取・スクリーンショット)。初回セッションで承認が必要
 
 ## セッションプロトコル(/goal 運用)

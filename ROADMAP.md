@@ -63,15 +63,15 @@
 
 ## M0 — 基盤とスパイク 🚧
 
-- [ ] リポジトリ初期化:git init、pnpmモノレポ、TypeScript strict、vitest、ESLint/Prettier、CI雛形
-- [ ] playground雛形(Vite + three.js WebGPURenderer + tweakpane)
+- [x] リポジトリ初期化:git init、pnpmモノレポ、TypeScript strict、vitest、ESLint/Prettier、CI雛形
+- [x] playground雛形(Vite + three.js WebGPURenderer + tweakpane)— TSLマテリアル、`?backend=webgl`切替、device.lost監視HUD付き
 - [ ] **API RFC**:理想のAPIを型定義+README-drivenで書き切る(`docs/rfc/001-api.md`)。実装より先に型を固める
 - [ ] スパイク1:TSLコンピュートで10万パーティクル(ストレージバッファ、instanced描画)
 - [ ] スパイク2:drawIndirect / dispatchIndirect の可否と生存数駆動描画
 - [ ] スパイク3:WebGL2バックエンドでの同コードの動作範囲実測(アトミック・间接描画の制約を文書化)
 - [ ] スパイク4:深度テクスチャアクセス(ソフトパーティクル)とTSLポストパイプラインの共存確認
 - [ ] パフォーマンス計測ハーネス(FPS/フレーム時間/VRAMをplaygroundに常設)
-- [ ] 検証ハーネス:Playwrightをリポジトリに導入し、WebGPUプローブ(swiftshader/lavapipe両系統)とスクリーンショット取得ユーティリティを `tools/` に整備。ヘッドレスWebGPUの動作可否と採用アダプタをPLAN.md開発環境セクションに記録
+- [x] 検証ハーネス:Playwrightをリポジトリに導入し、WebGPUプローブ(`--adapter swiftshader|vulkan|default`)とスクリーンショット取得ユーティリティ(診断収集付き)を `tools/` に整備。ヘッドレスWebGPUは「コンピュート可・canvas提示不可」と実測し、スクリーンショット回帰はWebGL2バックエンドで行う方針をPLAN.mdに記録
 - [ ] ライブラリ名の決定、LICENSE、CLAUDE.md作成(ビルド・テストコマンド記載)
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
@@ -221,3 +221,4 @@
 |---|---|
 | 2026-07-10 | エコシステム調査、計画策定、PLAN.md/ROADMAP.md作成 |
 | 2026-07-10 | 環境セットアップ:Playwright+Chromium導入、ヘッドレスWebGPU動作確認(SwiftShader・compute成功・要localhost)、監査プロトコル+FA新設、.mcp.json(Playwright MCP)作成 |
+| 2026-07-10 | M0項目1/2/9完了:雛形実装(Codex, thread 019f4b46)→検収→Claudeレビュー(FAIL: tweakpane型崩壊+ヘッドレスcanvas提示不可)→Codex修正→再レビューPASS→コミット。持ち越しNIT2件(probe引数検証のObject.hasOwn化、screenshotのバックエンド一致検証)は次回委譲に含める。Codexジョブランナーが2回ともゾンビ化(実体turnは完走)→rolloutログ直接監視で運用 |
