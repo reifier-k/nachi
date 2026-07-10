@@ -1,13 +1,14 @@
 import {
   compileEmitter,
   type BuiltEmitterKernels,
+  type CompiledSpawnModule,
   type CompiledEmitterProgram,
   type KernelComputeNode,
   type KernelTslAdapter,
   type KernelUniformNode,
 } from './compiler.js';
 import { VfxDiagnosticError } from './diagnostics.js';
-import { hashModuleLabel } from './random.js';
+import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
 import type {
   AttributeType,
   DefinitionParameterValue,
@@ -39,9 +40,15 @@ export interface VfxDeviceLossInfo {
 export interface VfxRuntimeRenderer {
   readonly deviceLost?: Promise<VfxDeviceLossInfo>;
   readonly kernelAdapter: KernelTslAdapter;
+  readStorage?(storage: BuiltEmitterKernels['aliveCount']): Promise<ArrayBuffer>;
   releaseKernels?(kernels: BuiltEmitterKernels): void;
   setUniformValue?(uniform: KernelUniformNode, path: ParameterPath, value: unknown): void;
+  setInstanceCount?(kernels: BuiltEmitterKernels, count: number): void;
   submitCompute(kernel: KernelComputeNode): Promise<void> | void;
+  submitComputeIndirect?(
+    kernel: KernelComputeNode,
+    indirectResource: unknown,
+  ): Promise<void> | void;
 }
 
 export interface VfxFixedTimeStepOptions {
@@ -50,6 +57,8 @@ export interface VfxFixedTimeStepOptions {
 }
 
 export interface VfxSystemOptions {
+  /** Read exact GPU alive count every N compactions; omitted keeps conservative draining. */
+  readonly aliveCountReadbackInterval?: number;
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
   readonly now?: () => number;
   readonly prewarmStepSeconds?: number;
@@ -341,6 +350,7 @@ type AdvanceContext = {
 };
 
 export interface VfxEmitterRuntimeView {
+  readonly aliveCount: number | undefined;
   readonly definition: EmitterDefinition;
   readonly kernels: BuiltEmitterKernels;
   readonly lifecycleState: EmitterLifecycleState;
@@ -390,10 +400,15 @@ function splitDuration(duration: number, stepSeconds: number): number[] {
   return steps;
 }
 
-function maximumLifetime(definition: EmitterDefinition): number {
+function maximumLifetime(program: CompiledEmitterProgram): number {
   let maximum = 0;
-  for (const module of definition.init ?? []) {
-    if (module.type !== 'core/lifetime') continue;
+  const writers = program.kernels.init.modules.filter(
+    (module) => module.source === 'author' && module.access.writes.includes('Particles.lifetime'),
+  );
+  // An undeclared lifetime means an emitter may remain alive indefinitely. Likewise, an
+  // arbitrary lifetime writer cannot be bounded safely from core/lifetime's known config.
+  if (writers.length === 0 || writers.some(({ type }) => type !== 'core/lifetime')) return Infinity;
+  for (const module of writers) {
     const input = (module.config as { value?: unknown }).value;
     if (typeof input === 'number' && Number.isFinite(input)) {
       maximum = Math.max(maximum, input);
@@ -404,15 +419,9 @@ function maximumLifetime(definition: EmitterDefinition): number {
       maximum = Math.max(maximum, input.max);
       continue;
     }
-    if (input.kind === 'parameter' && 'path' in input && typeof input.path === 'string') {
-      const parameters = definition.parameters as ParameterSchema | undefined;
-      const declared = parameters?.[input.path as ParameterPath];
-      const value = declared?.default ?? ('fallback' in input ? input.fallback : undefined);
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        maximum = Math.max(maximum, value);
-        continue;
-      }
-    }
+    // Parameter generators may be overridden at spawn time or through a mutable User.* path,
+    // so their upper bound is not statically provable from the emitter definition.
+    if (input.kind === 'parameter') return Infinity;
     return Infinity;
   }
   return Math.max(0, maximum);
@@ -506,15 +515,29 @@ function isParameterValue(type: AttributeType, value: unknown): boolean {
   return true;
 }
 
+type SpawnAccumulator = { burstCycles: number; remainder: number };
+
 class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly controller: EmitterLifecycleController;
   readonly kernels: BuiltEmitterKernels;
   readonly program: CompiledEmitterProgram;
+  readonly #aliveCountReadbackInterval: number | undefined;
   readonly #maxLifetime: number;
+  readonly #onDiagnostic: (diagnostic: VfxDiagnostic) => void;
+  readonly #parameters: Record<string, unknown>;
   readonly #renderer: VfxRuntimeRenderer;
+  readonly #seed: number;
+  readonly #spawnAccumulators = new Map<string, SpawnAccumulator>();
+  #compactSequence = 0;
   #drainRemaining = 0;
   #emitterAge = 0;
+  #emissionCompletedSequence: number | undefined;
+  #exactAliveCount: number | undefined;
+  #exactAliveSequence: number | undefined;
+  #initialized = false;
+  #pendingDistance = 0;
   #spawnGeneration = 0;
+  #transform: readonly number[];
 
   constructor(
     readonly definition: EmitterDefinition,
@@ -524,17 +547,28 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     transform: readonly number[],
     parameters: Readonly<Record<string, unknown>>,
     maxLifetime: number,
+    aliveCountReadbackInterval: number | undefined,
+    onDiagnostic: (diagnostic: VfxDiagnostic) => void,
   ) {
     this.program = program;
     this.#renderer = renderer;
+    this.#seed = seed >>> 0;
+    this.#transform = transform;
+    this.#parameters = { ...parameters };
     this.#maxLifetime = maxLifetime;
+    this.#aliveCountReadbackInterval = aliveCountReadbackInterval;
+    this.#onDiagnostic = onDiagnostic;
     this.controller = new EmitterLifecycleController(definition.lifecycle);
     this.kernels = program.buildKernels(renderer.kernelAdapter);
-    setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', seed >>> 0);
+    setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', transform);
     for (const [path, value] of Object.entries(parameters)) {
       setUniform(renderer, this.kernels.uniforms, path as ParameterPath, value);
     }
+  }
+
+  get aliveCount(): number | undefined {
+    return this.#exactAliveCount;
   }
 
   get lifecycleState(): EmitterLifecycleState {
@@ -550,11 +584,30 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   }
 
   get complete(): boolean {
-    return this.controller.state === 'completed' && this.#drainRemaining <= TIME_EPSILON;
+    if (this.controller.state !== 'completed') return false;
+    if (this.#aliveCountReadbackInterval !== undefined && this.#renderer.readStorage) {
+      return (
+        this.#exactAliveCount === 0 &&
+        this.#exactAliveSequence !== undefined &&
+        this.#emissionCompletedSequence !== undefined &&
+        this.#exactAliveSequence >= this.#emissionCompletedSequence
+      );
+    }
+    return this.#drainRemaining <= TIME_EPSILON;
   }
 
   setParameter(path: ParameterPath, value: unknown): void {
+    this.#parameters[path] = value;
     setUniform(this.#renderer, this.kernels.uniforms, path, value);
+  }
+
+  setTransform(transform: readonly number[]): void {
+    const dx = (transform[12] ?? 0) - (this.#transform[12] ?? 0);
+    const dy = (transform[13] ?? 0) - (this.#transform[13] ?? 0);
+    const dz = (transform[14] ?? 0) - (this.#transform[14] ?? 0);
+    this.#pendingDistance += Math.hypot(dx, dy, dz);
+    this.#transform = transform;
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.transform', transform);
   }
 
   release(): void {
@@ -562,12 +615,19 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   }
 
   async advance(deltaSeconds: number, context: AdvanceContext): Promise<void> {
+    if (!this.#initialized) {
+      await this.#renderer.submitCompute(this.kernels.initialize);
+      this.#initialized = true;
+      await this.#compactAlive();
+    }
     const commands = this.controller.advance(deltaSeconds);
     for (const command of commands) {
       if (command.kind === 'activate') {
         this.#spawnGeneration = command.spawnGeneration;
         this.#emitterAge = 0;
         this.#drainRemaining = 0;
+        this.#emissionCompletedSequence = undefined;
+        this.#resetSpawnAccumulators();
         this.#setFrameUniforms(0, context, command.loopIndex);
         setUniform(
           this.#renderer,
@@ -575,13 +635,11 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           'Emitter.spawnGeneration',
           command.spawnGeneration,
         );
-        // M2 batch 1 uses core/burst as the activation trigger. Without the deferred GPU
-        // allocator/free-list, the compiled init dispatch still covers the resolved capacity.
-        await this.#renderer.submitCompute(this.kernels.init);
+        await this.#dispatchSpawn(this.#activationSpawnCount());
+        await this.#compactAlive();
       } else if (command.kind === 'complete') {
-        // M2 v1 has no alive-count readback. Drain conservatively for the longest declared
-        // lifetime after emission completes; later free-list work will replace this estimate.
         this.#drainRemaining = this.#maxLifetime;
+        this.#emissionCompletedSequence = this.#compactSequence;
       } else {
         const steps = command.prewarm
           ? splitDuration(command.deltaSeconds, context.prewarmStepSeconds)
@@ -598,6 +656,10 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
             command.loopIndex,
             command.prewarm ? step : context.systemDelta,
           );
+          if (command.phase === 'active') {
+            await this.#dispatchSpawn(this.#stepSpawnCount(step, this.#pendingDistance));
+            this.#pendingDistance = 0;
+          }
           await this.#renderer.submitCompute(this.kernels.update);
           this.#emitterAge += step;
           setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.age', this.#emitterAge);
@@ -605,8 +667,172 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           if (command.phase === 'drain') {
             this.#drainRemaining = Math.max(0, this.#drainRemaining - step);
           }
+          await this.#compactAlive();
         }
       }
+    }
+  }
+
+  #activationSpawnCount(): number {
+    let count = 0;
+    for (const module of this.program.spawn.modules) {
+      if (module.type !== 'core/burst') continue;
+      count += this.#burstCount(module);
+      const accumulator = this.#accumulator(module);
+      accumulator.burstCycles = 1;
+    }
+    return count;
+  }
+
+  #stepSpawnCount(deltaSeconds: number, distance: number): number {
+    let count = 0;
+    const nextAge = this.#emitterAge + deltaSeconds;
+    for (const module of this.program.spawn.modules) {
+      const accumulator = this.#accumulator(module);
+      if (module.type === 'core/rate') {
+        const rate = (module.config as { rate: number }).rate;
+        const exact = accumulator.remainder + rate * deltaSeconds;
+        const emitted = Math.floor(exact + TIME_EPSILON);
+        accumulator.remainder = exact - emitted;
+        count += emitted;
+      } else if (module.type === 'core/per-distance') {
+        const rate = (module.config as { rate: number }).rate;
+        const exact = accumulator.remainder + rate * distance;
+        const emitted = Math.floor(exact + TIME_EPSILON);
+        accumulator.remainder = exact - emitted;
+        count += emitted;
+      } else if (module.type === 'core/burst') {
+        const config = module.config as { cycles?: number; interval?: number };
+        const cycles = config.cycles ?? 1;
+        const interval = config.interval ?? Infinity;
+        while (
+          accumulator.burstCycles < cycles &&
+          accumulator.burstCycles * interval <= nextAge + TIME_EPSILON
+        ) {
+          count += this.#burstCount(module);
+          accumulator.burstCycles += 1;
+        }
+      }
+    }
+    return count;
+  }
+
+  #burstCount(module: CompiledSpawnModule): number {
+    const input = (module.config as { count: unknown }).count;
+    let value = 0;
+    if (typeof input === 'number') value = input;
+    else if (typeof input === 'object' && input !== null && 'kind' in input) {
+      if (input.kind === 'parameter' && 'path' in input && typeof input.path === 'string') {
+        const resolved = this.#parameters[input.path];
+        const fallback = 'fallback' in input ? input.fallback : undefined;
+        value =
+          typeof resolved === 'number' ? resolved : typeof fallback === 'number' ? fallback : 0;
+      } else if (
+        input.kind === 'range' &&
+        'min' in input &&
+        'max' in input &&
+        typeof input.min === 'number' &&
+        typeof input.max === 'number'
+      ) {
+        const random = pcgRandomFloat(
+          0,
+          this.#seed,
+          resolveRandomSampleSlot(module.slot),
+          this.#spawnGeneration,
+        );
+        value = input.min + (input.max - input.min) * random;
+      }
+    }
+    return Math.max(0, Math.floor(value));
+  }
+
+  #accumulator(module: CompiledSpawnModule): SpawnAccumulator {
+    let value = this.#spawnAccumulators.get(module.path);
+    if (!value) {
+      value = { burstCycles: 0, remainder: 0 };
+      this.#spawnAccumulators.set(module.path, value);
+    }
+    return value;
+  }
+
+  #resetSpawnAccumulators(): void {
+    this.#spawnAccumulators.clear();
+  }
+
+  async #dispatchSpawn(requestedCount: number): Promise<void> {
+    if (requestedCount <= 0) return;
+    // Never encode more spawn invocations than physical slots. The GPU overflow counter handles
+    // lower free-list availability; this clamp also makes malformed/extreme requests safe.
+    const dispatchCount = Math.min(requestedCount, this.definition.capacity);
+    const cpuOverflow = Math.max(0, requestedCount - dispatchCount);
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.spawnCount', dispatchCount);
+    if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
+      const { finalizeSpawn, prepareSpawn, spawnDispatch } = this.kernels;
+      if (
+        !prepareSpawn ||
+        !finalizeSpawn ||
+        !spawnDispatch ||
+        !this.#renderer.submitComputeIndirect
+      ) {
+        throw new Error('WebGPU lifecycle kernels require indirect compute submission.');
+      }
+      await this.#renderer.submitCompute(prepareSpawn);
+      await this.#renderer.submitComputeIndirect(
+        this.kernels.spawn,
+        spawnDispatch.indirectResource,
+      );
+      await this.#renderer.submitCompute(finalizeSpawn);
+      if (this.#renderer.readStorage) {
+        const counters = new Uint32Array(
+          await this.#renderer.readStorage(this.kernels.spawnOverflow),
+        );
+        const overflow = (counters[this.kernels.counterOffsets.spawnOverflow] ?? 0) + cpuOverflow;
+        if (overflow > 0) this.#reportOverflow(requestedCount, overflow);
+      } else if (cpuOverflow > 0) {
+        this.#reportOverflow(requestedCount, cpuOverflow);
+      }
+    } else {
+      await this.#renderer.submitCompute(this.kernels.spawn);
+      if (cpuOverflow > 0) this.#reportOverflow(requestedCount, cpuOverflow);
+    }
+  }
+
+  #reportOverflow(requestedCount: number, overflow: number): void {
+    this.#onDiagnostic({
+      code: 'NACHI_SPAWN_CAPACITY_EXCEEDED',
+      message: `Spawn request ${requestedCount} exceeded available capacity; ${overflow} particle(s) were safely dropped.`,
+      phase: 'runtime',
+      severity: 'warning',
+    });
+  }
+
+  async #compactAlive(): Promise<void> {
+    this.#compactSequence += 1;
+    if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
+      const { compact, finalizeIndirect, resetAliveCount } = this.kernels;
+      if (!compact || !finalizeIndirect || !resetAliveCount) {
+        throw new Error('WebGPU lifecycle compaction kernels are missing.');
+      }
+      await this.#renderer.submitCompute(resetAliveCount);
+      await this.#renderer.submitCompute(compact);
+      await this.#renderer.submitCompute(finalizeIndirect);
+      if (
+        this.#renderer.readStorage &&
+        this.#aliveCountReadbackInterval !== undefined &&
+        this.#compactSequence % this.#aliveCountReadbackInterval === 0
+      ) {
+        const counters = new Uint32Array(await this.#renderer.readStorage(this.kernels.aliveCount));
+        this.#exactAliveCount = counters[this.kernels.counterOffsets.aliveCount] ?? 0;
+        this.#exactAliveSequence = this.#compactSequence;
+      }
+    } else if (this.#renderer.readStorage) {
+      const alive = this.kernels.storages.alive;
+      if (!alive) return;
+      const flags = new Uint32Array(await this.#renderer.readStorage(alive));
+      const count = flags.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
+      this.#exactAliveCount = count;
+      this.#exactAliveSequence = this.#compactSequence;
+      this.#renderer.setInstanceCount?.(this.kernels, count);
     }
   }
 
@@ -668,10 +894,12 @@ export class VfxEffectInstance<
   }
 
   getEmitter(key: string): VfxEmitterRuntimeView | undefined {
+    this.#assertNotReleased();
     return this.#emitters.get(key);
   }
 
   applyHitStop(durationMs: number, timeScale = 0): void {
+    this.#assertNotReleased();
     if (this.#state !== 'active') return;
     this.clock.applyHitStop(durationMs, timeScale);
   }
@@ -688,6 +916,7 @@ export class VfxEffectInstance<
     path: Path,
     value: DefinitionParameterValue<Definition, Path>,
   ): void {
+    this.#assertNotReleased();
     const definition = this.#parameterDefinitions[path as ParameterPath];
     if (!definition) {
       throw new VfxDiagnosticError([
@@ -719,10 +948,18 @@ export class VfxEffectInstance<
   }
 
   setTimeScale(timeScale: number): void {
+    this.#assertNotReleased();
     this.clock.setTimeScale(timeScale);
   }
 
+  setTransform(position: PositionInput, rotation?: RotationInput): void {
+    this.#assertNotReleased();
+    const transform = transformMatrix(position, rotation);
+    for (const emitter of this.#emitters.values()) emitter.setTransform(transform);
+  }
+
   stop(): void {
+    this.#assertNotReleased();
     if (this.#state === 'active') this.#state = 'stopped';
   }
 
@@ -730,6 +967,10 @@ export class VfxEffectInstance<
     if (this.#state === 'released') return;
     this.#diagnostics.push(diagnostic);
     this.#state = 'error';
+  }
+
+  recordDiagnostic(diagnostic: VfxDiagnostic): void {
+    if (this.#state !== 'released') this.#diagnostics.push(diagnostic);
   }
 
   async initialize(systemTime: number, prewarmStepSeconds: number): Promise<void> {
@@ -763,6 +1004,16 @@ export class VfxEffectInstance<
       this.#state = 'complete';
     }
   }
+
+  #assertNotReleased(): void {
+    if (this.#state !== 'released') return;
+    throw new VfxDiagnosticError([
+      runtimeDiagnostic(
+        'NACHI_INSTANCE_RELEASED',
+        `Effect instance "${this.id}" has been released and can no longer be used.`,
+      ),
+    ]);
+  }
 }
 
 function effectParameters(
@@ -778,12 +1029,14 @@ function effectParameters(
 }
 
 export class VFXSystem<Renderer = unknown, Scene = unknown> {
+  readonly #aliveCountReadbackInterval: number | undefined;
   readonly #compiledEffects = new WeakMap<RuntimeEffectDefinition, CompiledEffect>();
   readonly #fixedStep: FixedStepAccumulator | undefined;
   readonly #instances = new Map<string, VfxEffectInstance<RuntimeEffectDefinition>>();
   readonly #now: () => number;
   readonly #prewarmStepSeconds: number;
   #compilationCount = 0;
+  #deviceLossDiagnostic?: VfxDiagnostic;
   #instanceSequence = 0;
   #lastTimestamp?: number;
   #systemTime = 0;
@@ -794,6 +1047,14 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     readonly scene?: Scene,
     options: VfxSystemOptions = {},
   ) {
+    this.#aliveCountReadbackInterval = options.aliveCountReadbackInterval;
+    if (
+      this.#aliveCountReadbackInterval !== undefined &&
+      (!Number.isSafeInteger(this.#aliveCountReadbackInterval) ||
+        this.#aliveCountReadbackInterval <= 0)
+    ) {
+      throw new RangeError('aliveCountReadbackInterval must be a positive safe integer.');
+    }
     this.#fixedStep = options.fixedTimeStep
       ? new FixedStepAccumulator(options.fixedTimeStep)
       : undefined;
@@ -850,6 +1111,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     );
     this.#instances.set(id, instance);
 
+    if (this.#deviceLossDiagnostic) {
+      instance.markError(this.#deviceLossDiagnostic);
+      return instance;
+    }
+
     try {
       const runtimeRenderer = asRuntimeRenderer(this.renderer);
       if (!runtimeRenderer) {
@@ -873,6 +1139,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
             transform,
             parameters,
             entry.maxLifetime,
+            this.#aliveCountReadbackInterval,
+            (diagnostic) => instance.recordDiagnostic(diagnostic),
           ),
         );
       }
@@ -921,26 +1189,16 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const emitters = Object.entries(definition.elements)
       .filter((entry): entry is [string, EmitterDefinition] => entry[1].kind === 'emitter')
       .map(([key, emitter]) => {
-        const spawnModules = Array.isArray(emitter.spawn) ? emitter.spawn : [emitter.spawn];
-        const unsupported = spawnModules.find((module) => module.type !== 'core/burst');
-        if (unsupported) {
-          throw new VfxDiagnosticError([
-            {
-              code: 'NACHI_M2_SPAWN_UNSUPPORTED',
-              message: `M2 runtime supports core/burst only; received ${unsupported.type}.`,
-              path: `elements.${key}.spawn`,
-              phase: 'compile',
-              severity: 'error',
-            },
-          ]);
-        }
         return {
           definition: emitter,
           key,
-          maxLifetime: maximumLifetime(emitter),
           program: compileEmitter(emitter),
         };
-      });
+      })
+      .map((entry) => ({
+        ...entry,
+        maxLifetime: maximumLifetime(entry.program),
+      }));
     const compiled = { emitters };
     this.#compiledEffects.set(definition, compiled);
     this.#compilationCount += 1;
@@ -982,6 +1240,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       'NACHI_DEVICE_LOST',
       `GPU device was lost (${reason})${message}`,
     );
+    this.#deviceLossDiagnostic = diagnostic;
     for (const instance of this.#instances.values()) instance.markError(diagnostic);
   }
 }

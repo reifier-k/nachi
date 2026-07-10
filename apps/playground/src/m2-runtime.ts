@@ -4,10 +4,12 @@ import {
   defineEffect,
   defineEmitter,
   lifetime,
+  perDistance,
   range,
+  rate,
   velocityCone,
 } from '@nachi/core';
-import type { ModuleDefinition, VfxEmitterRuntimeView } from '@nachi/core';
+import type { ModuleDefinition, SpawnModule, VfxEmitterRuntimeView } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -20,7 +22,6 @@ import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';
 
 const FIXED_DELTA_SECONDS = 1 / 60;
-const PREWARM_FRAMES = 4;
 
 type RendererBackendLike = {
   device?: {
@@ -29,6 +30,12 @@ type RendererBackendLike = {
     lost: Promise<{ message?: string; reason?: string }>;
   };
   isWebGPUBackend?: boolean;
+};
+
+type RuntimeInstance = {
+  readonly diagnostics: readonly { code: string }[];
+  getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+  setTransform(position: readonly [number, number, number]): void;
 };
 
 const root = document.documentElement;
@@ -63,43 +70,85 @@ const computeRender: ModuleDefinition<'render', Record<string, never>> = {
   version: 1,
 };
 
-function movingEffect(
-  options: {
-    readonly duration?: number;
-    readonly loopCount?: number;
-    readonly prewarm?: number;
-    readonly randomSpeed?: boolean;
-  } = {},
-) {
-  const emitter = defineEmitter({
-    capacity: 1,
-    init: [
-      velocityCone({
-        angle: 0,
-        direction: [1, 0, 0],
-        speed: options.randomSpeed ? range(1, 2) : 1,
+function smokeEffect(options: {
+  readonly capacity: number;
+  readonly duration?: number;
+  readonly lifetimeSeconds?: number;
+  readonly loopCount?: number;
+  readonly randomVelocity?: boolean;
+  readonly spawn: SpawnModule | readonly SpawnModule[];
+}) {
+  return defineEffect({
+    elements: {
+      particles: defineEmitter({
+        capacity: options.capacity,
+        init: [
+          ...(options.randomVelocity
+            ? [
+                velocityCone({
+                  angle: 0,
+                  direction: [1, 0, 0],
+                  speed: range(1, 2),
+                }),
+              ]
+            : []),
+          lifetime(options.lifetimeSeconds ?? 10),
+        ],
+        integration: 'none',
+        lifecycle: {
+          duration: options.duration ?? 1,
+          ...(options.loopCount === undefined ? {} : { loopCount: options.loopCount }),
+        },
+        render: computeRender,
+        spawn: options.spawn,
       }),
-      lifetime(10),
-    ],
-    lifecycle: {
-      duration: options.duration ?? 1,
-      ...(options.loopCount === undefined ? {} : { loopCount: options.loopCount }),
-      ...(options.prewarm === undefined ? {} : { prewarm: options.prewarm }),
     },
-    render: computeRender,
-    spawn: burst({ count: 1 }),
   });
-  return defineEffect({ elements: { particles: emitter } });
 }
 
-async function storageValues(
+function emitter(instance: RuntimeInstance): VfxEmitterRuntimeView {
+  const value = instance.getEmitter('particles');
+  if (!value) throw new Error('M2 runtime emitter is missing.');
+  return value;
+}
+
+async function uintStorage(
   renderer: THREE.WebGPURenderer,
-  instance: { getEmitter(key: string): VfxEmitterRuntimeView | undefined },
-  name: 'position' | 'velocity',
+  instance: RuntimeInstance,
+  name: 'alive' | 'spawnGeneration',
+): Promise<Uint32Array> {
+  const storage = emitter(instance).kernels.storages[name];
+  if (!storage) throw new Error(`M2 runtime emitter storage "${name}" is missing.`);
+  return (await readStorage(renderer, storage, 'uint')) as Uint32Array;
+}
+
+async function floatStorage(
+  renderer: THREE.WebGPURenderer,
+  instance: RuntimeInstance,
+  name: 'velocity',
 ): Promise<Float32Array> {
-  const storage = instance.getEmitter('particles')?.kernels.storages[name];
+  const storage = emitter(instance).kernels.storages[name];
   if (!storage) throw new Error(`M2 runtime emitter storage "${name}" is missing.`);
   return (await readStorage(renderer, storage, 'float')) as Float32Array;
+}
+
+async function aliveCount(
+  renderer: THREE.WebGPURenderer,
+  instance: RuntimeInstance,
+): Promise<number> {
+  const kernels = emitter(instance).kernels;
+  const counters = (await readStorage(renderer, kernels.aliveCount, 'uint')) as Uint32Array;
+  return counters[kernels.counterOffsets.aliveCount] ?? 0;
+}
+
+async function indirectInstanceCount(
+  renderer: THREE.WebGPURenderer,
+  instance: RuntimeInstance,
+): Promise<number> {
+  const indirect = emitter(instance).kernels.drawIndirect;
+  if (!indirect) throw new Error('M2 draw-indirect arguments are missing.');
+  const data = await renderer.getArrayBufferAsync(indirect.indirectResource as never);
+  return new Uint32Array(data)[1] ?? 0;
 }
 
 function equalArrays(left: ArrayLike<number>, right: ArrayLike<number>): boolean {
@@ -108,15 +157,11 @@ function equalArrays(left: ArrayLike<number>, right: ArrayLike<number>): boolean
   );
 }
 
-function close(left: number, right: number, tolerance = 0.0002): boolean {
-  return Math.abs(left - right) <= tolerance;
-}
-
 async function runSmoke(): Promise<void> {
   if (requestedBackend === 'webgl') {
     const error =
-      'NACHI_M2_RUNTIME_WEBGPU_ONLY: The M2 runtime smoke is WebGPU-only while GPU allocation and indirect-draw gates remain pending.';
-    backendValue.textContent = 'WebGL2 (unsupported)';
+      'NACHI_M2_RUNTIME_WEBGPU_ONLY: GPU free-list smoke coverage requires WebGPU; WebGL2 uses the compiler-declared CPU alive-count fallback.';
+    backendValue.textContent = 'WebGL2 (fallback documented)';
     root.dataset.backend = 'WebGL2';
     root.dataset.rendererStatus = 'unsupported';
     root.dataset.spikeError = error;
@@ -138,16 +183,15 @@ async function runSmoke(): Promise<void> {
   }
   await renderer.init();
   const backend = renderer.backend as RendererBackendLike;
-  if (!backend.isWebGPUBackend)
-    throw new Error('M2 runtime smoke requires an active WebGPU backend.');
+  if (!backend.isWebGPUBackend) throw new Error('M2 runtime smoke requires WebGPU.');
   backendValue.textContent = 'WebGPU';
   root.dataset.backend = 'WebGPU';
   root.dataset.rendererStatus = 'ready';
 
   const storageBufferLimit = backend.device?.limits?.maxStorageBuffersPerShaderStage;
-  const linearFloat32Filtering = backend.device?.features?.has('float32-filterable') === true;
   const kernelAdapter = createThreeKernelAdapter({
-    linearFloat32Filtering,
+    backend: 'webgpu',
+    linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
     ...(storageBufferLimit === undefined
       ? {}
       : { maxStorageBuffersPerShaderStage: storageBufferLimit }),
@@ -158,92 +202,119 @@ async function runSmoke(): Promise<void> {
     mode: headless ? 'headless' : 'visual',
     page: 'm2-runtime',
   });
+  const systemOptions = {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
+  } as const;
 
   root.dataset.spikeStatus = 'running';
-  statusValue.textContent = 'Scheduling VFXSystem runtime scenarios…';
+  statusValue.textContent = 'Running M2 allocation, spawn, recycle, and indirect-draw scenarios…';
 
-  const movementSystem = new VFXSystem(runtimeRenderer, undefined, {
-    fixedTimeStep: { maxSubSteps: 8, stepSeconds: FIXED_DELTA_SECONDS },
-  });
-  const movementDefinition = movingEffect();
-  const normal = movementSystem.spawn(movementDefinition, { seed: 7 });
-  const paused = movementSystem.spawn(movementDefinition, { seed: 7, timeScale: 0 });
-  const fast = movementSystem.spawn(movementDefinition, { seed: 7, timeScale: 2 });
-  await movementSystem.update(0);
-  const normalInitial = await storageValues(renderer, normal, 'position');
-  const pausedInitial = await storageValues(renderer, paused, 'position');
-  const fastInitial = await storageValues(renderer, fast, 'position');
-  await movementSystem.update(FIXED_DELTA_SECONDS);
-  const normalFinal = await storageValues(renderer, normal, 'position');
-  const pausedFinal = await storageValues(renderer, paused, 'position');
-  const fastFinal = await storageValues(renderer, fast, 'position');
-  const normalAdvance = (normalFinal[0] ?? Number.NaN) - (normalInitial[0] ?? Number.NaN);
-  const fastAdvance = (fastFinal[0] ?? Number.NaN) - (fastInitial[0] ?? Number.NaN);
+  // 1. Rate: 30/s for one second must produce exactly 30 particles with fixed timesteps.
+  const rateSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const rateInstance = rateSystem.spawn(
+    smokeEffect({ capacity: 64, duration: 1, spawn: rate({ rate: 30 }) }),
+    { seed: 11 },
+  );
+  await rateSystem.update(0);
+  for (let frame = 0; frame < 60; frame += 1) await rateSystem.update(FIXED_DELTA_SECONDS);
+  const rateAlive = await aliveCount(renderer, rateInstance);
 
-  const loopSystem = new VFXSystem(runtimeRenderer, undefined, {
-    fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
-  });
-  const looped = loopSystem.spawn(
-    movingEffect({ duration: FIXED_DELTA_SECONDS, loopCount: 2, randomSpeed: true }),
+  // 2. A one-slot emitter must recycle the same index and advance its particle generation/RNG.
+  const recycleSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const recycled = recycleSystem.spawn(
+    smokeEffect({
+      capacity: 1,
+      duration: FIXED_DELTA_SECONDS * 2,
+      lifetimeSeconds: FIXED_DELTA_SECONDS,
+      loopCount: 2,
+      randomVelocity: true,
+      spawn: burst({ count: 1 }),
+    }),
     { seed: 19 },
   );
-  await loopSystem.update(0);
-  const firstGenerationVelocity = await storageValues(renderer, looped, 'velocity');
-  await loopSystem.update(FIXED_DELTA_SECONDS);
-  const secondGenerationVelocity = await storageValues(renderer, looped, 'velocity');
+  await recycleSystem.update(0);
+  const firstGeneration = await uintStorage(renderer, recycled, 'spawnGeneration');
+  const firstVelocity = await floatStorage(renderer, recycled, 'velocity');
+  await recycleSystem.update(FIXED_DELTA_SECONDS);
+  await recycleSystem.update(FIXED_DELTA_SECONDS);
+  const secondGeneration = await uintStorage(renderer, recycled, 'spawnGeneration');
+  const secondVelocity = await floatStorage(renderer, recycled, 'velocity');
 
-  const warmSystem = new VFXSystem(runtimeRenderer, undefined, {
-    fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
+  // 3. Per-distance: moving two units at four particles/unit must emit eight.
+  const distanceSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const distanceInstance = distanceSystem.spawn(
+    smokeEffect({ capacity: 16, spawn: perDistance({ rate: 4 }) }),
+    { seed: 23 },
+  );
+  await distanceSystem.update(0);
+  distanceInstance.setTransform([2, 0, 0]);
+  await distanceSystem.update(FIXED_DELTA_SECONDS);
+  const distanceAlive = await aliveCount(renderer, distanceInstance);
+
+  // 4/5. Atomic compaction count, alive flags, and indirect instanceCount must agree.
+  const distanceFlags = await uintStorage(renderer, distanceInstance, 'alive');
+  const actualAlive = distanceFlags.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
+  const indirectAlive = await indirectInstanceCount(renderer, distanceInstance);
+
+  // 6. Exhaustion clamps safely and publishes a stable warning diagnostic.
+  const overflowSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const overflowed = overflowSystem.spawn(
+    smokeEffect({ capacity: 2, duration: 0, spawn: burst({ count: 5 }) }),
+    { seed: 29 },
+  );
+  await overflowSystem.update(0);
+  const overflowAlive = await aliveCount(renderer, overflowed);
+
+  // 7. Identical seeds and schedules must produce bit-identical particle state.
+  const deterministicEffect = smokeEffect({
+    capacity: 4,
+    randomVelocity: true,
+    spawn: burst({ count: 4 }),
   });
-  const coldSystem = new VFXSystem(runtimeRenderer, undefined, {
-    fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
-  });
-  const warmed = warmSystem.spawn(movingEffect({ prewarm: PREWARM_FRAMES * FIXED_DELTA_SECONDS }), {
-    seed: 23,
-  });
-  const cold = coldSystem.spawn(movingEffect(), { seed: 23 });
-  await warmSystem.update(0);
-  await coldSystem.update(0);
-  for (let frame = 0; frame < PREWARM_FRAMES; frame += 1) {
-    await coldSystem.update(FIXED_DELTA_SECONDS);
-  }
-  const warmedPosition = await storageValues(renderer, warmed, 'position');
-  const coldPosition = await storageValues(renderer, cold, 'position');
+  const deterministicSystemA = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const deterministicSystemB = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const deterministicA = deterministicSystemA.spawn(deterministicEffect, { seed: 31 });
+  const deterministicB = deterministicSystemB.spawn(deterministicEffect, { seed: 31 });
+  await deterministicSystemA.update(0);
+  await deterministicSystemB.update(0);
+  const deterministicVelocityA = await floatStorage(renderer, deterministicA, 'velocity');
+  const deterministicVelocityB = await floatStorage(renderer, deterministicB, 'velocity');
+  const deterministicGenerationA = await uintStorage(renderer, deterministicA, 'spawnGeneration');
+  const deterministicGenerationB = await uintStorage(renderer, deterministicB, 'spawnGeneration');
 
   const validation = {
-    compileCacheOk: movementSystem.compilationCount === 1,
-    durationLoopGenerationOk:
-      looped.getEmitter('particles')?.spawnGeneration === 1 &&
-      !equalArrays(firstGenerationVelocity, secondGenerationVelocity),
-    prewarmDeterministic: equalArrays(warmedPosition, coldPosition),
-    timeAdvanced: normalAdvance > 0,
-    timeScalePaused: equalArrays(pausedInitial, pausedFinal),
-    timeScaleTwice: close(fastAdvance, normalAdvance * 2),
+    aliveCountMatchesFlags: distanceAlive === actualAlive,
+    deterministic:
+      equalArrays(deterministicVelocityA, deterministicVelocityB) &&
+      equalArrays(deterministicGenerationA, deterministicGenerationB),
+    freeListExhaustionSafe:
+      overflowAlive === 2 &&
+      overflowed.diagnostics.some(({ code }) => code === 'NACHI_SPAWN_CAPACITY_EXCEEDED'),
+    indirectCountMatchesAlive: indirectAlive === distanceAlive,
+    perDistanceProportional: distanceAlive === 8,
+    rateSpawnTotal: rateAlive === 30,
+    recycledIndexHasNewRandomStream:
+      firstGeneration[0] === 1 &&
+      secondGeneration[0] === 2 &&
+      !equalArrays(firstVelocity, secondVelocity),
   };
   const ok = Object.values(validation).every(Boolean);
   const result = {
     backend: 'WebGPU',
-    compileCounts: {
-      cold: coldSystem.compilationCount,
-      loop: loopSystem.compilationCount,
-      movement: movementSystem.compilationCount,
-      warm: warmSystem.compilationCount,
-    },
-    loop: {
-      firstGenerationVelocity: [...firstGenerationVelocity.slice(0, 3)],
-      secondGenerationVelocity: [...secondGenerationVelocity.slice(0, 3)],
-      spawnGeneration: looped.getEmitter('particles')?.spawnGeneration,
-    },
-    movement: {
-      fastAdvance,
-      normalAdvance,
-      pausedUnchanged: equalArrays(pausedInitial, pausedFinal),
+    counts: {
+      actualAlive,
+      distanceAlive,
+      indirectAlive,
+      overflowAlive,
+      rateAlive,
     },
     ok,
-    prewarm: {
-      cold: [...coldPosition.slice(0, 3)],
-      frames: PREWARM_FRAMES,
-      warmed: [...warmedPosition.slice(0, 3)],
+    recycle: {
+      firstGeneration: firstGeneration[0],
+      firstVelocity: [...firstVelocity.slice(0, 3)],
+      secondGeneration: secondGeneration[0],
+      secondVelocity: [...secondVelocity.slice(0, 3)],
     },
     requestedBackend,
     validation,
@@ -253,7 +324,7 @@ async function runSmoke(): Promise<void> {
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.spikeStatus = ok ? 'complete' : 'error';
   root.dataset.sceneReady = 'true';
-  statusValue.textContent = ok ? 'M2 runtime smoke complete' : 'M2 runtime validation failed';
+  statusValue.textContent = ok ? 'M2 GPU smoke complete' : 'M2 GPU smoke validation failed';
 }
 
 void runSmoke().catch((error) => {

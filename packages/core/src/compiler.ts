@@ -24,6 +24,7 @@ import type {
   ParameterSchema,
   RangeGenerator,
   ResolvedAttributeSchema,
+  SpawnModule,
   TslFunctionRef,
   TslModuleDefinition,
   TslModuleFactory,
@@ -40,6 +41,7 @@ export const DEFAULT_LUT_RESOLUTION = 256;
 export const DEFAULT_WORKGROUP_SIZE = 64;
 
 export type CompiledKernelStage = 'init' | 'update';
+export type CompiledModuleStage = CompiledKernelStage | 'spawn';
 
 export interface BakedLut {
   readonly channels: 1 | 4;
@@ -71,6 +73,23 @@ export interface CompiledKernelDescription {
   readonly workgroupSize: number;
 }
 
+export interface CompiledSpawnDescription {
+  readonly modules: readonly CompiledSpawnModule[];
+  readonly workgroupSize: number;
+}
+
+export interface CompiledSpawnModule {
+  readonly access: ModuleAccess;
+  readonly config: Readonly<object>;
+  readonly label?: string;
+  readonly path: string;
+  readonly slot: number;
+  readonly stage: 'spawn';
+  readonly stageIndex: number;
+  readonly type: string;
+  readonly version: number;
+}
+
 export interface CompiledUniformDescription {
   readonly default: unknown;
   readonly path: ParameterPath;
@@ -79,6 +98,18 @@ export interface CompiledUniformDescription {
 }
 
 export interface CompiledEmitterMeta {
+  readonly capabilities: {
+    readonly webgl2: {
+      readonly aliveCount: 'cpu-readback';
+      readonly allocation: 'prefix-cpu-fallback';
+      readonly indirectDraw: false;
+    };
+    readonly webgpu: {
+      readonly aliveCount: 'atomic-compaction';
+      readonly allocation: 'atomic-free-list';
+      readonly indirectDraw: true;
+    };
+  };
   readonly moduleSlots: readonly {
     readonly label?: string;
     readonly path: string;
@@ -109,6 +140,9 @@ export interface KernelNode {
   bitXor(value: KernelNodeInput): KernelNode;
   clamp(minimum: KernelNodeInput, maximum: KernelNodeInput): KernelNode;
   div(value: KernelNodeInput): KernelNode;
+  equal(value: KernelNodeInput): KernelNode;
+  greaterThanEqual(value: KernelNodeInput): KernelNode;
+  lessThan(value: KernelNodeInput): KernelNode;
   mul(value: KernelNodeInput): KernelNode;
   mulAssign(value: KernelNodeInput): KernelNode;
   pow(value: KernelNodeInput): KernelNode;
@@ -122,6 +156,12 @@ export interface KernelStorageNode {
   readonly value: unknown;
   element(index: KernelNode): KernelNode;
   setName(name: string): KernelStorageNode;
+  toAtomic(): KernelStorageNode;
+}
+
+export interface KernelIndirectStorageNode extends KernelStorageNode {
+  /** Backend resource passed to dispatchIndirect/drawIndirect integration. */
+  readonly indirectResource: unknown;
 }
 
 export interface KernelUniformNode extends KernelNode {
@@ -134,18 +174,32 @@ export interface KernelComputeNode {
 
 export interface KernelComputeBuilder {
   compute(count: number, workgroupSize: readonly [number]): KernelComputeNode;
+  computeKernel(workgroupSize: readonly [number]): KernelComputeNode;
+}
+
+export interface KernelAdapterCapabilities {
+  readonly atomics: boolean;
+  readonly backend: 'webgl2' | 'webgpu';
+  readonly indirectDispatch: boolean;
+  readonly indirectDraw: boolean;
 }
 
 export interface KernelTslAdapter {
+  readonly capabilities?: KernelAdapterCapabilities;
   readonly deviceLimits?: {
     readonly maxStorageBuffersPerShaderStage?: number;
   };
   readonly instanceIndex: KernelNode;
+  atomicAdd(target: KernelNode, value: KernelNodeInput): KernelNode;
+  atomicLoad(target: KernelNode): KernelNode;
+  atomicStore(target: KernelNode, value: KernelNodeInput): void;
+  branch(condition: KernelNode, whenTrue: () => void, whenFalse?: () => void): void;
   constant(value: unknown, type: AttributeType): KernelNode;
   cos(value: KernelNodeInput): KernelNode;
   dataTexture(lut: BakedLut): unknown;
   fn(callback: () => void): KernelComputeBuilder;
   instancedArray(length: number, type: TslStorageType): KernelStorageNode;
+  indirectArray(values: Uint32Array): KernelIndirectStorageNode;
   sampleTexture(texture: unknown, uv: KernelNode): KernelNode;
   sin(value: KernelNodeInput): KernelNode;
   uniform(value: unknown, type: TslStorageType): KernelUniformNode;
@@ -156,8 +210,28 @@ export interface KernelTslAdapter {
 }
 
 export interface BuiltEmitterKernels {
+  readonly aliveCount: KernelStorageNode;
+  readonly aliveIndices: KernelStorageNode;
+  readonly capabilityPath: 'webgl2-cpu-readback' | 'webgpu-atomic-indirect';
+  readonly compact?: KernelComputeNode;
+  readonly counterOffsets: {
+    readonly aliveCount: 1;
+    readonly freeCount: 0;
+    readonly spawnOverflow: 3;
+    readonly spawnSuccess: 2;
+  };
+  readonly drawIndirect?: KernelIndirectStorageNode;
+  readonly finalizeIndirect?: KernelComputeNode;
+  readonly finalizeSpawn?: KernelComputeNode;
+  readonly freeCount?: KernelStorageNode;
   readonly init: KernelComputeNode;
+  readonly initialize: KernelComputeNode;
   readonly luts: Readonly<Record<string, unknown>>;
+  readonly prepareSpawn?: KernelComputeNode;
+  readonly resetAliveCount?: KernelComputeNode;
+  readonly spawn: KernelComputeNode;
+  readonly spawnDispatch?: KernelIndirectStorageNode;
+  readonly spawnOverflow: KernelStorageNode;
   readonly storages: Readonly<Record<string, KernelStorageNode>>;
   readonly uniforms: Readonly<Record<string, KernelUniformNode>>;
   readonly update: KernelComputeNode;
@@ -182,10 +256,19 @@ export interface KernelModuleImplementation {
   readonly version: number;
 }
 
-export class KernelModuleRegistry {
-  readonly #implementations = new Map<string, KernelModuleImplementation>();
+export interface SpawnModuleImplementation {
+  readonly access: ModuleAccess;
+  readonly stage: 'spawn';
+  readonly type: string;
+  readonly version: number;
+}
 
-  register(implementation: KernelModuleImplementation): void {
+export type CompilerModuleImplementation = KernelModuleImplementation | SpawnModuleImplementation;
+
+export class KernelModuleRegistry {
+  readonly #implementations = new Map<string, CompilerModuleImplementation>();
+
+  register(implementation: CompilerModuleImplementation): void {
     const key = registryKey(implementation.type, implementation.version);
     const registered = this.#implementations.get(key);
     if (registered !== undefined && registered !== implementation) {
@@ -194,7 +277,7 @@ export class KernelModuleRegistry {
     this.#implementations.set(key, implementation);
   }
 
-  resolve(type: string, version: number): KernelModuleImplementation | undefined {
+  resolve(type: string, version: number): CompilerModuleImplementation | undefined {
     return this.#implementations.get(registryKey(type, version));
   }
 }
@@ -218,6 +301,7 @@ export interface CompiledEmitterProgram {
   };
   readonly luts: readonly BakedLut[];
   readonly meta: CompiledEmitterMeta;
+  readonly spawn: CompiledSpawnDescription;
   readonly uniforms: readonly CompiledUniformDescription[];
 }
 
@@ -411,14 +495,14 @@ function traceTslModule(
   return { access: module.access, diagnostics, factory };
 }
 
-function withAccess<Stage extends 'init' | 'update'>(
+function withAccess<Stage extends ModuleDefinition['stage']>(
   module: ModuleDefinition<Stage, object>,
   access: ModuleAccess,
 ): ModuleDefinition<Stage, object> {
   return { ...module, access };
 }
 
-function deriveConfigReads(config: object): DataReference[] {
+function deriveConfigReads(config: object, stage: ModuleDefinition['stage']): DataReference[] {
   const reads = new Set<DataReference>();
   const visited = new WeakSet<object>();
   const visit = (value: unknown): void => {
@@ -427,7 +511,7 @@ function deriveConfigReads(config: object): DataReference[] {
     const kind = 'kind' in value ? value.kind : undefined;
     if (kind === 'range') {
       reads.add('Emitter.seed');
-      reads.add('Emitter.spawnGeneration');
+      reads.add(stage === 'spawn' ? 'Emitter.spawnGeneration' : 'Particles.spawnGeneration');
     } else if (kind === 'parameter' && 'path' in value && typeof value.path === 'string') {
       reads.add(value.path as DataReference);
     }
@@ -437,10 +521,10 @@ function deriveConfigReads(config: object): DataReference[] {
   return [...reads];
 }
 
-function withDerivedConfigReads<Stage extends 'init' | 'update'>(
+function withDerivedConfigReads<Stage extends ModuleDefinition['stage']>(
   module: ModuleDefinition<Stage, object>,
 ): ModuleDefinition<Stage, object> {
-  const derivedReads = deriveConfigReads(module.config);
+  const derivedReads = deriveConfigReads(module.config, module.stage);
   if (derivedReads.length === 0) return module;
   const access = module.access ?? { reads: [], writes: [] };
   return withAccess(module, {
@@ -451,19 +535,19 @@ function withDerivedConfigReads<Stage extends 'init' | 'update'>(
 
 function defaultsModule(schema: ResolvedAttributeSchema): InitModule {
   const config = {
-    attributes: schema.attributes.map(
-      ({ default: defaultValue, logicalType, name, storageIndex }) => ({
+    attributes: schema.attributes
+      .filter(({ name }) => name !== 'alive' && name !== 'spawnGeneration')
+      .map(({ default: defaultValue, logicalType, name, storageIndex }) => ({
         default: defaultValue,
         logicalType,
         name,
         storageIndex,
-      }),
-    ),
+      })),
   };
   return {
     access: {
-      reads: deriveConfigReads(config),
-      writes: schema.attributes.map(({ path }) => path),
+      reads: deriveConfigReads(config, 'init'),
+      writes: config.attributes.map(({ name }) => `Particles.${name}` as const),
     },
     config,
     kind: 'module',
@@ -543,8 +627,26 @@ function moduleDescriptor(
   return module.label === undefined ? base : { ...base, label: module.label };
 }
 
+function spawnModuleDescriptor(
+  module: SpawnModule,
+  path: string,
+  stageIndex: number,
+): CompiledSpawnModule {
+  const base = {
+    access: module.access ?? { reads: [], writes: [] },
+    config: module.config,
+    path,
+    slot: resolveModuleSlot(module, stageIndex),
+    stage: 'spawn',
+    stageIndex,
+    type: module.type,
+    version: module.version,
+  } as const;
+  return module.label === undefined ? base : { ...base, label: module.label };
+}
+
 function validateModule(
-  module: CompiledKernelModule,
+  module: CompiledKernelModule | CompiledSpawnModule,
   registry: KernelModuleRegistry,
 ): VfxDiagnostic[] {
   if (module.type === 'core/tsl-module') return [];
@@ -581,7 +683,7 @@ function validateModule(
 }
 
 function validateReferences(
-  modules: readonly CompiledKernelModule[],
+  modules: readonly (CompiledKernelModule | CompiledSpawnModule)[],
   parameters: ParameterSchema | undefined,
 ): VfxDiagnostic[] {
   const diagnostics: VfxDiagnostic[] = [];
@@ -609,6 +711,101 @@ function validateReferences(
       }
     }
     // optionalReads deliberately do not diagnose absence; materializers provide fallbacks.
+  }
+  return diagnostics;
+}
+
+function validateStageWrites(
+  modules: readonly {
+    readonly access: ModuleAccess;
+    readonly path: string;
+    readonly stage: CompiledModuleStage | 'event' | 'render';
+  }[],
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const module of modules) {
+    for (const [index, reference] of module.access.writes.entries()) {
+      const allowed =
+        module.stage === 'spawn'
+          ? reference === 'Emitter.spawnCount' || reference.startsWith('Emitter.allocation.')
+          : module.stage === 'init'
+            ? reference.startsWith('Particles.')
+            : module.stage === 'update'
+              ? reference.startsWith('Particles.') || reference.startsWith('Emitter.')
+              : module.stage === 'event'
+                ? reference.startsWith('Particles.') || reference.startsWith('Emitter.events.')
+                : false;
+      if (!allowed) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_STAGE_WRITE_FORBIDDEN',
+            `${module.stage} modules may not write "${reference}".`,
+            `${module.path}.access.writes[${index}]`,
+          ),
+        );
+      }
+    }
+  }
+  return diagnostics;
+}
+
+function validateSpawnConfigs(modules: readonly CompiledSpawnModule[]): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const module of modules) {
+    if (module.type === 'core/rate' || module.type === 'core/per-distance') {
+      const value = (module.config as { rate?: unknown }).rate;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_SPAWN_RATE_INVALID',
+            `${module.type} rate must be a non-negative finite number.`,
+            `${module.path}.config.rate`,
+          ),
+        );
+      }
+    }
+    if (module.type === 'core/burst') {
+      const config = module.config as { cycles?: unknown; interval?: unknown };
+      if (
+        config.cycles !== undefined &&
+        (!Number.isSafeInteger(config.cycles) || (config.cycles as number) <= 0)
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_BURST_CYCLES_INVALID',
+            'Burst cycles must be a positive safe integer.',
+            `${module.path}.config.cycles`,
+          ),
+        );
+      }
+      if (
+        config.interval !== undefined &&
+        (typeof config.interval !== 'number' ||
+          !Number.isFinite(config.interval) ||
+          config.interval <= 0)
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_BURST_INTERVAL_INVALID',
+            'Burst interval must be a positive finite number.',
+            `${module.path}.config.interval`,
+          ),
+        );
+      }
+      if (
+        (config.cycles as number | undefined) !== undefined &&
+        config.cycles !== 1 &&
+        config.interval === undefined
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_BURST_INTERVAL_REQUIRED',
+            'Burst interval is required when cycles is greater than one.',
+            `${module.path}.config.interval`,
+          ),
+        );
+      }
+    }
   }
   return diagnostics;
 }
@@ -729,6 +926,7 @@ function uniformDescriptions(
     describe('Emitter.localTime', 0, 'f32'),
     describe('Emitter.loopIndex', 0, 'u32'),
     describe('Emitter.seed', options.emitterSeed ?? 0, 'u32'),
+    describe('Emitter.spawnCount', 0, 'u32'),
     describe('Emitter.spawnGeneration', options.spawnGeneration ?? 0, 'u32'),
     describe('Emitter.transform', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
   ];
@@ -919,10 +1117,30 @@ function createBuildKernels(
       program.luts.map((lut) => [lut.id, adapter.dataTexture(lut)]),
     );
 
-    const attributeNode = (name: string): KernelNode => {
+    const capacity = program.attributeSchema.capacity;
+    const gpuLifecycle =
+      adapter.capabilities?.atomics !== false &&
+      adapter.capabilities?.indirectDispatch !== false &&
+      adapter.capabilities?.indirectDraw !== false;
+    const freeList = adapter.instancedArray(capacity, 'uint').setName('NachiFreeList');
+    const aliveIndices = adapter.instancedArray(capacity, 'uint').setName('NachiAliveIndices');
+    const counterStorage = adapter.instancedArray(4, 'uint');
+    const counters = (gpuLifecycle ? counterStorage.toAtomic() : counterStorage).setName(
+      'NachiLifecycleCounters',
+    );
+    const counterOffsets = {
+      aliveCount: 1,
+      freeCount: 0,
+      spawnOverflow: 3,
+      spawnSuccess: 2,
+    } as const;
+    const counter = (offset: number): KernelNode =>
+      counters.element(adapter.uint(adapter.constant(offset, 'u32')));
+
+    const attributeNode = (name: string, index = adapter.instanceIndex): KernelNode => {
       const storage = storages[name];
       if (!storage) throw new Error(`Compiled storage for attribute "${name}" is missing.`);
-      return storage.element(adapter.instanceIndex);
+      return storage.element(index);
     };
     const uniformNode = (path: ParameterPath): KernelUniformNode => {
       const uniform = uniforms[path];
@@ -931,18 +1149,23 @@ function createBuildKernels(
     };
     const constant = (value: unknown, type: AttributeType): KernelNode =>
       adapter.constant(value, type);
-    const randomNode = (module: CompiledKernelModule, sampleOffset: number): KernelNode =>
+    const randomNode = (
+      module: CompiledKernelModule,
+      particleIndex: KernelNode,
+      sampleOffset: number,
+    ): KernelNode =>
       pcgRandomFloatNode<KernelNode, KernelNode>(
-        adapter.uint(adapter.instanceIndex),
+        adapter.uint(particleIndex),
         adapter.uint(uniformNode('Emitter.seed')),
         resolveRandomSampleSlot(module.slot, sampleOffset),
-        adapter.uint(uniformNode('Emitter.spawnGeneration')),
+        adapter.uint(attributeNode('spawnGeneration', particleIndex)),
       );
 
     const buildValue = (
       input: unknown,
       type: AttributeType,
       module: CompiledKernelModule,
+      particleIndex: KernelNode,
       sampleOffset = 0,
     ): KernelNode => {
       const kind = valueGeneratorKind(input);
@@ -970,7 +1193,9 @@ function createBuildKernels(
           const components = Array.from({ length: componentCount }, (_, index) => {
             const minimum = constant(rangeMinimum[index], 'f32');
             const maximum = constant(rangeMaximum[index], 'f32');
-            return minimum.add(maximum.sub(minimum).mul(randomNode(module, sampleOffset + index)));
+            return minimum.add(
+              maximum.sub(minimum).mul(randomNode(module, particleIndex, sampleOffset + index)),
+            );
           });
           if (componentCount === 2) return adapter.vec2(components[0]!, components[1]!);
           if (componentCount === 3) {
@@ -978,7 +1203,7 @@ function createBuildKernels(
           }
           return adapter.vec4(components[0]!, components[1]!, components[2]!, components[3]!);
         }
-        const random = randomNode(module, sampleOffset);
+        const random = randomNode(module, particleIndex, sampleOffset);
         const minimum = constant(range.min, type);
         const maximum = constant(range.max, type);
         return minimum.add(maximum.sub(minimum).mul(random));
@@ -986,11 +1211,14 @@ function createBuildKernels(
       return constant(input, type);
     };
 
-    const buildContext = (module: CompiledKernelModule): KernelModuleBuildContext => ({
+    const buildContext = (
+      module: CompiledKernelModule,
+      particleIndex: KernelNode,
+    ): KernelModuleBuildContext => ({
       adapter,
       module,
-      attribute: attributeNode,
-      random: (sampleOffset = 0) => randomNode(module, sampleOffset),
+      attribute: (name) => attributeNode(name, particleIndex),
+      random: (sampleOffset = 0) => randomNode(module, particleIndex, sampleOffset),
       sampleLut: (id, coordinate) => {
         const texture = lutTextures[id];
         const lut = program.luts.find((candidate) => candidate.id === id);
@@ -1000,13 +1228,14 @@ function createBuildKernels(
         return adapter.sampleTexture(texture, adapter.vec2(texelCentered, 0.5));
       },
       uniform: uniformNode,
-      value: (input, type, sampleOffset = 0) => buildValue(input, type, module, sampleOffset),
+      value: (input, type, sampleOffset = 0) =>
+        buildValue(input, type, module, particleIndex, sampleOffset),
       write: (name, value) => {
-        attributeNode(name).assign(value);
+        attributeNode(name, particleIndex).assign(value);
       },
     });
 
-    const buildTslModule = (module: CompiledKernelModule): void => {
+    const buildTslModule = (module: CompiledKernelModule, particleIndex: KernelNode): void => {
       const factory = factories.get(module.path);
       if (!factory) throw new Error(`TSL factory for ${module.path} is missing.`);
       const bindings = new Proxy(
@@ -1017,42 +1246,226 @@ function createBuildKernels(
             const name = property.startsWith('custom.')
               ? property.slice('custom.'.length)
               : property;
-            return attributeNode(name);
+            return attributeNode(name, particleIndex);
           },
         },
       );
       const outputs = factory(bindings as TslParticleBindings);
       for (const [key, value] of Object.entries(outputs)) {
         const name = key.startsWith('custom.') ? key.slice('custom.'.length) : key;
-        attributeNode(name).assign(value as unknown as KernelNode);
+        attributeNode(name, particleIndex).assign(value as unknown as KernelNode);
       }
     };
 
-    const buildModule = (module: CompiledKernelModule): void => {
+    const buildModule = (module: CompiledKernelModule, particleIndex: KernelNode): void => {
       if (module.type === 'core/tsl-module') {
-        buildTslModule(module);
+        buildTslModule(module, particleIndex);
         return;
       }
       const implementation = registry.resolve(module.type, module.version);
-      if (!implementation) throw new Error(`Kernel implementation for ${module.type} is missing.`);
-      implementation.build(buildContext(module));
+      if (!implementation || implementation.stage === 'spawn') {
+        throw new Error(`Kernel implementation for ${module.type} is missing.`);
+      }
+      implementation.build(buildContext(module, particleIndex));
     };
 
+    const initModules = program.kernels.init.modules;
+    const ageModule = program.kernels.update.modules.find(({ type }) => type === 'core/age');
+    const updateModules = program.kernels.update.modules.filter(({ type }) => type !== 'core/age');
+
+    const initialize = adapter
+      .fn(() => {
+        attributeNode('alive').assign(adapter.constant(false, 'bool'));
+        attributeNode('spawnGeneration').assign(adapter.constant(0, 'u32'));
+        freeList.element(adapter.instanceIndex).assign(adapter.uint(adapter.instanceIndex));
+        adapter.branch(adapter.instanceIndex.equal(adapter.uint(0)), () => {
+          if (gpuLifecycle) {
+            adapter.atomicStore(counter(counterOffsets.freeCount), adapter.uint(capacity));
+            adapter.atomicStore(counter(counterOffsets.aliveCount), adapter.uint(0));
+            adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
+            adapter.atomicStore(counter(counterOffsets.spawnOverflow), adapter.uint(0));
+          } else {
+            counter(counterOffsets.freeCount).assign(adapter.uint(capacity));
+            counter(counterOffsets.aliveCount).assign(adapter.uint(0));
+            counter(counterOffsets.spawnSuccess).assign(adapter.uint(0));
+            counter(counterOffsets.spawnOverflow).assign(adapter.uint(0));
+          }
+        });
+      })
+      .compute(capacity, [program.spawn.workgroupSize])
+      .setName('NachiEmitterInitialize');
+
+    // Compatibility kernel retained for M1 consumers that intentionally initialize every slot.
     const init = adapter
       .fn(() => {
-        for (const module of program.kernels.init.modules) buildModule(module);
+        for (const module of initModules) buildModule(module, adapter.instanceIndex);
+        attributeNode('alive').assign(adapter.constant(true, 'bool'));
       })
       .compute(program.attributeSchema.capacity, [program.kernels.init.workgroupSize])
       .setName(program.kernels.init.name);
 
+    const recycleParticle = (particleIndex: KernelNode): void => {
+      if (gpuLifecycle) {
+        const freeSlot = adapter.atomicAdd(counter(counterOffsets.freeCount), adapter.uint(1));
+        freeList.element(freeSlot).assign(adapter.uint(particleIndex));
+      }
+    };
+
     const update = adapter
       .fn(() => {
-        for (const module of program.kernels.update.modules) buildModule(module);
+        const particleIndex = adapter.instanceIndex;
+        adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(1)), () => {
+          if (ageModule) {
+            buildModule(ageModule, particleIndex);
+            adapter.branch(
+              attributeNode('age', particleIndex).greaterThanEqual(
+                attributeNode('lifetime', particleIndex),
+              ),
+              () => attributeNode('alive', particleIndex).assign(adapter.constant(false, 'bool')),
+              () => {
+                for (const module of updateModules) buildModule(module, particleIndex);
+              },
+            );
+          } else {
+            for (const module of updateModules) buildModule(module, particleIndex);
+          }
+          // Any declared update module may kill by writing Particles.alive. Recycling remains a
+          // compiler-owned epilogue so every scattered death appends its physical slot once.
+          adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(0)), () =>
+            recycleParticle(particleIndex),
+          );
+        });
       })
       .compute(program.attributeSchema.capacity, [program.kernels.update.workgroupSize])
       .setName(program.kernels.update.name);
 
-    return { init, luts: lutTextures, storages, uniforms, update };
+    const spawnBody = (): void => {
+      const invocation = adapter.instanceIndex;
+      const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
+      adapter.branch(invocation.lessThan(requested), () => {
+        if (gpuLifecycle) {
+          const available = adapter.atomicLoad(counter(counterOffsets.freeCount));
+          adapter.branch(
+            invocation.lessThan(available),
+            () => {
+              const freeSlot = available.sub(adapter.uint(1)).sub(invocation);
+              const particleIndex = freeList.element(freeSlot);
+              attributeNode('spawnGeneration', particleIndex).addAssign(adapter.uint(1));
+              for (const module of initModules) buildModule(module, particleIndex);
+              attributeNode('alive', particleIndex).assign(adapter.uint(1));
+              adapter.atomicAdd(counter(counterOffsets.spawnSuccess), adapter.uint(1));
+            },
+            () => {
+              adapter.atomicAdd(counter(counterOffsets.spawnOverflow), adapter.uint(1));
+            },
+          );
+        } else {
+          const particleIndex = invocation;
+          attributeNode('spawnGeneration', particleIndex).addAssign(adapter.uint(1));
+          for (const module of initModules) buildModule(module, particleIndex);
+          attributeNode('alive', particleIndex).assign(adapter.uint(1));
+        }
+      });
+    };
+
+    const spawnBuilder = adapter.fn(spawnBody);
+    const spawn = (
+      gpuLifecycle
+        ? spawnBuilder.computeKernel([program.spawn.workgroupSize])
+        : spawnBuilder.compute(capacity, [program.spawn.workgroupSize])
+    ).setName('NachiEmitterSpawn');
+
+    let prepareSpawn: KernelComputeNode | undefined;
+    let finalizeSpawn: KernelComputeNode | undefined;
+    let resetAliveCount: KernelComputeNode | undefined;
+    let compact: KernelComputeNode | undefined;
+    let finalizeIndirect: KernelComputeNode | undefined;
+    let spawnDispatch: KernelIndirectStorageNode | undefined;
+    let drawIndirect: KernelIndirectStorageNode | undefined;
+
+    if (gpuLifecycle) {
+      spawnDispatch = adapter
+        .indirectArray(new Uint32Array([0, 1, 1]))
+        .setName('NachiSpawnDispatchArguments') as KernelIndirectStorageNode;
+      drawIndirect = adapter
+        .indirectArray(new Uint32Array([0, 0, 0, 0, 0]))
+        .setName('NachiDrawIndirectArguments') as KernelIndirectStorageNode;
+      prepareSpawn = adapter
+        .fn(() => {
+          adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
+          adapter.atomicStore(counter(counterOffsets.spawnOverflow), adapter.uint(0));
+          const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
+          spawnDispatch!
+            .element(adapter.uint(0))
+            .assign(
+              requested
+                .add(adapter.uint(program.spawn.workgroupSize - 1))
+                .div(adapter.uint(program.spawn.workgroupSize)),
+            );
+          spawnDispatch!.element(adapter.uint(1)).assign(adapter.uint(1));
+          spawnDispatch!.element(adapter.uint(2)).assign(adapter.uint(1));
+        })
+        .compute(1, [1])
+        .setName('NachiEmitterPrepareSpawn');
+      finalizeSpawn = adapter
+        .fn(() => {
+          const successful = adapter.atomicLoad(counter(counterOffsets.spawnSuccess));
+          adapter.atomicAdd(counter(counterOffsets.freeCount), adapter.uint(0).sub(successful));
+        })
+        .compute(1, [1])
+        .setName('NachiEmitterFinalizeSpawn');
+      resetAliveCount = adapter
+        .fn(() => {
+          adapter.atomicStore(counter(counterOffsets.aliveCount), adapter.uint(0));
+        })
+        .compute(1, [1])
+        .setName('NachiEmitterResetAliveCount');
+      compact = adapter
+        .fn(() => {
+          adapter.branch(attributeNode('alive').equal(adapter.uint(1)), () => {
+            const compactIndex = adapter.atomicAdd(
+              counter(counterOffsets.aliveCount),
+              adapter.uint(1),
+            );
+            aliveIndices.element(compactIndex).assign(adapter.uint(adapter.instanceIndex));
+          });
+        })
+        .compute(capacity, [program.kernels.update.workgroupSize])
+        .setName('NachiEmitterCompactAlive');
+      finalizeIndirect = adapter
+        .fn(() => {
+          const count = adapter.atomicLoad(counter(counterOffsets.aliveCount));
+          drawIndirect!.element(adapter.uint(1)).assign(count);
+          drawIndirect!.element(adapter.uint(2)).assign(adapter.uint(0));
+          drawIndirect!.element(adapter.uint(3)).assign(adapter.uint(0));
+          drawIndirect!.element(adapter.uint(4)).assign(adapter.uint(0));
+        })
+        .compute(1, [1])
+        .setName('NachiEmitterFinalizeIndirect');
+    }
+
+    return {
+      aliveCount: counters,
+      aliveIndices,
+      capabilityPath: gpuLifecycle ? 'webgpu-atomic-indirect' : 'webgl2-cpu-readback',
+      ...(compact === undefined ? {} : { compact }),
+      counterOffsets,
+      ...(drawIndirect === undefined ? {} : { drawIndirect }),
+      ...(finalizeIndirect === undefined ? {} : { finalizeIndirect }),
+      ...(finalizeSpawn === undefined ? {} : { finalizeSpawn }),
+      freeCount: counters,
+      init,
+      initialize,
+      luts: lutTextures,
+      ...(prepareSpawn === undefined ? {} : { prepareSpawn }),
+      ...(resetAliveCount === undefined ? {} : { resetAliveCount }),
+      spawn,
+      ...(spawnDispatch === undefined ? {} : { spawnDispatch }),
+      spawnOverflow: counters,
+      storages,
+      uniforms,
+      update,
+    };
   };
 }
 
@@ -1109,13 +1522,38 @@ export function compileEmitter<
       ),
     ),
   ];
-  for (const module of initialModules) diagnostics.push(...validateModule(module, registry));
-  diagnostics.push(...validateReferences(initialModules, definition.parameters));
-  const nonKernelModules = collectEmitterModules(normalizedDefinition)
-    .filter(({ module }) => module.stage !== 'init' && module.stage !== 'update')
-    .map(({ module, path }) => ({ config: module.config, path }));
+  const authoredSpawn = Array.isArray(definition.spawn) ? definition.spawn : [definition.spawn];
+  const spawnModules = authoredSpawn.map((module, index) =>
+    spawnModuleDescriptor(withDerivedConfigReads(module), `spawn[${index}]`, index),
+  );
+  for (const module of [...spawnModules, ...initialModules]) {
+    diagnostics.push(...validateModule(module, registry));
+  }
+  diagnostics.push(
+    ...validateReferences([...spawnModules, ...initialModules], definition.parameters),
+  );
+  diagnostics.push(...validateSpawnConfigs(spawnModules));
+  const locatedNonKernelModules = collectEmitterModules(normalizedDefinition).filter(
+    ({ module }) =>
+      module.stage !== 'init' && module.stage !== 'update' && module.stage !== 'spawn',
+  );
+  const nonKernelModules = locatedNonKernelModules.map(({ module, path }) => ({
+    config: module.config,
+    path,
+  }));
   diagnostics.push(
     ...validateValueGenerators([...initialModules, ...nonKernelModules], definition.parameters),
+  );
+  diagnostics.push(
+    ...validateStageWrites([
+      ...spawnModules,
+      ...initialModules,
+      ...locatedNonKernelModules.map(({ module, path }) => ({
+        access: module.access ?? { reads: [], writes: [] },
+        path,
+        stage: module.stage,
+      })),
+    ]),
   );
 
   const baked = bakeModuleLuts(initialModules, diagnostics);
@@ -1144,6 +1582,18 @@ export function compileEmitter<
   } as const;
   const uniforms = uniformDescriptions(definition.parameters, options);
   const meta: CompiledEmitterMeta = {
+    capabilities: {
+      webgl2: {
+        aliveCount: 'cpu-readback',
+        allocation: 'prefix-cpu-fallback',
+        indirectDraw: false,
+      },
+      webgpu: {
+        aliveCount: 'atomic-compaction',
+        allocation: 'atomic-free-list',
+        indirectDraw: true,
+      },
+    },
     moduleSlots: baked.modules.map((module) => {
       const base = {
         path: module.path,
@@ -1154,7 +1604,9 @@ export function compileEmitter<
       } as const;
       return module.label === undefined ? base : { ...base, label: module.label };
     }),
-    storageBufferCount: attributeSchema.storageArrays.length,
+    // The lifecycle kernel binds one free/alive index buffer and one packed atomic counter buffer
+    // in addition to the emitter-local SoA attributes.
+    storageBufferCount: attributeSchema.storageArrays.length + 2,
   };
   const description = {
     attributeSchema,
@@ -1162,6 +1614,7 @@ export function compileEmitter<
     kernels,
     luts: baked.luts,
     meta,
+    spawn: { modules: spawnModules, workgroupSize },
     uniforms,
   };
   return {
@@ -1199,6 +1652,33 @@ function normalizedBasis(direction: Vec3): { forward: Vec3; right: Vec3; up: Vec
 export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   const registry = new KernelModuleRegistry();
   registry.register({
+    access: {
+      reads: ['Emitter.localTime'],
+      writes: ['Emitter.spawnCount'],
+    },
+    stage: 'spawn',
+    type: 'core/burst',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.deltaTime'],
+      writes: ['Emitter.spawnCount'],
+    },
+    stage: 'spawn',
+    type: 'core/rate',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.transform'],
+      writes: ['Emitter.spawnCount'],
+    },
+    stage: 'spawn',
+    type: 'core/per-distance',
+    version: 1,
+  });
+  registry.register({
     access: { reads: [], writes: [] },
     build(context) {
       const config = context.module.config as {
@@ -1233,7 +1713,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.transform', 'Emitter.seed', 'Emitter.spawnGeneration'],
+      reads: ['Emitter.transform', 'Emitter.seed', 'Particles.spawnGeneration'],
       writes: ['Particles.position'],
     },
     build(context) {
@@ -1264,7 +1744,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.seed', 'Emitter.spawnGeneration'],
+      reads: ['Emitter.seed', 'Particles.spawnGeneration'],
       writes: ['Particles.velocity'],
     },
     build(context) {
@@ -1434,6 +1914,9 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
   const registry = createCoreKernelModuleRegistry();
   return Object.fromEntries(
     [
+      'core/burst',
+      'core/rate',
+      'core/per-distance',
       'core/defaults',
       'core/age',
       'core/position-sphere',

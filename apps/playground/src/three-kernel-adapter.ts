@@ -1,6 +1,7 @@
 import type {
   BakedLut,
   KernelNode,
+  KernelIndirectStorageNode,
   KernelStorageNode,
   KernelTslAdapter,
   KernelUniformNode,
@@ -12,6 +13,10 @@ import type {
 import * as THREE from 'three/webgpu';
 import {
   Fn,
+  If,
+  atomicAdd,
+  atomicLoad,
+  atomicStore,
   cos,
   float,
   instanceIndex,
@@ -20,6 +25,7 @@ import {
   mat3,
   mat4,
   sin,
+  storage,
   texture,
   uint,
   uniform,
@@ -29,6 +35,7 @@ import {
 } from 'three/tsl';
 
 export interface ThreeKernelAdapterOptions {
+  readonly backend?: 'webgl2' | 'webgpu';
   readonly linearFloat32Filtering?: boolean;
   readonly maxStorageBuffersPerShaderStage?: number;
 }
@@ -116,12 +123,37 @@ export function createThreeKernelAdapter(
   options: ThreeKernelAdapterOptions = {},
 ): KernelTslAdapter {
   const base: KernelTslAdapter = {
+    capabilities: {
+      atomics: options.backend !== 'webgl2',
+      backend: options.backend ?? 'webgpu',
+      indirectDispatch: options.backend !== 'webgl2',
+      indirectDraw: options.backend !== 'webgl2',
+    },
     instanceIndex: asNode(instanceIndex),
+    atomicAdd: (target, value) => asNode(atomicAdd(target as never, value as never)),
+    atomicLoad: (target) => asNode(atomicLoad(target as never)),
+    atomicStore: (target, value) => {
+      atomicStore(target as never, value as never);
+    },
+    branch: (condition, whenTrue, whenFalse) => {
+      const branch = If(condition as never, whenTrue);
+      if (whenFalse) branch.Else(whenFalse);
+    },
     constant: constantNode,
     cos: (value) => asNode(cos(value as never)),
     dataTexture: (lut) => createDataTexture(lut, options.linearFloat32Filtering ?? false),
     fn: (callback) => Fn(callback)() as unknown as ReturnType<KernelTslAdapter['fn']>,
     instancedArray: (length, type) => createInstancedArray(length, type) as KernelStorageNode,
+    indirectArray: (values) => {
+      const attribute = new THREE.IndirectStorageBufferAttribute(values, 1);
+      const node = storage(
+        attribute,
+        'uint',
+        values.length,
+      ) as unknown as KernelIndirectStorageNode;
+      Object.defineProperty(node, 'indirectResource', { value: attribute });
+      return node;
+    },
     sampleTexture: (value, uv) => asNode(texture(value as THREE.Texture, uv as never)),
     sin: (value) => asNode(sin(value as never)),
     uniform: (value, type) =>
@@ -166,12 +198,20 @@ export function createThreeRuntimeRenderer(
   renderer: THREE.WebGPURenderer,
   kernelAdapter: KernelTslAdapter,
   deviceLost?: Promise<VfxDeviceLossInfo>,
+  setInstanceCount?: VfxRuntimeRenderer['setInstanceCount'],
 ): VfxRuntimeRenderer {
   const base = {
     kernelAdapter,
+    readStorage: (storageNode: KernelStorageNode) =>
+      renderer.getArrayBufferAsync(storageNode.value as never),
     setUniformValue: setThreeUniformValue,
+    ...(setInstanceCount === undefined ? {} : { setInstanceCount }),
     submitCompute: (kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0]) =>
       renderer.computeAsync(kernel as never),
+    submitComputeIndirect: (
+      kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0],
+      indirectResource: unknown,
+    ) => renderer.compute(kernel as never, indirectResource as never),
   };
   return deviceLost === undefined ? base : { ...base, deviceLost };
 }

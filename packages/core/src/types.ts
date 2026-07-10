@@ -5,6 +5,7 @@ export type Vec2 = readonly [number, number];
 export type Vec3 = readonly [number, number, number];
 export type Vec4 = readonly [number, number, number, number];
 export type ColorInput = string | Vec3 | Vec4;
+/** Euler inputs are radians in XYZ order; four-component inputs are quaternions. */
 export type RotationInput =
   | Vec3
   | Vec4
@@ -67,6 +68,8 @@ export interface BuiltInParticleAttributes {
   scale: Vec3;
   size: number;
   spriteRotation: number;
+  /** Monotonically increments each time this physical slot is allocated. */
+  spawnGeneration: number;
   velocity: Vec3;
 }
 
@@ -229,6 +232,7 @@ export interface BuiltInTslParticleBindings {
   readonly scale: TslExpression<Vec3>;
   readonly size: TslExpression<number>;
   readonly spriteRotation: TslExpression<number>;
+  readonly spawnGeneration: TslExpression<number>;
   readonly velocity: TslExpression<Vec3>;
 }
 
@@ -291,6 +295,16 @@ export interface BurstOptions {
   readonly count: ValueInput<number>;
   readonly cycles?: number;
   readonly interval?: number;
+}
+
+export interface RateSpawnOptions {
+  /** Particles emitted per emitter-local second. */
+  readonly rate: number;
+}
+
+export interface PerDistanceSpawnOptions {
+  /** Particles emitted per world-space unit travelled by Emitter.transform. */
+  readonly rate: number;
 }
 
 export interface PositionSphereOptions {
@@ -488,6 +502,8 @@ export interface EffectInstance<Definition = EffectDefinition> {
     value: DefinitionParameterValue<Definition, Path>,
   ): void;
   setTimeScale(timeScale: number): void;
+  setTransform(position: PositionInput, rotation?: RotationInput): void;
+  /** Stops scheduling immediately. GPU resources remain owned until release(). */
   stop(): void;
 }
 

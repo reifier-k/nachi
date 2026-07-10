@@ -39,7 +39,7 @@ export function resolveTslStorageType(type: AttributeType): TslStorageType {
 
 export const BUILT_IN_ATTRIBUTE_DEFAULTS = {
   age: 0,
-  alive: true,
+  alive: false,
   color: [1, 1, 1, 1],
   lifetime: 1,
   mass: 1,
@@ -49,6 +49,7 @@ export const BUILT_IN_ATTRIBUTE_DEFAULTS = {
   scale: [1, 1, 1],
   size: 1,
   spriteRotation: 0,
+  spawnGeneration: 0,
   velocity: [0, 0, 0],
 } as const;
 
@@ -64,6 +65,7 @@ const BUILT_IN_ATTRIBUTES = [
   ['scale', 'vec3', BUILT_IN_ATTRIBUTE_DEFAULTS.scale],
   ['rotation', 'quat', BUILT_IN_ATTRIBUTE_DEFAULTS.rotation],
   ['spriteRotation', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.spriteRotation],
+  ['spawnGeneration', 'u32', BUILT_IN_ATTRIBUTE_DEFAULTS.spawnGeneration],
   ['mass', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.mass],
 ] as const satisfies readonly (readonly [string, AttributeType, unknown])[];
 
@@ -219,6 +221,10 @@ export function resolveAttributeSchema<
   }
 
   const usedBuiltIns = new Set<string>();
+  // M2 lifecycle state is always physical particle data. Keeping both attributes in every
+  // resolved schema makes slot reuse and deterministic per-particle generations backend-stable.
+  usedBuiltIns.add('alive');
+  usedBuiltIns.add('spawnGeneration');
   for (const { module, path } of collectEmitterModules(config)) {
     const requiredAccesses = [
       ['reads', module.access?.reads],

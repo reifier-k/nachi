@@ -45,7 +45,7 @@ describe('resolved attribute schema', () => {
   it('defines deterministic defaults for every built-in attribute', () => {
     expect(BUILT_IN_ATTRIBUTE_DEFAULTS).toEqual({
       age: 0,
-      alive: true,
+      alive: false,
       color: [1, 1, 1, 1],
       lifetime: 1,
       mass: 1,
@@ -54,6 +54,7 @@ describe('resolved attribute schema', () => {
       rotation: [0, 0, 0, 1],
       scale: [1, 1, 1],
       size: 1,
+      spawnGeneration: 0,
       spriteRotation: 0,
       velocity: [0, 0, 0],
     });
@@ -152,7 +153,7 @@ describe('resolved attribute schema', () => {
       vec3: { components: 3, storageType: 'vec3' },
       vec4: { components: 4, storageType: 'vec4' },
     });
-    expect(result.value?.storageArrays).toHaveLength(11);
+    expect(result.value?.storageArrays).toHaveLength(13);
     expect(result.value?.capacity).toBe(1);
     expect(result.value?.storageArrays.every((storage) => storage.kind === 'instanced-array')).toBe(
       true,
@@ -173,14 +174,16 @@ describe('resolved attribute schema', () => {
     expect(result.value?.attributes.map(({ name }) => name)).toEqual([
       'position',
       'velocity',
+      'alive',
       'color',
       'size',
       'spriteRotation',
+      'spawnGeneration',
     ]);
     expect(result.value?.attributes.every(({ source }) => source === 'built-in')).toBe(true);
     expect(result.value?.byName.position?.default).toEqual([0, 0, 0]);
     expect(result.value?.byName.velocity?.default).toEqual([0, 0, 0]);
-    expect(result.value?.storageArrays.map(({ index }) => index)).toEqual([0, 1, 2, 3, 4]);
+    expect(result.value?.storageArrays.map(({ index }) => index)).toEqual([0, 1, 2, 3, 4, 5, 6]);
   });
 
   it('retains an unused custom attribute and its transient metadata', () => {
@@ -194,10 +197,12 @@ describe('resolved attribute schema', () => {
     });
 
     expect(result.value?.attributes).toEqual([
+      expect.objectContaining({ name: 'alive', storageIndex: 0 }),
+      expect.objectContaining({ name: 'spawnGeneration', storageIndex: 1 }),
       expect.objectContaining({
         name: 'heat',
         source: 'custom',
-        storageIndex: 0,
+        storageIndex: 2,
         storageType: 'float',
         transient: true,
       }),
@@ -240,6 +245,45 @@ describe('resolved attribute schema', () => {
     });
 
     expect(result.diagnostics.map(({ code }) => code)).toEqual(['NACHI_ATTRIBUTE_RESERVED_NAME']);
+  });
+
+  it('always materializes the M2 lifecycle attributes', () => {
+    const result = resolveAttributeSchema({
+      capacity: 3,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+
+    expect(result.value?.attributes.map(({ name }) => name)).toEqual(['alive', 'spawnGeneration']);
+  });
+
+  it('stores alive and spawnGeneration as uint arrays', () => {
+    const result = resolveAttributeSchema({
+      capacity: 3,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+
+    expect(result.value?.byName.alive).toMatchObject({ logicalType: 'bool', storageType: 'uint' });
+    expect(result.value?.byName.spawnGeneration).toMatchObject({
+      logicalType: 'u32',
+      storageType: 'uint',
+    });
+  });
+
+  it('reserves spawnGeneration against custom redeclaration', () => {
+    const result = resolveAttributeSchema({
+      attributes: {
+        spawnGeneration: attribute('spawnGeneration', { default: 0, type: 'u32' }),
+      },
+      capacity: 1,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ATTRIBUTE_RESERVED_NAME' }),
+    );
   });
 
   it('accumulates duplicate declarations and key/name mismatches', () => {
@@ -292,7 +336,7 @@ describe('resolved attribute schema', () => {
     });
 
     expect(result).toMatchObject({ diagnostics: [], ok: true });
-    expect(result.value?.attributes).toEqual([]);
+    expect(result.value?.attributes.map(({ name }) => name)).toEqual(['alive', 'spawnGeneration']);
   });
 
   it('throws one diagnostic error containing independent normalization failures', () => {

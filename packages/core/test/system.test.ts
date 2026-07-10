@@ -11,6 +11,9 @@ import {
   defineEmitter,
   defineParameter,
   lifetime,
+  perDistance,
+  rate,
+  tslModule,
 } from '../src/index.js';
 import type {
   KernelComputeBuilder,
@@ -75,6 +78,15 @@ class FakeNode implements KernelUniformNode {
   div(): KernelNode {
     return this;
   }
+  equal(): KernelNode {
+    return this;
+  }
+  greaterThanEqual(): KernelNode {
+    return this;
+  }
+  lessThan(): KernelNode {
+    return this;
+  }
   mul(): KernelNode {
     return this;
   }
@@ -108,12 +120,18 @@ class FakeStorage implements KernelStorageNode {
   setName(): KernelStorageNode {
     return this;
   }
+  toAtomic(): KernelStorageNode {
+    return this;
+  }
 }
 
 class FakeCompute implements KernelComputeBuilder, KernelComputeNode {
   name = '';
 
   compute(): KernelComputeNode {
+    return this;
+  }
+  computeKernel(): KernelComputeNode {
     return this;
   }
   setName(name: string): KernelComputeNode {
@@ -126,6 +144,10 @@ function fakeAdapter(): KernelTslAdapter {
   const node = () => new FakeNode();
   return {
     instanceIndex: node(),
+    atomicAdd: node,
+    atomicLoad: node,
+    atomicStore: () => undefined,
+    branch: (_condition, whenTrue) => whenTrue(),
     constant: (value) => new FakeNode(value),
     cos: node,
     dataTexture: (lut) => lut,
@@ -134,6 +156,7 @@ function fakeAdapter(): KernelTslAdapter {
       return new FakeCompute();
     },
     instancedArray: () => new FakeStorage(),
+    indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     sampleTexture: node,
     sin: node,
     uniform: (value) => new FakeNode(value),
@@ -160,6 +183,16 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
       throw new Error('synthetic submit failure');
     }
     this.submissions.push((kernel as FakeCompute).name);
+  }
+
+  submitComputeIndirect(kernel: KernelComputeNode): void {
+    this.submitCompute(kernel);
+  }
+}
+
+class ZeroReadbackRenderer extends FakeRuntimeRenderer {
+  readStorage(): Promise<ArrayBuffer> {
+    return Promise.resolve(new Uint32Array(4).buffer);
   }
 }
 
@@ -350,14 +383,16 @@ describe('VFXSystem runtime scheduler', () => {
     expect(system.instanceCount).toBe(2);
   });
 
-  it('submits init once and update on subsequent time advances', async () => {
+  it('initializes the free list, spawns indirectly, and updates on time advances', async () => {
     const renderer = new FakeRuntimeRenderer();
     const system = new VFXSystem(renderer);
     const instance = system.spawn(runtimeEffect({ duration: 1 }));
     await system.update(0);
-    expect(renderer.submissions).toEqual(['NachiEmitterInit']);
+    expect(renderer.submissions).toContain('NachiEmitterInitialize');
+    expect(renderer.submissions).toContain('NachiEmitterSpawn');
+    expect(renderer.submissions).toContain('NachiEmitterCompactAlive');
     await system.update(0.1);
-    expect(renderer.submissions).toEqual(['NachiEmitterInit', 'NachiEmitterUpdate']);
+    expect(renderer.submissions).toContain('NachiEmitterUpdate');
     expect(instance.localTime).toBeCloseTo(0.1);
   });
 
@@ -407,12 +442,8 @@ describe('VFXSystem runtime scheduler', () => {
     const system = new VFXSystem(renderer, undefined, { prewarmStepSeconds: 0.1 });
     const instance = system.spawn(runtimeEffect({ duration: 1, prewarm: 0.3 }));
     await system.update(0);
-    expect(renderer.submissions).toEqual([
-      'NachiEmitterInit',
-      'NachiEmitterUpdate',
-      'NachiEmitterUpdate',
-      'NachiEmitterUpdate',
-    ]);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterUpdate')).toHaveLength(3);
     expect(
       instance.getEmitter('particles')?.kernels.uniforms['Emitter.localTime']?.value,
     ).toBeCloseTo(0.3);
@@ -426,7 +457,7 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.getEmitter('particles')?.spawnGeneration).toBe(0);
     await system.update(0.1);
     expect(instance.getEmitter('particles')?.spawnGeneration).toBe(1);
-    expect(renderer.submissions.filter((name) => name === 'NachiEmitterInit')).toHaveLength(2);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(2);
   });
 
   it('completes only after lifecycle completion plus conservative lifetime drain', async () => {
@@ -464,7 +495,7 @@ describe('VFXSystem runtime scheduler', () => {
     );
   });
 
-  it('rejects non-burst spawn modules in the M2 runtime batch', () => {
+  it('rejects unregistered spawn modules through the unified registry', () => {
     const unsupportedSpawn: ModuleDefinition<'spawn', Record<string, never>> = {
       access: { reads: [], writes: ['Emitter.spawnCount'] },
       config: {},
@@ -483,7 +514,7 @@ describe('VFXSystem runtime scheduler', () => {
     );
     expect(instance.state).toBe('error');
     expect(instance.diagnostics).toContainEqual(
-      expect.objectContaining({ code: 'NACHI_M2_SPAWN_UNSUPPORTED', phase: 'compile' }),
+      expect.objectContaining({ code: 'NACHI_MODULE_UNKNOWN', phase: 'compile' }),
     );
   });
 
@@ -529,5 +560,177 @@ describe('VFXSystem runtime scheduler', () => {
     expect(() => instance.setParameter('User.intensity', 'bad' as never)).toThrow(
       VfxDiagnosticError,
     );
+  });
+
+  it('throws NACHI_INSTANCE_RELEASED from released-instance methods', () => {
+    const parameterDefinition = defineParameter('User.intensity', {
+      default: 1,
+      mutable: true,
+      type: 'f32',
+    });
+    const emitter = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: { particles: emitter },
+        parameters: { 'User.intensity': parameterDefinition },
+      }),
+    );
+    instance.release();
+
+    for (const operation of [
+      () => instance.setParameter('User.intensity', 2),
+      () => instance.setTimeScale(2),
+      () => instance.setTransform([1, 2, 3]),
+      () => instance.applyHitStop(10),
+      () => instance.stop(),
+      () => instance.getEmitter('particles'),
+    ]) {
+      expect(operation).toThrowError(
+        expect.objectContaining({
+          diagnostics: [expect.objectContaining({ code: 'NACHI_INSTANCE_RELEASED' })],
+        }),
+      );
+    }
+    expect(() => instance.release()).not.toThrow();
+  });
+
+  it('latches device loss for instances spawned after the loss', async () => {
+    let loseDevice!: (info: VfxDeviceLossInfo) => void;
+    const deviceLost = new Promise<VfxDeviceLossInfo>((resolve) => {
+      loseDevice = resolve;
+    });
+    const base = new FakeRuntimeRenderer();
+    const renderer: VfxRuntimeRenderer = {
+      deviceLost,
+      kernelAdapter: base.kernelAdapter,
+      submitCompute: (kernel) => base.submitCompute(kernel),
+      submitComputeIndirect: (kernel) => base.submitCompute(kernel),
+    };
+    const system = new VFXSystem(renderer);
+    loseDevice({ reason: 'destroyed' });
+    await deviceLost;
+    await Promise.resolve();
+
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_DEVICE_LOST' }),
+    );
+  });
+
+  it('accumulates fractional rate spawn under fixed timesteps', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { stepSeconds: 0.1 },
+    });
+    const emitter = defineEmitter({
+      capacity: 8,
+      integration: 'none',
+      lifecycle: { duration: 1 },
+      render: computeRender,
+      spawn: rate({ rate: 2.5 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+    await system.update(0.4);
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(1);
+  });
+
+  it('converts transform distance into per-distance spawn count', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 16,
+      integration: 'none',
+      lifecycle: { duration: 1 },
+      render: computeRender,
+      spawn: perDistance({ rate: 2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+    instance.setTransform([3, 4, 0]);
+    await system.update(0.1);
+
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(
+      10,
+    );
+  });
+
+  it('schedules additional burst cycles when interval boundaries are crossed', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 8,
+      integration: 'none',
+      lifecycle: { duration: 1 },
+      render: computeRender,
+      spawn: burst({ count: 1, cycles: 3, interval: 0.2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+    await system.update(0.5);
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(2);
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(2);
+  });
+
+  it('can complete from opt-in exact alive-count readback', async () => {
+    const system = new VFXSystem(new ZeroReadbackRenderer(), undefined, {
+      aliveCountReadbackInterval: 1,
+    });
+    const instance = system.spawn(runtimeEffect({ duration: 0, lifetime: 10 }));
+    await system.update(0);
+    expect(instance.state).toBe('complete');
+  });
+
+  it('treats an emitter without a lifetime declaration as unbounded', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(100);
+    expect(instance.state).toBe('active');
+  });
+
+  it('treats a non-core lifetime writer as conservatively unbounded', async () => {
+    const customLifetime = tslModule(({ lifetime: value }) => ({ lifetime: value }), {
+      stage: 'init',
+    });
+    const emitter = defineEmitter({
+      capacity: 1,
+      init: [customLifetime],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(100);
+    expect(instance.state).toBe('active');
+  });
+
+  it('rejects invalid alive-count readback intervals', () => {
+    expect(
+      () => new VFXSystem(new FakeRuntimeRenderer(), undefined, { aliveCountReadbackInterval: 0 }),
+    ).toThrow(RangeError);
+  });
+
+  it('writes setTransform translation into Emitter.transform', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    instance.setTransform([3, 4, 5]);
+    const matrix = instance.getEmitter('particles')?.kernels.uniforms['Emitter.transform']?.value;
+    expect(matrix).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1]);
   });
 });

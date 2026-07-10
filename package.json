@@ -12,6 +12,7 @@
     "test": "vitest run",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint .",
+    "prettier": "prettier --check .",
     "format": "prettier --write ."
   },
   "devDependencies": {

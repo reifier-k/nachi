@@ -37,9 +37,11 @@ import type {
   ParameterGenerator,
   ParameterPath,
   ParameterSchema,
+  PerDistanceSpawnOptions,
   PlayAction,
   PositionSphereOptions,
   RangeGenerator,
+  RateSpawnOptions,
   RenderModule,
   SpawnModule,
   StopAction,
@@ -131,7 +133,8 @@ function addEventQueueWrite(module: EventModule, eventName: string): EventModule
 
 export function range<T extends number | Vec2 | Vec3 | Vec4>(min: T, max: T): RangeGenerator<T> {
   // The stage compiler resolves this with pcgRandomFloatNode(particleIndex, emitterSeed,
-  // moduleSlot, spawnGeneration). moduleSlot combines the stage with a label or stage index.
+  // moduleSlot, Particles.spawnGeneration). Spawn-policy ranges use their emission-batch
+  // generation on CPU because no physical particle has been allocated at that stage yet.
   return { distribution: 'uniform', kind: 'range', max, min };
 }
 
@@ -218,16 +221,32 @@ export function burst(options: BurstOptions): SpawnModule {
   });
 }
 
+export function rate(options: RateSpawnOptions | number): SpawnModule {
+  const config = typeof options === 'number' ? { rate: options } : options;
+  return createModule('spawn', 'core/rate', config, {
+    reads: ['Emitter.deltaTime'],
+    writes: ['Emitter.spawnCount'],
+  });
+}
+
+export function perDistance(options: PerDistanceSpawnOptions | number): SpawnModule {
+  const config = typeof options === 'number' ? { rate: options } : options;
+  return createModule('spawn', 'core/per-distance', config, {
+    reads: ['Emitter.transform'],
+    writes: ['Emitter.spawnCount'],
+  });
+}
+
 export function positionSphere(options: PositionSphereOptions): InitModule {
   return createModule('init', 'core/position-sphere', options, {
-    reads: ['Emitter.transform', 'Emitter.seed', 'Emitter.spawnGeneration'],
+    reads: ['Emitter.transform', 'Emitter.seed', 'Particles.spawnGeneration'],
     writes: ['Particles.position'],
   });
 }
 
 export function velocityCone(options: VelocityConeOptions): InitModule {
   return createModule('init', 'core/velocity-cone', options, {
-    reads: ['Emitter.seed', 'Emitter.spawnGeneration'],
+    reads: ['Emitter.seed', 'Particles.spawnGeneration'],
     writes: ['Particles.velocity'],
   });
 }

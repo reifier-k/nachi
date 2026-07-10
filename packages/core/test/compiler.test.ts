@@ -20,9 +20,11 @@ import {
   KernelModuleRegistry,
   lifetime,
   parameter,
+  perDistance,
   pcgRandomFloat,
   positionSphere,
   range,
+  rate,
   resolveRandomSampleSlot,
   sizeOverLife,
   tslModule,
@@ -111,6 +113,15 @@ class FakeNode implements KernelUniformNode {
   div(): KernelNode {
     return this;
   }
+  equal(): KernelNode {
+    return this;
+  }
+  greaterThanEqual(): KernelNode {
+    return this;
+  }
+  lessThan(): KernelNode {
+    return this;
+  }
   mul(): KernelNode {
     return this;
   }
@@ -144,6 +155,9 @@ class FakeStorage implements KernelStorageNode {
   setName(): KernelStorageNode {
     return this;
   }
+  toAtomic(): KernelStorageNode {
+    return this;
+  }
 }
 
 class RejectParticleOffsetNode extends FakeNode {
@@ -165,6 +179,9 @@ class CaptureBitXorNode extends FakeNode {
 
 class FakeCompute implements KernelComputeBuilder, KernelComputeNode {
   compute(): KernelComputeNode {
+    return this;
+  }
+  computeKernel(): KernelComputeNode {
     return this;
   }
   setName(): KernelComputeNode {
@@ -253,7 +270,9 @@ function traceCoreImplementation(
   lutId?: string,
 ): { reads: string[]; writes: string[] } {
   const implementation = createCoreKernelModuleRegistry().resolve(type, 1);
-  if (!implementation) throw new Error(`Missing core implementation ${type}.`);
+  if (!implementation || implementation.stage === 'spawn') {
+    throw new Error(`Missing core implementation ${type}.`);
+  }
   const trace: ImplementationAccessTrace = { reads: new Set(), writes: new Set() };
   const module: CompiledKernelModule = {
     access: implementation.access,
@@ -274,7 +293,7 @@ function traceCoreImplementation(
     attribute: (name) => node(`Particles.${name}`),
     random: () => {
       trace.reads.add('Emitter.seed');
-      trace.reads.add('Emitter.spawnGeneration');
+      trace.reads.add('Particles.spawnGeneration');
       return new FakeNode();
     },
     sampleLut: (_id, coordinate) => {
@@ -299,6 +318,10 @@ function fakeAdapter(): KernelTslAdapter {
   const node = () => new FakeNode();
   return {
     instanceIndex: node(),
+    atomicAdd: node,
+    atomicLoad: node,
+    atomicStore: () => undefined,
+    branch: (_condition, whenTrue) => whenTrue(),
     constant: (value) => new FakeNode(value),
     cos: node,
     dataTexture: (lut) => lut,
@@ -307,6 +330,7 @@ function fakeAdapter(): KernelTslAdapter {
       return new FakeCompute();
     },
     instancedArray: () => new FakeStorage(),
+    indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     sampleTexture: node,
     sin: node,
     uniform: (value) => new FakeNode(value),
@@ -352,7 +376,12 @@ describe('emitter kernel compiler', () => {
       source: 'compiler',
     });
     expect(program.kernels.init.modules[0]).toMatchObject({
-      access: { reads: [], writes: program.attributeSchema.attributes.map(({ path }) => path) },
+      access: {
+        reads: [],
+        writes: program.attributeSchema.attributes
+          .filter(({ name }) => name !== 'alive' && name !== 'spawnGeneration')
+          .map(({ path }) => path),
+      },
       label: '$defaults',
       source: 'compiler',
       type: 'core/defaults',
@@ -528,7 +557,8 @@ describe('emitter kernel compiler', () => {
         uint: capture,
       }),
     ).not.toThrow();
-    expect(numericBitXors).toHaveLength(3);
+    // The legacy all-slots Init kernel and the M2 free-list Spawn kernel build the same streams.
+    expect(numericBitXors).toHaveLength(6);
     expect(new Set(numericBitXors).size).toBe(3);
   });
 
@@ -541,7 +571,7 @@ describe('emitter kernel compiler', () => {
     );
     expect(
       program.kernels.init.modules.find(({ type }) => type === 'core/velocity-cone')?.access.reads,
-    ).toEqual(['Emitter.seed', 'Emitter.spawnGeneration']);
+    ).toEqual(['Emitter.seed', 'Particles.spawnGeneration']);
   });
 
   it('resolves integration attributes and carries built-in defaults', () => {
@@ -549,10 +579,12 @@ describe('emitter kernel compiler', () => {
     expect(program.attributeSchema.attributes.map(({ name }) => name)).toEqual([
       'position',
       'velocity',
+      'alive',
+      'spawnGeneration',
     ]);
     expect(program.attributeSchema.byName.position?.default).toEqual([0, 0, 0]);
     expect(program.attributeSchema.byName.velocity?.default).toEqual([0, 0, 0]);
-    expect(program.meta.storageBufferCount).toBe(2);
+    expect(program.meta.storageBufferCount).toBe(6);
   });
 
   it('counts schema storage buffers and diagnoses a device stage-limit overflow', () => {
@@ -569,8 +601,8 @@ describe('emitter kernel compiler', () => {
     });
     const program = compileEmitter(emitter);
 
-    expect(program.attributeSchema.storageArrays).toHaveLength(9);
-    expect(program.meta.storageBufferCount).toBe(9);
+    expect(program.attributeSchema.storageArrays).toHaveLength(11);
+    expect(program.meta.storageBufferCount).toBe(13);
     let buildError: unknown;
     try {
       program.buildKernels({
@@ -593,9 +625,140 @@ describe('emitter kernel compiler', () => {
     expect(() =>
       program.buildKernels({
         ...fakeAdapter(),
-        deviceLimits: { maxStorageBuffersPerShaderStage: 9 },
+        deviceLimits: { maxStorageBuffersPerShaderStage: 13 },
       }),
     ).not.toThrow();
+  });
+
+  it('compiles burst, rate, and per-distance through the unified registry', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 8,
+        integration: 'none',
+        render: computeRender,
+        spawn: [burst({ count: 2 }), rate({ rate: 3 }), perDistance({ rate: 4 })],
+      }),
+    );
+
+    expect(program.spawn.modules.map(({ type }) => type)).toEqual([
+      'core/burst',
+      'core/rate',
+      'core/per-distance',
+    ]);
+    expect(program.diagnostics).toEqual([]);
+  });
+
+  it('publishes explicit WebGPU and WebGL2 lifecycle capability paths', () => {
+    expect(compileEmitter(baseEmitter()).meta.capabilities).toEqual({
+      webgl2: {
+        aliveCount: 'cpu-readback',
+        allocation: 'prefix-cpu-fallback',
+        indirectDraw: false,
+      },
+      webgpu: {
+        aliveCount: 'atomic-compaction',
+        allocation: 'atomic-free-list',
+        indirectDraw: true,
+      },
+    });
+  });
+
+  it('materializes WebGL2 without atomic or indirect lifecycle nodes', () => {
+    const unsupported = () => {
+      throw new Error('unsupported WebGL2 operation was materialized');
+    };
+    const built = compileEmitter(baseEmitter()).buildKernels({
+      ...fakeAdapter(),
+      atomicAdd: unsupported,
+      atomicLoad: unsupported,
+      atomicStore: unsupported,
+      capabilities: {
+        atomics: false,
+        backend: 'webgl2',
+        indirectDispatch: false,
+        indirectDraw: false,
+      },
+      indirectArray: unsupported,
+    });
+
+    expect(built.capabilityPath).toBe('webgl2-cpu-readback');
+    expect(built.drawIndirect).toBeUndefined();
+    expect(built.spawnDispatch).toBeUndefined();
+  });
+
+  it('rejects a spawn module that writes particle state', () => {
+    const illegal = {
+      ...burst({ count: 1 }),
+      access: { reads: [], writes: ['Particles.alive'] },
+    } as ModuleDefinition<'spawn', object>;
+    const program = compileEmitter({ ...baseEmitter(), spawn: illegal });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_STAGE_WRITE_FORBIDDEN',
+        path: 'spawn[0].access.writes[0]',
+      }),
+    );
+  });
+
+  it('rejects an init module that writes emitter state', () => {
+    const illegal: ModuleDefinition<'init', object> = {
+      access: { reads: [], writes: ['Emitter.age'] },
+      config: {},
+      kind: 'module',
+      stage: 'init',
+      type: 'test/illegal-init',
+      version: 1,
+    };
+    const program = compileEmitter({ ...baseEmitter(), init: [illegal] });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_STAGE_WRITE_FORBIDDEN' }),
+    );
+  });
+
+  it('rejects a render module that writes simulation state', () => {
+    const illegalRender: ModuleDefinition<'render', object> = {
+      access: { reads: [], writes: ['Particles.alive'] },
+      config: {},
+      kind: 'module',
+      stage: 'render',
+      type: 'test/illegal-render',
+      version: 1,
+    };
+    const program = compileEmitter({ ...baseEmitter(), render: illegalRender });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_STAGE_WRITE_FORBIDDEN' }),
+    );
+  });
+
+  it('diagnoses invalid rate spawn values', () => {
+    const program = compileEmitter({ ...baseEmitter(), spawn: rate({ rate: -1 }) });
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_SPAWN_RATE_INVALID', path: 'spawn[0].config.rate' }),
+    );
+  });
+
+  it('diagnoses invalid per-distance spawn values', () => {
+    const program = compileEmitter({ ...baseEmitter(), spawn: perDistance(Number.NaN) });
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_SPAWN_RATE_INVALID' }),
+    );
+  });
+
+  it('diagnoses non-positive burst cycle counts', () => {
+    const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count: 1, cycles: 0 }) });
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_BURST_CYCLES_INVALID' }),
+    );
+  });
+
+  it('requires an interval for multi-cycle bursts', () => {
+    const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count: 1, cycles: 2 }) });
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_BURST_INTERVAL_REQUIRED' }),
+    );
   });
 
   it('describes system, emitter, and declared user uniforms', () => {
