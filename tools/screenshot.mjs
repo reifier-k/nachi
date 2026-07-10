@@ -278,11 +278,13 @@ try {
 
         const meanAbsoluteDifference = totalDifference / pixelCount;
         const changedPixelRatio = changedPixels / pixelCount;
+        const fadeOnPartiallyVisible = changedPixelRatio < 0.35;
         return {
           changedPixelRatio: Number(changedPixelRatio.toFixed(5)),
           comparisonPath: null,
+          fadeOnPartiallyVisible,
           meanAbsoluteDifference: Number(meanAbsoluteDifference.toFixed(3)),
-          ok: meanAbsoluteDifference > 1 && changedPixelRatio > 0.01,
+          ok: meanAbsoluteDifference > 1 && changedPixelRatio > 0.01 && fadeOnPartiallyVisible,
           sampledPixels: pixelCount,
         };
       },

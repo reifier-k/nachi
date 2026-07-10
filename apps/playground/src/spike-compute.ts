@@ -20,6 +20,7 @@ import {
   vec3,
 } from 'three/tsl';
 
+import { createPerformanceMonitor } from './perf';
 import './spike-compute.css';
 
 const DEFAULT_PARTICLE_COUNT = 100_000;
@@ -29,7 +30,7 @@ const FIXED_DELTA_SECONDS = 1 / 60;
 const WORKGROUP_SIZE = 64;
 const METRIC_WINDOW = 60;
 const TIMING_NOTE =
-  'encodeMs measures computeAsync CPU encode/submission wall time, not GPU execution. True GPU time requires timestamp queries on a real-GPU measurement layer.';
+  'encodeMs measures computeAsync CPU encode/submission wall time, not GPU execution. Timestamp-query GPU time is reported separately in data-perf-result.gpu when the selected adapter supports it.';
 
 type BackendName = 'WebGL2' | 'WebGPU';
 type CapabilityStatus = 'error' | 'supported' | 'unsupported';
@@ -76,7 +77,8 @@ type ReadbackValidation = {
   dispatchArgs: number[] | null;
   dispatchBoundaryValue: number | null;
   dispatchIndirectOk: boolean;
-  dispatchLastActiveValue: number | null;
+  dispatchInvocationCount: number | null;
+  dispatchLastInvocationValue: number | null;
   expectedAliveCount: number;
   inactiveAge: number;
   inactiveY: number;
@@ -285,6 +287,7 @@ async function runSpike(): Promise<void> {
   const renderer = new THREE.WebGPURenderer({
     antialias: !headless,
     forceWebGL: requestedBackend === 'webgl',
+    trackTimestamp: true,
   });
   if (!headless) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -300,6 +303,11 @@ async function runSpike(): Promise<void> {
     throw new Error(`Backend mismatch: requested ${expectedBackend}, active ${activeBackend}.`);
   }
   if (activeBackend === 'WebGL2') installWebGlShaderErrorTrap(renderer);
+  const performanceMonitor = createPerformanceMonitor(renderer, {
+    gpuScopes: ['compute', 'render'],
+    mode: headless ? 'headless' : 'visual',
+    page: 'spike-compute',
+  });
 
   root.dataset.backend = activeBackend;
   root.dataset.rendererStatus = 'ready';
@@ -357,7 +365,8 @@ async function runSpike(): Promise<void> {
   const dispatchIndirectArguments = storage(dispatchIndirectAttribute, 'uint', 3).setName(
     'DispatchIndirectArgs',
   );
-  const dispatchOutput = instancedArray(new Uint32Array(particleCount), 'uint').setName(
+  const dispatchOutputCount = Math.ceil(particleCount / WORKGROUP_SIZE) * WORKGROUP_SIZE + 1;
+  const dispatchOutput = instancedArray(new Uint32Array(dispatchOutputCount), 'uint').setName(
     'DispatchIndirectOutput',
   );
   if (activeBackend === 'WebGPU') geometry.setIndirect(drawIndirectAttribute);
@@ -476,9 +485,7 @@ async function runSpike(): Promise<void> {
     .setName('FinalizeIndirectArguments');
 
   const dispatchProbeKernel = Fn(() => {
-    If(instanceIndex.lessThan(aliveLimit), () => {
-      dispatchOutput.element(instanceIndex).assign(instanceIndex.mul(uint(3)).add(uint(7)));
-    });
+    dispatchOutput.element(instanceIndex).assign(instanceIndex.mul(uint(3)).add(uint(7)));
   })()
     .computeKernel([WORKGROUP_SIZE])
     .setName('DispatchIndirectProbe');
@@ -540,11 +547,18 @@ async function runSpike(): Promise<void> {
         `Atomic probe did not execute correctly (returned ${String(data[0])}, expected 1).`,
       );
     } catch (error) {
-      return capability(
-        'unsupported',
-        'WebGL2 transform-feedback shaders have no TSL atomic lowering; shader compilation failed as expected.',
-        error,
-      );
+      const message = errorMessage(error);
+      const isAtomicShaderCompilationFailure =
+        /atomic(?:Add|Store|Load)|no matching overloaded function[^\n]*atomic|undeclared identifier[^\n]*atomic|syntax error[^\n]*&|&[^\n]*syntax error/i.test(
+          message,
+        );
+      return isAtomicShaderCompilationFailure
+        ? capability(
+            'unsupported',
+            'WebGL2 transform-feedback shaders have no atomic lowering; the shader compiler rejected the atomic operation.',
+            error,
+          )
+        : capability('error', 'WebGL2 atomic probe failed for an unexpected reason.', error);
     }
   };
 
@@ -613,7 +627,8 @@ async function runSpike(): Promise<void> {
     let aliveCount: number | null = null;
     let indirectArgs: number[] | null = null;
     let dispatchArgs: number[] | null = null;
-    let dispatchLastActiveValue: number | null = null;
+    let dispatchInvocationCount: number | null = null;
+    let dispatchLastInvocationValue: number | null = null;
     let dispatchBoundaryValue: number | null = null;
     let atomicOk = false;
     let indirectOk = false;
@@ -630,8 +645,9 @@ async function runSpike(): Promise<void> {
       indirectArgs = [...new Uint32Array(drawData).slice(0, 5)];
       dispatchArgs = [...new Uint32Array(dispatchData).slice(0, 3)];
       const dispatchValues = new Uint32Array(dispatchOutputData);
-      dispatchLastActiveValue = dispatchValues[expectedAliveCount - 1] ?? null;
-      dispatchBoundaryValue = dispatchValues[expectedAliveCount] ?? null;
+      dispatchInvocationCount = (dispatchArgs[0] ?? 0) * WORKGROUP_SIZE;
+      dispatchLastInvocationValue = dispatchValues[dispatchInvocationCount - 1] ?? null;
+      dispatchBoundaryValue = dispatchValues[dispatchInvocationCount] ?? null;
       atomicOk = aliveCount === expectedAliveCount;
       indirectOk =
         indirectArgs[0] === indexCount &&
@@ -641,7 +657,8 @@ async function runSpike(): Promise<void> {
         dispatchArgs[0] === Math.ceil(expectedAliveCount / WORKGROUP_SIZE) &&
         dispatchArgs[1] === 1 &&
         dispatchArgs[2] === 1 &&
-        dispatchLastActiveValue === (expectedAliveCount - 1) * 3 + 7 &&
+        dispatchInvocationCount > 0 &&
+        dispatchLastInvocationValue === (dispatchInvocationCount - 1) * 3 + 7 &&
         dispatchBoundaryValue === 0;
     }
 
@@ -655,7 +672,8 @@ async function runSpike(): Promise<void> {
       dispatchArgs,
       dispatchBoundaryValue,
       dispatchIndirectOk,
-      dispatchLastActiveValue,
+      dispatchInvocationCount,
+      dispatchLastInvocationValue,
       expectedAliveCount,
       inactiveAge: roundMetric(inactiveAge),
       inactiveY: roundMetric(inactiveY),
@@ -777,6 +795,8 @@ async function runSpike(): Promise<void> {
       false,
     );
     setMetrics(null, encodeMs, validation.expectedAliveCount);
+    await performanceMonitor.resolveGpuTimestamps();
+    performanceMonitor.publish();
     publishResult(result);
     root.dataset.spikeStatus = result.ok ? 'complete' : 'error';
     statusValue.textContent = result.ok
@@ -838,6 +858,7 @@ async function runSpike(): Promise<void> {
       if (activeBackend === 'WebGL2') particles.count = aliveLimit.value;
       renderer.render(scene, camera);
       renderedFrames += 1;
+      performanceMonitor.recordFrame(timestamp);
 
       if (timestamp - lastHudUpdate >= 200) {
         const frameAverage = frameSamples.mean();

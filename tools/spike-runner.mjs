@@ -42,7 +42,7 @@ function parseArguments(arguments_) {
 
 const diagnostics = { console: [], pageErrors: [] };
 let browser;
-let adapterInfo;
+let webgpuAdapterInfo;
 let target = { adapter: 'swiftshader', url: `${DEFAULT_URL}?headless=1` };
 let outcome;
 
@@ -64,7 +64,7 @@ try {
   });
 
   await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  adapterInfo = await page.evaluate(async () => {
+  webgpuAdapterInfo = await page.evaluate(async () => {
     const adapter = await navigator.gpu?.requestAdapter();
     if (!adapter) return null;
     const { architecture, description, device, vendor } = adapter.info;
@@ -83,6 +83,7 @@ try {
     backend: document.documentElement.dataset.backend ?? null,
     error: document.documentElement.dataset.spikeError ?? null,
     result: document.documentElement.dataset.spikeResult ?? null,
+    performance: document.documentElement.dataset.perfResult ?? null,
     status: document.documentElement.dataset.spikeStatus ?? null,
   }));
   if (!harnessState.result) {
@@ -90,13 +91,18 @@ try {
   }
 
   const result = JSON.parse(harnessState.result);
+  if (harnessState.status === 'complete' && !harnessState.performance) {
+    throw new Error('Spike finished without data-perf-result.');
+  }
+  const performanceResult = harnessState.performance ? JSON.parse(harnessState.performance) : null;
   outcome = {
     ...result,
     ok: harnessState.status === 'complete' && result.ok === true,
     url: target.url,
     requestedAdapter: target.adapter,
-    adapterInfo,
+    webgpuAdapterInfo,
     backend: harnessState.backend,
+    performance: performanceResult,
     diagnostics,
   };
 
@@ -111,7 +117,7 @@ try {
     indirectOk: false,
     url: target.url,
     requestedAdapter: target.adapter,
-    adapterInfo,
+    webgpuAdapterInfo,
     error: error instanceof Error ? error.message : String(error),
     diagnostics,
   };

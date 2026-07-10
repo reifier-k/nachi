@@ -2,6 +2,7 @@ import * as THREE from 'three/webgpu';
 import { color, mix, normalLocal, positionLocal, sin, time } from 'three/tsl';
 import { Pane } from 'tweakpane';
 
+import { createPerformanceMonitor } from './perf';
 import './style.css';
 
 const sceneHost = document.querySelector<HTMLDivElement>('#scene');
@@ -25,7 +26,7 @@ scene.background = new THREE.Color(0x050813);
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
 camera.position.set(0, 0.15, 4.6);
 
-const renderer = new THREE.WebGPURenderer({ antialias: true, forceWebGL });
+const renderer = new THREE.WebGPURenderer({ antialias: true, forceWebGL, trackTimestamp: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 sceneHost.append(renderer.domElement);
@@ -46,6 +47,11 @@ type RendererBackendLike = {
 
 const backend = renderer.backend as RendererBackendLike;
 const activeBackend = backend.isWebGPUBackend ? 'WebGPU' : 'WebGL2';
+const performanceMonitor = createPerformanceMonitor(renderer, {
+  gpuScopes: ['render'],
+  mode: 'visual',
+  page: 'playground',
+});
 backendValue.textContent = activeBackend;
 document.documentElement.dataset.backend = activeBackend;
 document.documentElement.dataset.rendererStatus = 'ready';
@@ -131,6 +137,7 @@ renderer.setAnimationLoop((timestamp: number) => {
   }
 
   renderer.render(scene, camera);
+  performanceMonitor.recordFrame(timestamp);
 
   if (!sceneReady) {
     sceneReady = true;

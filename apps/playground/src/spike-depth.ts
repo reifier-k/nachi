@@ -14,6 +14,7 @@ import {
   viewportDepthTexture,
 } from 'three/tsl';
 
+import { createPerformanceMonitor } from './perf';
 import './spike-depth.css';
 
 type BackendName = 'WebGL2' | 'WebGPU';
@@ -21,6 +22,14 @@ type DeviceLostInfoLike = { message?: string; reason?: string };
 type RendererBackendLike = {
   device?: { lost: Promise<DeviceLostInfoLike> };
   isWebGPUBackend?: boolean;
+};
+
+type DepthReadbackComparison = {
+  changedPixelRatio: number;
+  fadeOnPartiallyVisible: boolean;
+  meanAbsoluteDifference: number;
+  ok: boolean;
+  sampledPixels: number;
 };
 
 type DepthResult = {
@@ -33,9 +42,10 @@ type DepthResult = {
   depthFade: 'off' | 'on';
   mode: 'headless' | 'visual';
   postProcessing: {
-    className: 'PostProcessing';
+    className: 'RenderPipeline';
     status: 'encoded';
   };
+  readback: DepthReadbackComparison | null;
   presented: boolean;
   renderTarget: 'canvas' | 'offscreen';
   requestedBackend: 'webgl' | 'webgpu';
@@ -105,6 +115,7 @@ async function runDepthSpike(): Promise<void> {
   const renderer = new THREE.WebGPURenderer({
     antialias: true,
     forceWebGL: requestedBackend === 'webgl',
+    trackTimestamp: true,
   });
   renderer.setPixelRatio(headless ? 1 : Math.min(window.devicePixelRatio, 2));
   renderer.setSize(width, height);
@@ -118,6 +129,11 @@ async function runDepthSpike(): Promise<void> {
     throw new Error(`Backend mismatch: requested ${expectedBackend}, active ${activeBackend}.`);
   }
   if (activeBackend === 'WebGL2') installWebGlShaderErrorTrap(renderer);
+  const performanceMonitor = createPerformanceMonitor(renderer, {
+    gpuScopes: ['render'],
+    mode: headless ? 'headless' : 'visual',
+    page: 'spike-depth',
+  });
 
   backendValue.textContent = activeBackend;
   root.dataset.backend = activeBackend;
@@ -211,8 +227,8 @@ async function runDepthSpike(): Promise<void> {
     cos(screenUV.x.mul(27).sub(distortionTime.mul(1.3))),
   ).mul(0.009);
   const distortedColor = sceneColor.sample(screenUV.add(distortion).clamp(0.002, 0.998));
-  const postProcessing = new THREE.PostProcessing(renderer);
-  postProcessing.outputNode = distortedColor;
+  const renderPipeline = new THREE.RenderPipeline(renderer);
+  renderPipeline.outputNode = distortedColor;
 
   const updateFadeState = (): void => {
     const enabled = root.dataset.depthFade !== 'off';
@@ -228,7 +244,10 @@ async function runDepthSpike(): Promise<void> {
     attributes: true,
   });
 
-  const createResult = (presented: boolean): DepthResult => ({
+  const createResult = (
+    presented: boolean,
+    readback: DepthReadbackComparison | null = null,
+  ): DepthResult => ({
     activeBackend,
     depthAccess: {
       nodePath: 'linearDepth(viewportDepthTexture(screenUV))',
@@ -236,43 +255,82 @@ async function runDepthSpike(): Promise<void> {
     },
     depthFade: root.dataset.depthFade === 'off' ? 'off' : 'on',
     mode: headless ? 'headless' : 'visual',
-    ok: true,
-    postProcessing: { className: 'PostProcessing', status: 'encoded' },
+    ok: readback?.ok ?? true,
+    postProcessing: { className: 'RenderPipeline', status: 'encoded' },
     presented,
+    readback,
     renderTarget: headless ? 'offscreen' : 'canvas',
     requestedBackend,
   });
 
-  const publishResult = (presented: boolean): void => {
-    const result = createResult(presented);
+  const publishResult = (
+    presented: boolean,
+    readback: DepthReadbackComparison | null = null,
+  ): DepthResult => {
+    const result = createResult(presented, readback);
     root.dataset.depthResult = JSON.stringify(result);
     root.dataset.spikeResult = root.dataset.depthResult;
     root.dataset.depthAccess = 'encoded';
     root.dataset.postProcessing = 'encoded';
     depthValue.textContent = 'Encoded';
     postValue.textContent = 'Encoded';
+    return result;
   };
 
   if (headless) {
-    const offscreenTarget = new THREE.RenderTarget(640, 360, { depthBuffer: true });
+    const targetWidth = 640;
+    const targetHeight = 360;
+    const offscreenTarget = new THREE.RenderTarget(targetWidth, targetHeight, {
+      depthBuffer: true,
+    });
     renderer.setRenderTarget(offscreenTarget);
-    postProcessing.render();
+
+    root.dataset.depthFade = 'on';
+    updateFadeState();
+    renderPipeline.render();
+    const fadeOnPixels = await renderer.readRenderTargetPixelsAsync(
+      offscreenTarget,
+      0,
+      0,
+      targetWidth,
+      targetHeight,
+    );
+
+    root.dataset.depthFade = 'off';
+    updateFadeState();
+    renderPipeline.render();
+    const fadeOffPixels = await renderer.readRenderTargetPixelsAsync(
+      offscreenTarget,
+      0,
+      0,
+      targetWidth,
+      targetHeight,
+    );
+
+    const readback = compareDepthReadbacks(fadeOnPixels, fadeOffPixels);
+    root.dataset.depthFade = 'on';
+    updateFadeState();
     renderer.setRenderTarget(null);
-    publishResult(false);
+    const result = publishResult(false, readback);
+    await performanceMonitor.resolveGpuTimestamps();
+    performanceMonitor.publish();
     root.dataset.rendererStatus = 'ready';
-    root.dataset.spikeStatus = 'complete';
-    statusValue.textContent = `${activeBackend} offscreen encode complete (no canvas present)`;
+    root.dataset.spikeStatus = result.ok ? 'complete' : 'error';
+    statusValue.textContent = result.ok
+      ? `${activeBackend} offscreen depth readback verified (no canvas present)`
+      : `${activeBackend} offscreen depth readback comparison failed`;
     return;
   }
 
   let firstFrame = true;
-  renderer.setAnimationLoop(() => {
+  renderer.setAnimationLoop((timestamp: number) => {
     if (!staticMode) {
       centerBox.rotation.y += 0.0025;
       rearTorus.rotation.x += 0.003;
       rearTorus.rotation.y -= 0.004;
     }
-    postProcessing.render();
+    renderPipeline.render();
+    performanceMonitor.recordFrame(timestamp);
     publishResult(true);
     root.dataset.spikeStatus = 'running';
     statusValue.textContent = 'Depth fade and distortion running';
@@ -294,3 +352,36 @@ async function runDepthSpike(): Promise<void> {
 }
 
 void runDepthSpike().catch(recordFailure);
+
+function compareDepthReadbacks(
+  fadeOnPixels: ArrayLike<number>,
+  fadeOffPixels: ArrayLike<number>,
+): DepthReadbackComparison {
+  if (fadeOnPixels.length !== fadeOffPixels.length || fadeOnPixels.length === 0) {
+    throw new Error('Depth readback buffers were empty or had mismatched lengths.');
+  }
+
+  let totalDifference = 0;
+  let changedPixels = 0;
+  const pixelCount = fadeOnPixels.length / 4;
+  for (let offset = 0; offset < fadeOnPixels.length; offset += 4) {
+    const difference =
+      (Math.abs((fadeOnPixels[offset] ?? 0) - (fadeOffPixels[offset] ?? 0)) +
+        Math.abs((fadeOnPixels[offset + 1] ?? 0) - (fadeOffPixels[offset + 1] ?? 0)) +
+        Math.abs((fadeOnPixels[offset + 2] ?? 0) - (fadeOffPixels[offset + 2] ?? 0))) /
+      3;
+    totalDifference += difference;
+    if (difference > 8) changedPixels += 1;
+  }
+
+  const meanAbsoluteDifference = totalDifference / pixelCount;
+  const changedPixelRatio = changedPixels / pixelCount;
+  const fadeOnPartiallyVisible = changedPixelRatio < 0.35;
+  return {
+    changedPixelRatio: Number(changedPixelRatio.toFixed(5)),
+    fadeOnPartiallyVisible,
+    meanAbsoluteDifference: Number(meanAbsoluteDifference.toFixed(3)),
+    ok: meanAbsoluteDifference > 1 && changedPixelRatio > 0.01 && fadeOnPartiallyVisible,
+    sampledPixels: pixelCount,
+  };
+}

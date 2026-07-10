@@ -70,9 +70,9 @@
 - [x] スパイク2:drawIndirect / dispatchIndirect の可否と生存数駆動描画 — 間接描画引数のGPU駆動+dispatchIndirect(X=ceil(alive/64))をreadback実証。**注**: drawIndexedIndirect実行自体のWindows実GPU目視はM0監査時に実施(ヘッドレスはpresent不可のため)
 - [x] スパイク3:WebGL2バックエンドでの同コードの動作範囲実測 — サポートマトリクス実測済み(コンピュート/readback=可、アトミクス/間接=不可)。詳細はPLAN決定事項ログ
 - [x] スパイク4:深度テクスチャアクセス(ソフトパーティクル)とTSLポストパイプラインの共存確認 — /spike-depth/ で両立実証(WebGL2ピクセル検証+目視、WebGPUはencode成功まで)。ポスト統合点はRenderPipeline
-- [ ] パフォーマンス計測ハーネス(FPS/フレーム時間/VRAMをplaygroundに常設)
+- [x] パフォーマンス計測ハーネス(FPS/フレーム時間/JSヒープ/描画コール数+**GPU timestamp query**をplaygroundに常設、`vfx.perf-baseline` schema v1、spike-runnerで回収可)— SwiftShaderでもtimestamp-query利用可と実証(100k粒子 computeMs≈5ms)
 - [x] 検証ハーネス:Playwrightをリポジトリに導入し、WebGPUプローブ(`--adapter swiftshader|vulkan|default`)とスクリーンショット取得ユーティリティ(診断収集付き)を `tools/` に整備。ヘッドレスWebGPUは「コンピュート可・canvas提示不可」と実測し、スクリーンショット回帰はWebGL2バックエンドで行う方針をPLAN.mdに記録
-- [ ] ライブラリ名の決定、LICENSE、CLAUDE.md作成(ビルド・テストコマンド記載)
+- [ ] ライブラリ名の決定(**ユーザー判断待ち**。LICENSE=MIT・CLAUDE.mdは作成済み。名前決定後: LICENSE holder更新・@vfx/*改名・package.jsonにlicenseフィールド追加)
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
 ## M1 — コンパイラ&データモデル
@@ -225,3 +225,4 @@
 | 2026-07-10 | M0項目3完了:API RFC起草(Codex)+前回NIT2件修正→Claude設計レビュー(FAIL: BLOCKER2件=defineEffectパラメータ制約バグ・tslModule空マニフェスト自己矛盾、SHOULD7・NIT9)→Codex全件修正→再レビューPASS(検証パスで型プローブ+実行スモーク)→コミット |
 | 2026-07-10 | スパイク1完了・スパイク2ほぼ完了:/spike-compute/実装(Codex)+RFC持ち越し4件解消→統括検収(ヘッドレス実測: atomicOk/indirectOk全true、aliveCount=91327一致)→Claudeレビュー PASS(独立再現済み)→コミット |
 | 2026-07-10 | スパイク2完遂・3・4完了:WebGL2サポートマトリクス実測、dispatchIndirect実証、深度+ポスト共存実証(/spike-depth/)、前回持ち越し7件全解消→Claudeレビュー PASS(全数値を独立再現)→コミット。**次回委譲への持ち越し**: [SHOULD] PostProcessing→RenderPipeline改名、[NIT] depth-fade比較に部分可視アサーション/runnerのadapterInfo→webgpuAdapterInfo改名/dispatchプローブのガード外し/WebGL2アトミックプローブのエラーシグネチャ照合/WebGPU深度スパイクのreadRenderTargetPixelsAsyncピクセル検証化。**ユーザー対応待ち**: Windows実GPU目視(/spike-compute/ と /spike-depth/)はM0監査時に |
+| 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
