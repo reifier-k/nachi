@@ -1,4 +1,8 @@
-import { resolveAttributeSchema, resolveTslStorageType } from './attributes.js';
+import {
+  resolveAttributeSchema,
+  resolvePackedAttributeAddress,
+  resolveTslStorageType,
+} from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
@@ -10,6 +14,8 @@ import {
 import type {
   AttributeSchema,
   AttributeType,
+  BillboardOptions,
+  BlendingMode,
   ColorInput,
   CurveGenerator,
   DataReference,
@@ -31,6 +37,7 @@ import type {
   TslModuleFactory,
   TslParticleBindings,
   TslStorageType,
+  TextureRef,
   UpdateModule,
   ValueInput,
   Vec3,
@@ -105,6 +112,11 @@ export interface CompiledEmitterMeta {
       readonly spawnVaryingCount: number;
       readonly spawnVaryings: readonly string[];
     };
+    readonly webgpu: {
+      readonly defaultVertexStorageBufferLimit: 8;
+      readonly vertexStorageBufferCount: number;
+      readonly vertexStorageBuffers: readonly string[];
+    };
   };
   readonly capabilities: {
     readonly webgl2: {
@@ -150,9 +162,19 @@ export interface CompiledEmitterMeta {
     readonly type: string;
   }[];
   readonly storageBuffers: readonly {
+    readonly attributes?: readonly {
+      readonly components: number;
+      readonly group: number;
+      readonly logicalType: AttributeType;
+      readonly name: string;
+      readonly offset: number;
+    }[];
     readonly count: 1;
+    readonly groupCount?: number;
     readonly name: string;
+    readonly packed?: boolean;
     readonly purposes: readonly string[];
+    readonly storageType?: TslStorageType;
   }[];
   readonly storageBufferCount: number;
 }
@@ -291,12 +313,47 @@ export interface BuiltEmitterKernels {
 export interface KernelModuleBuildContext {
   readonly adapter: KernelTslAdapter;
   readonly module: CompiledKernelModule;
+  /** Read-only logical attribute expression. Use write() to update particle storage. */
   attribute(name: string): KernelNode;
   random(sampleOffset?: number): KernelNode;
   sampleLut(id: string, coordinate: KernelNode): KernelNode;
   uniform(path: ParameterPath): KernelUniformNode;
   value(input: unknown, type: AttributeType, sampleOffset?: number): KernelNode;
   write(name: string, value: KernelNodeInput): void;
+}
+
+function readOnlyAttributeNode(node: KernelNode, name: string): KernelNode {
+  const mutations = new Set<PropertyKey>(['addAssign', 'assign', 'mulAssign']);
+  const components = new Set<PropertyKey>(['a', 'b', 'g', 'r', 'rgb', 'w', 'x', 'xyz', 'y', 'z']);
+  const cache = new WeakMap<object, KernelNode>();
+  const wrap = (value: KernelNode): KernelNode => {
+    const target = value as unknown as object;
+    const cached = cache.get(target);
+    if (cached) return cached;
+    const proxy = new Proxy(target, {
+      get(current, property, receiver) {
+        if (mutations.has(property)) {
+          return () => {
+            throw new Error(
+              `Attribute "${name}" is read-only in KernelModuleBuildContext; use context.write().`,
+            );
+          };
+        }
+        const result = Reflect.get(current, property, receiver) as unknown;
+        if (
+          components.has(property) &&
+          (typeof result === 'object' || typeof result === 'function') &&
+          result !== null
+        ) {
+          return wrap(result as KernelNode);
+        }
+        return result;
+      },
+    }) as unknown as KernelNode;
+    cache.set(target, proxy);
+    return proxy;
+  };
+  return wrap(node);
 }
 
 export interface KernelModuleImplementation {
@@ -346,6 +403,7 @@ export interface CompiledEmitterProgram {
   readonly attributeSchema: ResolvedAttributeSchema;
   readonly buildKernels: (adapter: KernelTslAdapter) => BuiltEmitterKernels;
   readonly diagnostics: readonly VfxDiagnostic[];
+  readonly draws: readonly CompiledSpriteDrawDescription[];
   readonly kernels: {
     readonly init: CompiledKernelDescription;
     readonly update: CompiledKernelDescription;
@@ -354,6 +412,32 @@ export interface CompiledEmitterProgram {
   readonly meta: CompiledEmitterMeta;
   readonly spawn: CompiledSpawnDescription;
   readonly uniforms: readonly CompiledUniformDescription[];
+}
+
+export interface CompiledSpriteDrawDescription {
+  readonly fragment: {
+    readonly blending: BlendingMode;
+    readonly map?: TextureRef;
+  };
+  readonly geometry: {
+    readonly indexCount: 6;
+    readonly topology: 'triangle-list';
+    readonly vertexCount: 4;
+  };
+  readonly indirect: {
+    readonly aliveIndicesOffsetWords: number;
+    readonly drawArgumentsOffsetBytes: number;
+    readonly instanceCount: 'alive-count';
+    readonly physicalIndex: 'alive-indices';
+  };
+  readonly kind: 'billboard';
+  readonly path: string;
+  readonly vertex: {
+    readonly alignment: NonNullable<BillboardOptions['alignment']>;
+    readonly attributes: readonly string[];
+    readonly storageBufferCount: number;
+    readonly storageBuffers: readonly string[];
+  };
 }
 
 type TraceResult = {
@@ -1239,6 +1323,116 @@ function lifecycleStorageLayout(capacity: number) {
   } as const;
 }
 
+function compileSpriteDraws(
+  definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
+  schema: ResolvedAttributeSchema,
+  lifecycleLayout: ReturnType<typeof lifecycleStorageLayout>,
+  diagnostics: VfxDiagnostic[],
+): CompiledSpriteDrawDescription[] {
+  const renderModules = collectEmitterModules(definition).filter(
+    ({ module }) => module.stage === 'render',
+  );
+  const draws: CompiledSpriteDrawDescription[] = [];
+  for (const { module, path } of renderModules) {
+    if (module.type !== 'core/billboard') continue;
+    const options = module.config as BillboardOptions;
+    const alignment = options.alignment ?? { mode: 'camera-facing' as const };
+    if (alignment.mode === 'custom-axis') {
+      if (
+        alignment.axis.length !== 3 ||
+        alignment.axis.some((component) => !Number.isFinite(component)) ||
+        alignment.axis.every((component) => component === 0)
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_BILLBOARD_AXIS_INVALID',
+            'Billboard custom alignment axis must be a finite, non-zero vec3.',
+            `${path}.config.alignment.axis`,
+          ),
+        );
+      }
+    }
+    if (
+      alignment.mode === 'velocity-stretch' &&
+      alignment.factor !== undefined &&
+      (!Number.isFinite(alignment.factor) || alignment.factor < 0)
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_BILLBOARD_STRETCH_INVALID',
+          'Billboard velocity stretch factor must be a non-negative finite number.',
+          `${path}.config.alignment.factor`,
+        ),
+      );
+    }
+    const attributes = [
+      'position',
+      'size',
+      'color',
+      'spriteRotation',
+      ...(alignment.mode === 'velocity-aligned' || alignment.mode === 'velocity-stretch'
+        ? ['velocity']
+        : []),
+    ];
+    if (attributes.some((name) => schema.byName[name] === undefined)) continue;
+    const attributeBuffers = [
+      ...new Set(
+        attributes.map((name) => {
+          const attribute = schema.byName[name];
+          const storage =
+            attribute === undefined
+              ? undefined
+              : schema.storageArrays[attribute.physical.bufferIndex];
+          if (!attribute || !storage) {
+            throw new Error(`Billboard attribute "${name}" has no physical storage.`);
+          }
+          return `Particles.${storage.name}`;
+        }),
+      ),
+    ];
+    const vertexStorageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+    if (vertexStorageBuffers.length > 8) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_STORAGE_BUFFER_LIMIT',
+          `Billboard vertex stage requires ${vertexStorageBuffers.length} storage buffers (${vertexStorageBuffers.join(', ')}), exceeding the default limit of 8.`,
+          `${path}.vertex.storageBufferCount`,
+        ),
+      );
+    }
+    const map =
+      options.map?.kind === 'flipbook'
+        ? options.map.texture
+        : options.map?.kind === 'asset-ref'
+          ? options.map
+          : undefined;
+    draws.push({
+      fragment: {
+        blending: options.blending ?? 'alpha',
+        ...(map === undefined ? {} : { map }),
+      },
+      geometry: { indexCount: 6, topology: 'triangle-list', vertexCount: 4 },
+      indirect: {
+        aliveIndicesOffsetWords: lifecycleLayout.buffers.state.fields.aliveIndices.offsetWords,
+        drawArgumentsOffsetBytes:
+          lifecycleLayout.buffers.indirectArguments.fields.drawIndirect.offsetWords *
+          Uint32Array.BYTES_PER_ELEMENT,
+        instanceCount: 'alive-count',
+        physicalIndex: 'alive-indices',
+      },
+      kind: 'billboard',
+      path,
+      vertex: {
+        alignment,
+        attributes,
+        storageBufferCount: vertexStorageBuffers.length,
+        storageBuffers: vertexStorageBuffers,
+      },
+    });
+  }
+  return draws;
+}
+
 function createBuildKernels(
   program: Omit<CompiledEmitterProgram, 'buildKernels'>,
   registry: KernelModuleRegistry,
@@ -1350,14 +1544,18 @@ function createBuildKernels(
     }
     if (hasErrors(buildDiagnostics)) throw new VfxDiagnosticError(buildDiagnostics);
 
-    const storages = Object.fromEntries(
-      program.attributeSchema.storageArrays.map((storage) => [
-        storage.attribute,
-        adapter
-          .instancedArray(storage.length, storage.type)
-          .setName(`NachiParticles_${storage.attribute}`),
-      ]),
-    ) as Record<string, KernelStorageNode>;
+    const storageByIndex = program.attributeSchema.storageArrays.map((storage) =>
+      adapter
+        .instancedArray(storage.length, storage.type)
+        .setName(`NachiParticles_${storage.name}`),
+    );
+    const storages: Record<string, KernelStorageNode> = {};
+    for (const storage of program.attributeSchema.storageArrays) {
+      const node = storageByIndex[storage.index];
+      if (!node) throw new Error(`Compiled storage ${storage.index} is missing.`);
+      storages[storage.name] = node;
+      for (const attribute of storage.attributes) storages[attribute] = node;
+    }
     const uniforms = Object.fromEntries(
       program.uniforms.map((description) => [
         description.path,
@@ -1408,10 +1606,85 @@ function createBuildKernels(
       lifecycleIndirectStorage.element(adapter.uint(adapter.constant(offset, 'u32'))).assign(value);
     };
 
+    const packedLanes = (name: string, index: KernelNode): readonly KernelNode[] => {
+      const attribute = program.attributeSchema.byName[name];
+      if (!attribute) throw new Error(`Compiled attribute "${name}" is missing.`);
+      const storage = program.attributeSchema.storageArrays[attribute.physical.bufferIndex];
+      const storageNode = storageByIndex[attribute.physical.bufferIndex];
+      if (!storage || !storageNode) {
+        throw new Error(`Compiled storage for attribute "${name}" is missing.`);
+      }
+      const address = resolvePackedAttributeAddress(attribute, storage);
+      const physicalIndex = storage.packed
+        ? index
+            .mul(adapter.uint(adapter.constant(address.particleStride, 'u32')))
+            .add(adapter.uint(adapter.constant(address.group, 'u32')))
+        : index;
+      const element = storageNode.element(physicalIndex);
+      return [element.x, element.y, element.z, element.w];
+    };
     const attributeNode = (name: string, index = adapter.instanceIndex): KernelNode => {
-      const storage = storages[name];
-      if (!storage) throw new Error(`Compiled storage for attribute "${name}" is missing.`);
-      return storage.element(index);
+      const attribute = program.attributeSchema.byName[name];
+      if (!attribute) throw new Error(`Compiled attribute "${name}" is missing.`);
+      const storage = program.attributeSchema.storageArrays[attribute.physical.bufferIndex];
+      const storageNode = storageByIndex[attribute.physical.bufferIndex];
+      if (!storage || !storageNode) {
+        throw new Error(`Compiled storage for attribute "${name}" is missing.`);
+      }
+      if (!storage.packed) return readOnlyAttributeNode(storageNode.element(index), name);
+      const address = resolvePackedAttributeAddress(attribute, storage);
+      const lanes = packedLanes(name, index).slice(
+        address.offset,
+        address.offset + attribute.components,
+      );
+      if (attribute.components === 1) return readOnlyAttributeNode(lanes[0]!, name);
+      if (attribute.components === 2) {
+        return readOnlyAttributeNode(adapter.vec2(lanes[0]!, lanes[1]!), name);
+      }
+      if (attribute.components === 3) {
+        return readOnlyAttributeNode(adapter.vec3(lanes[0]!, lanes[1]!, lanes[2]!), name);
+      }
+      throw new Error(`Packed attribute "${name}" has unsupported width ${attribute.components}.`);
+    };
+    const writeAttribute = (
+      name: string,
+      value: KernelNodeInput,
+      index = adapter.instanceIndex,
+    ): void => {
+      const attribute = program.attributeSchema.byName[name];
+      if (!attribute) throw new Error(`Compiled attribute "${name}" is missing.`);
+      const storage = program.attributeSchema.storageArrays[attribute.physical.bufferIndex];
+      const storageNode = storageByIndex[attribute.physical.bufferIndex];
+      if (!storage || !storageNode) {
+        throw new Error(`Compiled storage for attribute "${name}" is missing.`);
+      }
+      if (!storage.packed) {
+        storageNode.element(index).assign(value);
+        return;
+      }
+      const valueNode =
+        typeof value === 'object' && value !== null && !Array.isArray(value)
+          ? (value as KernelNode)
+          : adapter.constant(value, attribute.logicalType);
+      // Packed vector writes are split into scalar lane stores. Materialize the RHS once so a
+      // self-referential swizzle/expression cannot observe lanes already written earlier here.
+      const stableValue =
+        attribute.components === 1
+          ? valueNode
+          : ((valueNode as KernelNode & { toVar?(): KernelNode }).toVar?.() ?? valueNode);
+      const sources = [stableValue.x, stableValue.y, stableValue.z, stableValue.w];
+      const address = resolvePackedAttributeAddress(attribute, storage);
+      const lanes = packedLanes(name, index).slice(
+        address.offset,
+        address.offset + attribute.components,
+      );
+      if (attribute.components === 1) {
+        lanes[0]!.assign(stableValue);
+        return;
+      }
+      for (let component = 0; component < attribute.components; component += 1) {
+        lanes[component]!.assign(sources[component]!);
+      }
     };
     const uniformNode = (path: ParameterPath): KernelUniformNode => {
       const uniform = uniforms[path];
@@ -1502,7 +1775,7 @@ function createBuildKernels(
       value: (input, type, sampleOffset = 0) =>
         buildValue(input, type, module, particleIndex, sampleOffset),
       write: (name, value) => {
-        attributeNode(name, particleIndex).assign(value);
+        writeAttribute(name, value, particleIndex);
       },
     });
 
@@ -1524,7 +1797,7 @@ function createBuildKernels(
       const outputs = factory(bindings as TslParticleBindings);
       for (const [key, value] of Object.entries(outputs)) {
         const name = key.startsWith('custom.') ? key.slice('custom.'.length) : key;
-        attributeNode(name, particleIndex).assign(value as unknown as KernelNode);
+        writeAttribute(name, value as unknown as KernelNode, particleIndex);
       }
     };
 
@@ -1546,8 +1819,8 @@ function createBuildKernels(
 
     const initialize = adapter
       .fn(() => {
-        attributeNode('alive').assign(adapter.constant(false, 'bool'));
-        attributeNode('spawnGeneration').assign(adapter.constant(0, 'u32'));
+        writeAttribute('alive', adapter.constant(false, 'bool'));
+        writeAttribute('spawnGeneration', adapter.constant(0, 'u32'));
         writeLifecycle(
           stateLayout.fields.freeList.offsetWords,
           adapter.uint(adapter.instanceIndex),
@@ -1569,7 +1842,7 @@ function createBuildKernels(
     const init = adapter
       .fn(() => {
         for (const module of initModules) buildModule(module, adapter.instanceIndex);
-        attributeNode('alive').assign(adapter.constant(true, 'bool'));
+        writeAttribute('alive', adapter.constant(true, 'bool'));
       })
       .compute(program.attributeSchema.capacity, [program.kernels.init.workgroupSize])
       .setName(program.kernels.init.name);
@@ -1600,7 +1873,7 @@ function createBuildKernels(
                 attributeNode('lifetime', particleIndex),
               ),
               () => {
-                attributeNode('alive', particleIndex).assign(adapter.constant(false, 'bool'));
+                writeAttribute('alive', adapter.constant(false, 'bool'), particleIndex);
               },
               () => {
                 for (const module of updateModules) buildModule(module, particleIndex);
@@ -1633,9 +1906,13 @@ function createBuildKernels(
                 stateLayout.fields.freeList.offsetWords,
                 freeSlot,
               );
-              attributeNode('spawnGeneration', particleIndex).addAssign(adapter.uint(1));
+              writeAttribute(
+                'spawnGeneration',
+                attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
+                particleIndex,
+              );
               for (const module of initModules) buildModule(module, particleIndex);
-              attributeNode('alive', particleIndex).assign(adapter.uint(1));
+              writeAttribute('alive', adapter.uint(1), particleIndex);
               adapter.atomicAdd(counter(counterOffsets.spawnSuccess), adapter.uint(1));
             },
             () => {
@@ -1644,9 +1921,13 @@ function createBuildKernels(
           );
         } else {
           const particleIndex = invocation;
-          attributeNode('spawnGeneration', particleIndex).addAssign(adapter.uint(1));
+          writeAttribute(
+            'spawnGeneration',
+            attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
+            particleIndex,
+          );
           for (const module of initModules) buildModule(module, particleIndex);
-          attributeNode('alive', particleIndex).assign(adapter.uint(1));
+          writeAttribute('alive', adapter.uint(1), particleIndex);
         }
       });
     };
@@ -1881,11 +2162,33 @@ export function compileEmitter<
       'Particles.spawnGeneration',
     ]),
   ].sort();
+  const lifecycleLayout = lifecycleStorageLayout(definition.capacity);
+  const draws = compileSpriteDraws(
+    normalizedDefinition,
+    attributeSchema,
+    lifecycleLayout,
+    diagnostics,
+  );
+  const vertexStorageBuffers = [...new Set(draws.flatMap(({ vertex }) => vertex.storageBuffers))];
   const storageBuffers: CompiledEmitterMeta['storageBuffers'] = [
-    ...attributeSchema.storageArrays.map(({ attribute }) => ({
+    ...attributeSchema.storageArrays.map((storage) => ({
+      attributes: storage.attributes.map((name) => {
+        const attribute = attributeSchema.byName[name];
+        if (!attribute) throw new Error(`Storage attribute "${name}" is missing.`);
+        return {
+          components: attribute.components,
+          group: attribute.physical.group,
+          logicalType: attribute.logicalType,
+          name,
+          offset: attribute.physical.offset,
+        };
+      }),
       count: 1 as const,
-      name: `Particles.${attribute}`,
-      purposes: [`particle attribute ${attribute}`],
+      groupCount: storage.groupCount,
+      name: `Particles.${storage.name}`,
+      packed: storage.packed,
+      purposes: storage.attributes.map((attribute) => `particle attribute ${attribute}`),
+      storageType: storage.type,
     })),
     {
       count: 1,
@@ -1902,13 +2205,17 @@ export function compileEmitter<
       ],
     },
   ];
-  const lifecycleLayout = lifecycleStorageLayout(definition.capacity);
   const meta: CompiledEmitterMeta = {
     backendBudgets: {
       webgl2: {
         defaultSpawnVaryingLimit: 4,
         spawnVaryingCount: webgl2SpawnVaryings.length,
         spawnVaryings: webgl2SpawnVaryings,
+      },
+      webgpu: {
+        defaultVertexStorageBufferLimit: 8,
+        vertexStorageBufferCount: vertexStorageBuffers.length,
+        vertexStorageBuffers,
       },
     },
     capabilities: {
@@ -1943,6 +2250,7 @@ export function compileEmitter<
   const description = {
     attributeSchema,
     diagnostics,
+    draws,
     kernels,
     luts: baked.luts,
     meta,
@@ -2146,7 +2454,8 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const gravity = inputIsVector(input)
         ? context.value(input, 'vec3')
         : context.adapter.vec3(0, context.value(input, 'f32'), 0);
-      context.attribute('velocity').addAssign(gravity.mul(context.uniform('Emitter.deltaTime')));
+      const velocity = context.attribute('velocity');
+      context.write('velocity', velocity.add(gravity.mul(context.uniform('Emitter.deltaTime'))));
     },
     stage: 'update',
     type: 'core/gravity',
@@ -2163,7 +2472,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .constant(1, 'f32')
         .sub(drag.mul(context.uniform('Emitter.deltaTime')))
         .clamp(0, 1);
-      context.attribute('velocity').mulAssign(damping);
+      context.write('velocity', context.attribute('velocity').mul(damping));
     },
     stage: 'update',
     type: 'core/drag',
@@ -2189,13 +2498,16 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
           .sin(position.x.mul(frequency))
           .sub(context.adapter.cos(position.y.mul(frequency))),
       );
-      context
-        .attribute('velocity')
-        .addAssign(
-          field
-            .mul(context.value(config.strength, 'f32'))
-            .mul(context.uniform('Emitter.deltaTime')),
-        );
+      context.write(
+        'velocity',
+        context
+          .attribute('velocity')
+          .add(
+            field
+              .mul(context.value(config.strength, 'f32'))
+              .mul(context.uniform('Emitter.deltaTime')),
+          ),
+      );
     },
     stage: 'update',
     type: 'core/curl-noise',
@@ -2236,9 +2548,12 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   registry.register({
     access: INTEGRATE_ACCESS,
     build(context) {
-      context
-        .attribute('position')
-        .addAssign(context.attribute('velocity').mul(context.uniform('Emitter.deltaTime')));
+      context.write(
+        'position',
+        context
+          .attribute('position')
+          .add(context.attribute('velocity').mul(context.uniform('Emitter.deltaTime'))),
+      );
     },
     stage: 'update',
     type: 'core/integrate',

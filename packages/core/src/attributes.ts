@@ -10,6 +10,7 @@ import type {
   ParameterSchema,
   ResolvedAttribute,
   ResolvedAttributeSchema,
+  ResolvedAttributeStorage,
   TslStorageType,
   VfxDiagnostic,
 } from './types.js';
@@ -37,13 +38,79 @@ const ATTRIBUTE_LAYOUTS: Readonly<Record<AttributeType, AttributeLayout>> = {
 export const TSL_STORAGE_TYPE_PHYSICAL_LENGTHS: Readonly<Record<TslStorageType, number>> = {
   float: 1,
   int: 1,
+  ivec4: 4,
   mat3: 12,
   mat4: 16,
   uint: 1,
+  uvec4: 4,
   vec2: 2,
   vec3: 3,
   vec4: 4,
 };
+
+export interface PackedAttributeAddress {
+  readonly group: number;
+  readonly offset: number;
+  readonly particleStride: number;
+}
+
+export function resolvePackedAttributeAddress(
+  attribute: Pick<ResolvedAttribute, 'name' | 'physical'>,
+  storage: Pick<ResolvedAttributeStorage, 'groupCount' | 'packed'>,
+): PackedAttributeAddress {
+  if (!storage.packed || !attribute.physical.packed) {
+    throw new Error(`Attribute "${attribute.name}" is not packed.`);
+  }
+  return {
+    group: attribute.physical.group,
+    offset: attribute.physical.offset,
+    particleStride: storage.groupCount,
+  };
+}
+
+export function packedElementIndex(
+  particleIndex: number,
+  address: Pick<PackedAttributeAddress, 'group' | 'particleStride'>,
+): number {
+  return particleIndex * address.particleStride + address.group;
+}
+
+export function packedComponentIndex(
+  particleIndex: number,
+  address: PackedAttributeAddress,
+  component: number,
+): number {
+  return packedElementIndex(particleIndex, address) * 4 + address.offset + component;
+}
+
+type PackDomain = 'float' | 'int' | 'uint';
+
+function packDomain(type: AttributeType): PackDomain | undefined {
+  if (type === 'bool' || type === 'u32') return 'uint';
+  if (type === 'i32') return 'int';
+  if (type === 'f32' || type === 'vec2' || type === 'vec3') return 'float';
+  return undefined;
+}
+
+function packedStorageType(domain: PackDomain): TslStorageType {
+  return domain === 'float' ? 'vec4' : domain === 'int' ? 'ivec4' : 'uvec4';
+}
+
+function wgslIdentifier(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9_]/g, '_');
+  return /^[A-Za-z_]/.test(sanitized) ? sanitized : `_${sanitized}`;
+}
+
+function uniquePhysicalName(value: string, storages: readonly { readonly name: string }[]): string {
+  const base = wgslIdentifier(value);
+  let candidate = base;
+  let suffix = 2;
+  while (storages.some(({ name }) => name === candidate)) {
+    candidate = `${base}_${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
 
 export function resolveTslStorageType(type: AttributeType): TslStorageType {
   return ATTRIBUTE_LAYOUTS[type].storageType;
@@ -299,11 +366,88 @@ export function resolveAttributeSchema<
 
   if (diagnostics.length > 0) return { diagnostics, ok: false };
 
-  const attributes: ResolvedAttribute[] = resolvedInputs.map((input, storageIndex) => ({
-    ...ATTRIBUTE_LAYOUTS[input.logicalType],
-    ...input,
-    path: `Particles.${input.name}`,
-    storageIndex,
+  const pendingStorages: Array<{
+    attributes: string[];
+    componentType: PackDomain;
+    groupCount: number;
+    groups: number[];
+    name: string;
+    packed: boolean;
+    type: TslStorageType;
+  }> = [];
+  const packedBufferByDomain = new Map<PackDomain, number>();
+  const allocations = new Map<
+    string,
+    { bufferIndex: number; group: number; offset: 0 | 1 | 2 | 3; packed: boolean }
+  >();
+
+  for (const input of resolvedInputs) {
+    const layout = ATTRIBUTE_LAYOUTS[input.logicalType];
+    const domain = packDomain(input.logicalType);
+    if (domain === undefined) {
+      const bufferIndex = pendingStorages.length;
+      pendingStorages.push({
+        attributes: [input.name],
+        componentType: 'float',
+        groupCount: 1,
+        groups: [layout.components],
+        name: uniquePhysicalName(input.name, pendingStorages),
+        packed: false,
+        type: layout.storageType,
+      });
+      allocations.set(input.name, { bufferIndex, group: 0, offset: 0, packed: false });
+      continue;
+    }
+
+    let bufferIndex = packedBufferByDomain.get(domain);
+    if (bufferIndex === undefined) {
+      bufferIndex = pendingStorages.length;
+      packedBufferByDomain.set(domain, bufferIndex);
+      pendingStorages.push({
+        attributes: [],
+        componentType: domain,
+        groupCount: 0,
+        groups: [],
+        name: uniquePhysicalName(`packed_${domain}`, pendingStorages),
+        packed: true,
+        type: packedStorageType(domain),
+      });
+    }
+    const storage = pendingStorages[bufferIndex];
+    if (!storage) throw new Error(`Packed storage ${bufferIndex} was not allocated.`);
+    let group = storage.groups.findIndex((used) => used + layout.components <= 4);
+    if (group < 0) {
+      group = storage.groups.length;
+      storage.groups.push(0);
+    }
+    const offset = storage.groups[group] as 0 | 1 | 2 | 3;
+    storage.groups[group] = offset + layout.components;
+    storage.groupCount = storage.groups.length;
+    storage.attributes.push(input.name);
+    allocations.set(input.name, { bufferIndex, group, offset, packed: true });
+  }
+
+  const attributes: ResolvedAttribute[] = resolvedInputs.map((input, storageIndex) => {
+    const physical = allocations.get(input.name);
+    if (!physical) throw new Error(`Physical allocation for attribute "${input.name}" is missing.`);
+    return {
+      ...ATTRIBUTE_LAYOUTS[input.logicalType],
+      ...input,
+      path: `Particles.${input.name}`,
+      physical,
+      storageIndex,
+    };
+  });
+  const storageArrays = pendingStorages.map((storage, index) => ({
+    attributes: storage.attributes,
+    componentType: storage.componentType,
+    groupCount: storage.groupCount,
+    index,
+    kind: 'instanced-array' as const,
+    length: config.capacity * storage.groupCount,
+    name: storage.name,
+    packed: storage.packed,
+    type: storage.type,
   }));
   return {
     diagnostics,
@@ -314,13 +458,7 @@ export function resolveAttributeSchema<
       capacity: config.capacity,
       kind: 'resolved-attribute-schema',
       layout: 'soa',
-      storageArrays: attributes.map((resolved) => ({
-        attribute: resolved.name,
-        index: resolved.storageIndex,
-        kind: 'instanced-array',
-        length: config.capacity,
-        type: resolved.storageType,
-      })),
+      storageArrays,
     },
   };
 }

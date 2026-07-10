@@ -21,7 +21,7 @@ import type { KernelTslAdapter, ModuleDefinition } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
-import { createThreeKernelAdapter, readStorage } from './three-kernel-adapter';
+import { createThreeKernelAdapter, readLogicalAttribute } from './three-kernel-adapter';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';
 
@@ -153,11 +153,11 @@ async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelT
   const built = program.buildKernels(kernelAdapter);
   await renderer.computeAsync(built.init as never);
   const initial = {
-    age: await readStorage(renderer, built.storages.age!, 'float'),
-    color: await readStorage(renderer, built.storages.color!, 'float'),
-    lifetime: await readStorage(renderer, built.storages.lifetime!, 'float'),
-    position: await readStorage(renderer, built.storages.position!, 'float'),
-    velocity: await readStorage(renderer, built.storages.velocity!, 'float'),
+    age: await readLogicalAttribute(renderer, program, built, 'age'),
+    color: await readLogicalAttribute(renderer, program, built, 'color'),
+    lifetime: await readLogicalAttribute(renderer, program, built, 'lifetime'),
+    position: await readLogicalAttribute(renderer, program, built, 'position'),
+    velocity: await readLogicalAttribute(renderer, program, built, 'velocity'),
   };
   const colorSamples: Array<{ frame: number; value: number[] }> = [];
   for (let frame = 0; frame < frames; frame += 1) {
@@ -169,15 +169,15 @@ async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelT
       completedFrame === Math.max(1, Math.round(frames / 2)) ||
       completedFrame === frames
     ) {
-      const color = await readStorage(renderer, built.storages.color!, 'float');
+      const color = await readLogicalAttribute(renderer, program, built, 'color');
       colorSamples.push({ frame: completedFrame, value: [...color.slice(0, 4)] });
     }
   }
   const final = {
-    age: await readStorage(renderer, built.storages.age!, 'float'),
-    color: await readStorage(renderer, built.storages.color!, 'float'),
-    position: await readStorage(renderer, built.storages.position!, 'float'),
-    velocity: await readStorage(renderer, built.storages.velocity!, 'float'),
+    age: await readLogicalAttribute(renderer, program, built, 'age'),
+    color: await readLogicalAttribute(renderer, program, built, 'color'),
+    position: await readLogicalAttribute(renderer, program, built, 'position'),
+    velocity: await readLogicalAttribute(renderer, program, built, 'velocity'),
   };
   return { colorSamples, final, initial };
 }
@@ -188,20 +188,20 @@ async function runStorageTypeProbe(
 ) {
   const built = storageTypeProbeProgram.buildKernels(kernelAdapter);
   await renderer.computeAsync(built.init as never);
-  const initialSize = await readStorage(renderer, built.storages.size!, 'float');
+  const initialSize = await readLogicalAttribute(renderer, storageTypeProbeProgram, built, 'size');
   const sizeSampleFrames = new Set([1, Math.max(1, Math.round(frames / 2)), frames]);
   const sizeSamples: Array<{ frame: number; value: number }> = [];
   for (let frame = 0; frame < frames; frame += 1) {
     await renderer.computeAsync(built.update as never);
     const completedFrame = frame + 1;
     if (sizeSampleFrames.has(completedFrame)) {
-      const size = await readStorage(renderer, built.storages.size!, 'float');
+      const size = await readLogicalAttribute(renderer, storageTypeProbeProgram, built, 'size');
       sizeSamples.push({ frame: completedFrame, value: size[0] ?? Number.NaN });
     }
   }
   return {
-    enabled: await readStorage(renderer, built.storages.enabled!, 'uint'),
-    frame: await readStorage(renderer, built.storages.frame!, 'float'),
+    enabled: await readLogicalAttribute(renderer, storageTypeProbeProgram, built, 'enabled'),
+    frame: await readLogicalAttribute(renderer, storageTypeProbeProgram, built, 'frame'),
     initialSize: initialSize[0] ?? Number.NaN,
     sizeSamples,
   };
@@ -213,9 +213,14 @@ async function runUserParameterProgram(
 ) {
   const built = userParameterProgram.buildKernels(kernelAdapter);
   await renderer.computeAsync(built.init as never);
-  const initial = await readStorage(renderer, built.storages.velocity!, 'float');
+  const initial = await readLogicalAttribute(renderer, userParameterProgram, built, 'velocity');
   await renderer.computeAsync(built.update as never);
-  const afterDefault = await readStorage(renderer, built.storages.velocity!, 'float');
+  const afterDefault = await readLogicalAttribute(
+    renderer,
+    userParameterProgram,
+    built,
+    'velocity',
+  );
   return {
     afterDefault: afterDefault[1] ?? Number.NaN,
     initial: initial[1] ?? Number.NaN,
@@ -426,9 +431,9 @@ async function runSmoke(): Promise<void> {
     mat3BoolOk:
       (storageTypeProbe.enabled[0] ?? 0) === 1 &&
       (storageTypeProbe.frame[0] ?? 0) === 1 &&
-      // Storage-buffer mat3 columns are vec4-aligned: 9 logical values occupy stride 12.
-      (storageTypeProbe.frame[5] ?? 0) === 1 &&
-      (storageTypeProbe.frame[10] ?? 0) === 1,
+      // Logical readback removes the vec4 padding from the physical mat3 columns.
+      (storageTypeProbe.frame[4] ?? 0) === 1 &&
+      (storageTypeProbe.frame[8] ?? 0) === 1,
     sizeLutOk: sizeLutSamples.every(({ ok: sampleOk }) => sampleOk),
     userParameterDefaultOk:
       userParameter.initial === 0 &&

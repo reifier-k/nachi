@@ -7,6 +7,7 @@ import {
   type KernelTslAdapter,
   type KernelUniformNode,
 } from './compiler.js';
+import { packedComponentIndex, resolvePackedAttributeAddress } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
 import { collectEmitterModules } from './emitter-modules.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
@@ -882,7 +883,16 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       const alive = this.kernels.storages.alive;
       if (!alive) return;
       const flags = new Uint32Array(await this.#renderer.readStorage(alive));
-      const count = flags.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
+      const aliveAttribute = this.program.attributeSchema.byName.alive;
+      if (!aliveAttribute) throw new Error('Compiled logical attribute alive is missing.');
+      const aliveStorage =
+        this.program.attributeSchema.storageArrays[aliveAttribute.physical.bufferIndex];
+      if (!aliveStorage) throw new Error('Compiled physical storage for alive is missing.');
+      const aliveAddress = resolvePackedAttributeAddress(aliveAttribute, aliveStorage);
+      let count = 0;
+      for (let particle = 0; particle < this.program.attributeSchema.capacity; particle += 1) {
+        if ((flags[packedComponentIndex(particle, aliveAddress, 0)] ?? 0) !== 0) count += 1;
+      }
       this.#exactAliveCount = count;
       this.#exactAliveSequence = this.#compactSequence;
       this.#renderer.setInstanceCount?.(this.kernels, count);

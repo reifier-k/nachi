@@ -6,13 +6,16 @@ import {
   FixedStepAccumulator,
   VFXSystem,
   VfxDiagnosticError,
+  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
   burst,
   defineEffect,
   defineEmitter,
   defineParameter,
   lifetime,
   perDistance,
+  packedComponentIndex,
   rate,
+  resolvePackedAttributeAddress,
   tslModule,
 } from '../src/index.js';
 import type {
@@ -23,6 +26,7 @@ import type {
   KernelTslAdapter,
   KernelUniformNode,
   ModuleDefinition,
+  ResolvedAttributeSchema,
   VfxDeviceLossInfo,
   VfxRuntimeRenderer,
 } from '../src/index.js';
@@ -793,9 +797,13 @@ describe('VFXSystem runtime scheduler', () => {
 
   it('aggregates WebGL2 burst alive flags on the CPU and updates instance count', async () => {
     const base = new FakeRuntimeRenderer();
-    const readbacks = [new Uint32Array([0, 0, 0]), new Uint32Array([1, 0, 1])];
+    const readbacks = [
+      { alive: [0, 0, 0], spawnGeneration: [0, 0, 0] },
+      { alive: [1, 0, 0], spawnGeneration: [1, 2, 1] },
+    ];
     const instanceCounts: number[] = [];
     let readIndex = 0;
+    const schema: { current: ResolvedAttributeSchema | undefined } = { current: undefined };
     const renderer: VfxRuntimeRenderer = {
       kernelAdapter: {
         ...base.kernelAdapter,
@@ -809,7 +817,28 @@ describe('VFXSystem runtime scheduler', () => {
       readStorage: () => {
         const values = readbacks[Math.min(readIndex, readbacks.length - 1)]!;
         readIndex += 1;
-        return Promise.resolve(values.buffer);
+        if (!schema.current) throw new Error('Test schema is unavailable.');
+        const aliveAttribute = schema.current.byName.alive;
+        const spawnGenerationAttribute = schema.current.byName.spawnGeneration;
+        if (!aliveAttribute || !spawnGenerationAttribute) {
+          throw new Error('Test lifecycle attributes are unavailable.');
+        }
+        const storage = schema.current.storageArrays[aliveAttribute.physical.bufferIndex];
+        if (!storage) throw new Error('Test packed uint storage is unavailable.');
+        const words = new Uint32Array(
+          storage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type],
+        );
+        const aliveAddress = resolvePackedAttributeAddress(aliveAttribute, storage);
+        const spawnGenerationAddress = resolvePackedAttributeAddress(
+          spawnGenerationAttribute,
+          storage,
+        );
+        for (let particle = 0; particle < schema.current.capacity; particle += 1) {
+          words[packedComponentIndex(particle, aliveAddress, 0)] = values.alive[particle] ?? 0;
+          words[packedComponentIndex(particle, spawnGenerationAddress, 0)] =
+            values.spawnGeneration[particle] ?? 0;
+        }
+        return Promise.resolve(words.buffer);
       },
       setInstanceCount: (_kernels, count) => instanceCounts.push(count),
       submitCompute: (kernel) => base.submitCompute(kernel),
@@ -823,12 +852,13 @@ describe('VFXSystem runtime scheduler', () => {
     });
     const system = new VFXSystem(renderer);
     const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    schema.current = instance.getEmitter('particles')?.program.attributeSchema;
     await system.update(0);
 
     expect(instance.state).toBe('active');
     expect(readIndex).toBe(2);
-    expect(instanceCounts).toEqual([0, 2]);
-    expect(instance.getEmitter('particles')?.aliveCount).toBe(2);
+    expect(instanceCounts).toEqual([0, 1]);
+    expect(instance.getEmitter('particles')?.aliveCount).toBe(1);
   });
 
   it('schedules additional burst cycles when interval boundaries are crossed', async () => {

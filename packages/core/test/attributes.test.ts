@@ -9,13 +9,19 @@ import {
   defineEmitter,
   defineParameter,
   gravity,
+  packedComponentIndex,
+  packedElementIndex,
   resolveAttributeSchema,
+  resolvePackedAttributeAddress,
+  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
 } from '../src/index.js';
 import type {
   AttributeDefinition,
   ModuleAccess,
   ModuleDefinition,
   ModuleStage,
+  ResolvedAttribute,
+  ResolvedAttributeStorage,
 } from '../src/index.js';
 
 function testModule<Stage extends ModuleStage>(
@@ -153,12 +159,12 @@ describe('resolved attribute schema', () => {
       vec3: { components: 3, storageType: 'vec3' },
       vec4: { components: 4, storageType: 'vec4' },
     });
-    expect(result.value?.storageArrays).toHaveLength(13);
+    expect(result.value?.storageArrays).toHaveLength(8);
     expect(result.value?.capacity).toBe(1);
     expect(result.value?.storageArrays.every((storage) => storage.kind === 'instanced-array')).toBe(
       true,
     );
-    expect(result.value?.storageArrays.every((storage) => storage.length === 1)).toBe(true);
+    expect(result.value?.storageArrays.every((storage) => storage.length >= 1)).toBe(true);
   });
 
   it('resolves used built-ins in canonical SoA order', () => {
@@ -183,7 +189,150 @@ describe('resolved attribute schema', () => {
     expect(result.value?.attributes.every(({ source }) => source === 'built-in')).toBe(true);
     expect(result.value?.byName.position?.default).toEqual([0, 0, 0]);
     expect(result.value?.byName.velocity?.default).toEqual([0, 0, 0]);
-    expect(result.value?.storageArrays.map(({ index }) => index)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(result.value?.attributes.map(({ storageIndex }) => storageIndex)).toEqual([
+      0, 1, 2, 3, 4, 5, 6,
+    ]);
+    expect(result.value?.storageArrays.map(({ name }) => name)).toEqual([
+      'packed_float',
+      'packed_uint',
+      'color',
+    ]);
+  });
+
+  it('generates WGSL-safe, collision-free physical buffer names', () => {
+    const result = resolveAttributeSchema({
+      attributes: {
+        '9heat-value': attribute('9heat-value', {
+          default: [0, 0, 0, 0],
+          type: 'vec4',
+        }),
+        _9heat_value: attribute('_9heat_value', {
+          default: [0, 0, 0, 0],
+          type: 'vec4',
+        }),
+        signed: attribute('signed', { default: 0, type: 'i32' }),
+        temperature: attribute('temperature', { default: 0, type: 'f32' }),
+      },
+      capacity: 1,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+    const names = result.value?.storageArrays.map(({ name }) => name) ?? [];
+
+    expect(names.every((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))).toBe(true);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toContain('packed_float');
+    expect(names).toContain('packed_int');
+    expect(names).toContain('packed_uint');
+    expect(names).toContain('_9heat_value');
+    expect(names).toContain('_9heat_value_2');
+  });
+
+  it('round-trips every logical type through packed particle-major storage', () => {
+    const result = resolveAttributeSchema({
+      attributes: {
+        aScalar: attribute('aScalar', { default: 0, type: 'f32' }),
+        bVec3: attribute('bVec3', { default: [0, 0, 0], type: 'vec3' }),
+        boolMixed: attribute('boolMixed', { default: false, type: 'bool' }),
+        cVec3: attribute('cVec3', { default: [0, 0, 0], type: 'vec3' }),
+        colorValue: attribute('colorValue', { default: [0, 0, 0, 0], type: 'color' }),
+        dVec2: attribute('dVec2', { default: [0, 0], type: 'vec2' }),
+        eVec2: attribute('eVec2', { default: [0, 0], type: 'vec2' }),
+        fScalar: attribute('fScalar', { default: 0, type: 'f32' }),
+        gScalar: attribute('gScalar', { default: 0, type: 'f32' }),
+        intA: attribute('intA', { default: 0, type: 'i32' }),
+        intB: attribute('intB', { default: 0, type: 'i32' }),
+        mat3Value: attribute('mat3Value', {
+          default: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+          type: 'mat3',
+        }),
+        mat4Value: attribute('mat4Value', {
+          default: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          type: 'mat4',
+        }),
+        quatValue: attribute('quatValue', { default: [0, 0, 0, 1], type: 'quat' }),
+        uintMixed: attribute('uintMixed', { default: 0, type: 'u32' }),
+        vec4Value: attribute('vec4Value', { default: [0, 0, 0, 0], type: 'vec4' }),
+      },
+      capacity: 3,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+    expect(result.ok).toBe(true);
+    const schema = result.value!;
+    const physical = schema.storageArrays.map((storage) => {
+      const length = storage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type];
+      return storage.componentType === 'uint'
+        ? new Uint32Array(length)
+        : storage.componentType === 'int'
+          ? new Int32Array(length)
+          : new Float32Array(length);
+    });
+    const expected = new Map<string, number[]>();
+    const paddedComponent = (attribute: ResolvedAttribute, component: number): number =>
+      attribute.logicalType === 'mat3'
+        ? Math.floor(component / 3) * 4 + (component % 3)
+        : component;
+    const physicalIndex = (
+      attribute: ResolvedAttribute,
+      storage: ResolvedAttributeStorage,
+      particle: number,
+      component: number,
+    ): number => {
+      if (storage.packed) {
+        const address = resolvePackedAttributeAddress(attribute, storage);
+        return packedElementIndex(particle, address) * 4 + address.offset + component;
+      }
+      return (
+        particle * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] +
+        paddedComponent(attribute, component)
+      );
+    };
+
+    for (const [attributeIndex, resolved] of schema.attributes.entries()) {
+      const storage = schema.storageArrays[resolved.physical.bufferIndex]!;
+      const array = physical[storage.index]!;
+      const values: number[] = [];
+      for (let particle = 0; particle < schema.capacity; particle += 1) {
+        for (let component = 0; component < resolved.components; component += 1) {
+          const value =
+            resolved.logicalType === 'bool'
+              ? (particle + component + attributeIndex) % 2
+              : (attributeIndex + 1) * 100 + particle * 20 + component + 1;
+          array[physicalIndex(resolved, storage, particle, component)] = value;
+          values.push(value);
+        }
+      }
+      expected.set(resolved.name, values);
+    }
+
+    expect(schema.byName.bVec3?.physical).toMatchObject({ group: 0, offset: 1 });
+    expect(schema.byName.cVec3?.physical).toMatchObject({ group: 1, offset: 0 });
+    expect(schema.byName.boolMixed?.physical).toMatchObject({ group: 0, offset: 2 });
+    expect(schema.byName.uintMixed?.physical).toMatchObject({ group: 0, offset: 3 });
+    const cVec3 = schema.byName.cVec3!;
+    const floatStorage = schema.storageArrays[cVec3.physical.bufferIndex]!;
+    const cVec3Address = resolvePackedAttributeAddress(cVec3, floatStorage);
+    expect(packedElementIndex(2, cVec3Address)).toBe(2 * floatStorage.groupCount + 1);
+
+    for (const resolved of schema.attributes) {
+      const storage = schema.storageArrays[resolved.physical.bufferIndex]!;
+      const array = physical[storage.index]!;
+      const actual: number[] = [];
+      for (let particle = 0; particle < schema.capacity; particle += 1) {
+        for (let component = 0; component < resolved.components; component += 1) {
+          const index = storage.packed
+            ? packedComponentIndex(
+                particle,
+                resolvePackedAttributeAddress(resolved, storage),
+                component,
+              )
+            : physicalIndex(resolved, storage, particle, component);
+          actual.push(array[index] ?? Number.NaN);
+        }
+      }
+      expect(actual, resolved.name).toEqual(expected.get(resolved.name));
+    }
   });
 
   it('retains an unused custom attribute and its transient metadata', () => {

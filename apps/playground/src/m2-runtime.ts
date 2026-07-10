@@ -16,6 +16,7 @@ import { createPerformanceMonitor } from './perf';
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
+  readLogicalAttribute,
   readStorage,
 } from './three-kernel-adapter';
 import { createPlaygroundRenderer } from './webgpu-renderer';
@@ -170,9 +171,13 @@ async function uintStorage(
   instance: RuntimeInstance,
   name: 'alive' | 'spawnGeneration',
 ): Promise<Uint32Array> {
-  const storage = emitter(instance).kernels.storages[name];
-  if (!storage) throw new Error(`M2 runtime emitter storage "${name}" is missing.`);
-  return (await readStorage(renderer, storage, 'uint')) as Uint32Array;
+  const runtimeEmitter = emitter(instance);
+  return (await readLogicalAttribute(
+    renderer,
+    runtimeEmitter.program,
+    runtimeEmitter.kernels,
+    name,
+  )) as Uint32Array;
 }
 
 async function floatStorage(
@@ -180,9 +185,13 @@ async function floatStorage(
   instance: RuntimeInstance,
   name: 'position' | 'velocity',
 ): Promise<Float32Array> {
-  const storage = emitter(instance).kernels.storages[name];
-  if (!storage) throw new Error(`M2 runtime emitter storage "${name}" is missing.`);
-  return (await readStorage(renderer, storage, 'float')) as Float32Array;
+  const runtimeEmitter = emitter(instance);
+  return (await readLogicalAttribute(
+    renderer,
+    runtimeEmitter.program,
+    runtimeEmitter.kernels,
+    name,
+  )) as Float32Array;
 }
 
 async function aliveCount(
@@ -391,6 +400,7 @@ async function runTimeScenario(
   }
   const warmedPosition = await floatStorage(renderer, warmed, 'position');
   const coldPosition = await floatStorage(renderer, cold, 'position');
+  const packedStorageBufferCount = emitter(normal).program.meta.storageBufferCount;
 
   const validation = {
     compileCacheOk: movementSystem.compilationCount === 1,
@@ -398,6 +408,7 @@ async function runTimeScenario(
       looped.getEmitter('particles')?.spawnGeneration === 1 &&
       !equalArrays(firstGenerationVelocity, secondGenerationVelocity),
     prewarmDeterministic: equalArrays(warmedPosition, coldPosition),
+    packedStorageBufferBudget: packedStorageBufferCount <= 8,
     timeAdvanced: normalAdvance > 0,
     timeScalePaused: equalArrays(pausedInitial, pausedFinal),
     timeScaleTwice: close(fastAdvance, normalAdvance * 2),
@@ -417,6 +428,7 @@ async function runTimeScenario(
     movement: {
       fastAdvance,
       normalAdvance,
+      packedStorageBufferCount,
       pausedUnchanged: equalArrays(pausedInitial, pausedFinal),
     },
     prewarm: {

@@ -1,5 +1,7 @@
 import type {
   BakedLut,
+  BuiltEmitterKernels,
+  CompiledEmitterProgram,
   KernelNode,
   KernelIndirectStorageNode,
   KernelStorageNode,
@@ -10,7 +12,11 @@ import type {
   VfxDeviceLossInfo,
   VfxRuntimeRenderer,
 } from '@nachi/core';
-import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS } from '@nachi/core';
+import {
+  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
+  packedComponentIndex,
+  resolvePackedAttributeAddress,
+} from '@nachi/core';
 import * as THREE from 'three/webgpu';
 import {
   Fn,
@@ -18,17 +24,21 @@ import {
   atomicAdd,
   atomicStore,
   cos,
+  cameraViewMatrix,
   float,
   instanceIndex,
   instancedArray,
   int,
   mat3,
   mat4,
+  mx_atan2,
   sin,
   storage,
   texture,
+  uv,
   uint,
   uniform,
+  varying,
   vec2,
   vec3,
   vec4,
@@ -41,8 +51,16 @@ export interface ThreeKernelAdapterOptions {
   readonly maxTransformFeedbackSeparateAttribs?: number;
 }
 
+export interface ThreeSpriteMaterializationOptions {
+  readonly resolveTexture?: (uri: string) => THREE.Texture;
+}
+
 function asNode(value: unknown): KernelNode {
   return value as KernelNode;
+}
+
+function nodeLength(value: KernelNode): KernelNode {
+  return (value as KernelNode & { length(): KernelNode }).length();
 }
 
 function vectorValues(value: unknown, length: number): number[] {
@@ -252,6 +270,153 @@ export function createThreeRuntimeRenderer(
   return deviceLost === undefined ? base : { ...base, deviceLost };
 }
 
+function spriteBlending(mode: 'additive' | 'alpha' | 'multiply' | 'premultiplied'): {
+  blending: THREE.Blending;
+  premultipliedAlpha: boolean;
+} {
+  if (mode === 'additive') {
+    return { blending: THREE.AdditiveBlending, premultipliedAlpha: false };
+  }
+  if (mode === 'multiply') {
+    return { blending: THREE.MultiplyBlending, premultipliedAlpha: true };
+  }
+  return {
+    blending: THREE.NormalBlending,
+    premultipliedAlpha: mode === 'premultiplied',
+  };
+}
+
+/** Materializes one compiler draw description without exposing physical packing to author code. */
+export function materializeThreeSpriteDraw(
+  program: CompiledEmitterProgram,
+  kernels: BuiltEmitterKernels,
+  drawIndex = 0,
+  options: ThreeSpriteMaterializationOptions = {},
+): THREE.InstancedMesh<THREE.PlaneGeometry, THREE.SpriteNodeMaterial> {
+  const draw = program.draws[drawIndex];
+  if (!draw) throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
+  if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
+    throw new Error('Compiled sprite rendering requires the WebGPU indirect-draw lifecycle path.');
+  }
+  if (draw.indirect.drawArgumentsOffsetBytes !== kernels.drawIndirectOffsetBytes) {
+    throw new Error('Compiled draw and lifecycle indirect offsets disagree.');
+  }
+
+  const vertexStorages = program.attributeSchema.storageArrays.map((description) => {
+    const computeStorage = kernels.storages[description.name];
+    if (!computeStorage) throw new Error(`Sprite storage "${description.name}" is missing.`);
+    return (
+      storage(computeStorage.value as never, description.type, description.length) as unknown as {
+        toReadOnly(): KernelStorageNode;
+      }
+    ).toReadOnly();
+  });
+  const lifecycleRead = (
+    storage(
+      kernels.aliveIndices.value as never,
+      'uint',
+      program.meta.lifecycleStorage.buffers.state.wordCount,
+    ) as unknown as { toReadOnly(): KernelStorageNode }
+  ).toReadOnly();
+
+  const logicalAttribute = (name: string, physicalIndex: KernelNode): KernelNode => {
+    const attribute = program.attributeSchema.byName[name];
+    if (!attribute) throw new Error(`Sprite attribute "${name}" is missing.`);
+    const storage = program.attributeSchema.storageArrays[attribute.physical.bufferIndex];
+    const storageNode = storage === undefined ? undefined : vertexStorages[storage.index];
+    if (!storage || !storageNode) throw new Error(`Sprite storage for "${name}" is missing.`);
+    const address = storage.packed ? resolvePackedAttributeAddress(attribute, storage) : undefined;
+    const index = storage.packed
+      ? physicalIndex.mul(asNode(uint(address!.particleStride))).add(asNode(uint(address!.group)))
+      : physicalIndex;
+    const element = storageNode.element(index);
+    if (!storage.packed) return element;
+    const lanes = [element.x, element.y, element.z, element.w].slice(
+      address!.offset,
+      address!.offset + attribute.components,
+    );
+    if (attribute.components === 1) return lanes[0]!;
+    if (attribute.components === 2) return asNode(vec2(lanes[0] as never, lanes[1] as never));
+    if (attribute.components === 3) {
+      return asNode(vec3(lanes[0] as never, lanes[1] as never, lanes[2] as never));
+    }
+    throw new Error(`Packed sprite attribute "${name}" has unsupported width.`);
+  };
+
+  const aliveIndex = asNode(uint(instanceIndex)).add(
+    asNode(uint(draw.indirect.aliveIndicesOffsetWords)),
+  );
+  const compactedIndex = lifecycleRead.element(aliveIndex);
+  const particlePosition = logicalAttribute('position', compactedIndex);
+  const particleSize = logicalAttribute('size', compactedIndex);
+  const particleColor = logicalAttribute('color', compactedIndex);
+  const spriteRotation = logicalAttribute('spriteRotation', compactedIndex);
+  const alignment = draw.vertex.alignment;
+
+  let rotationNode = spriteRotation;
+  let scaleNode = asNode(vec2(particleSize as never, particleSize as never));
+  if (alignment.mode === 'velocity-aligned' || alignment.mode === 'velocity-stretch') {
+    const velocity = logicalAttribute('velocity', compactedIndex);
+    const viewVelocity = asNode(cameraViewMatrix.mul(vec4(velocity as never, 0))).xyz;
+    rotationNode = asNode(mx_atan2(viewVelocity.x.mul(-1) as never, viewVelocity.y as never)).add(
+      spriteRotation,
+    );
+    if (alignment.mode === 'velocity-stretch') {
+      const factor = alignment.factor ?? 1;
+      scaleNode = asNode(
+        vec2(
+          particleSize as never,
+          particleSize.mul(nodeLength(viewVelocity).mul(factor).add(1)) as never,
+        ),
+      );
+    }
+  } else if (alignment.mode === 'custom-axis') {
+    const viewAxis = asNode(cameraViewMatrix.mul(vec4(...alignment.axis, 0))).xyz;
+    rotationNode = asNode(mx_atan2(viewAxis.x.mul(-1) as never, viewAxis.y as never)).add(
+      spriteRotation,
+    );
+  }
+
+  let fragmentColor = asNode(varying(particleColor as never));
+  if (draw.fragment.map) {
+    const map = options.resolveTexture?.(draw.fragment.map.uri);
+    if (!map) {
+      throw new Error(`No texture resolver supplied for sprite map "${draw.fragment.map.uri}".`);
+    }
+    fragmentColor = fragmentColor.mul(asNode(texture(map, uv())));
+  }
+  const blend = spriteBlending(draw.fragment.blending);
+  const material = new THREE.SpriteNodeMaterial({
+    blending: blend.blending,
+    depthTest: true,
+    depthWrite: false,
+    premultipliedAlpha: blend.premultipliedAlpha,
+    transparent: true,
+  });
+  material.positionNode = particlePosition as never;
+  material.rotationNode = rotationNode as never;
+  material.scaleNode = scaleNode as never;
+  material.colorNode = fragmentColor.rgb as never;
+  material.opacityNode = fragmentColor.a as never;
+
+  const geometry = new THREE.PlaneGeometry(1, 1);
+  const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
+  const indirectWords = indirect.array as Uint32Array;
+  const indexCountWord = draw.indirect.drawArgumentsOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
+  indirectWords[indexCountWord] = draw.geometry.indexCount;
+  indirect.needsUpdate = true;
+  geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
+
+  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
+  const identity = new THREE.Matrix4();
+  for (let index = 0; index < program.attributeSchema.capacity; index += 1) {
+    mesh.setMatrixAt(index, identity);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
 export async function readStorage(
   renderer: THREE.WebGPURenderer,
   storage: KernelStorageNode,
@@ -259,4 +424,43 @@ export async function readStorage(
 ): Promise<Float32Array | Uint32Array> {
   const buffer = await renderer.getArrayBufferAsync(storage.value as never);
   return type === 'uint' ? new Uint32Array(buffer) : new Float32Array(buffer);
+}
+
+/** Readback helper used by smokes; returns the logical SoA view rather than packed vec4 storage. */
+export async function readLogicalAttribute(
+  renderer: THREE.WebGPURenderer,
+  program: CompiledEmitterProgram,
+  kernels: BuiltEmitterKernels,
+  name: string,
+): Promise<Float32Array | Int32Array | Uint32Array> {
+  const attribute = program.attributeSchema.byName[name];
+  if (!attribute) throw new Error(`Logical attribute "${name}" is missing.`);
+  const storage = program.attributeSchema.storageArrays[attribute.physical.bufferIndex];
+  const storageNode = storage === undefined ? undefined : kernels.storages[storage.name];
+  if (!storage || !storageNode) throw new Error(`Physical storage for "${name}" is missing.`);
+  const buffer = await renderer.getArrayBufferAsync(storageNode.value as never);
+  const ArrayType =
+    storage.componentType === 'uint'
+      ? Uint32Array
+      : storage.componentType === 'int'
+        ? Int32Array
+        : Float32Array;
+  const physical = new ArrayType(buffer);
+  const logical = new ArrayType(program.attributeSchema.capacity * attribute.components);
+  const packedAddress = storage.packed
+    ? resolvePackedAttributeAddress(attribute, storage)
+    : undefined;
+  for (let particle = 0; particle < program.attributeSchema.capacity; particle += 1) {
+    for (let component = 0; component < attribute.components; component += 1) {
+      const physicalComponent =
+        attribute.logicalType === 'mat3'
+          ? Math.floor(component / 3) * 4 + (component % 3)
+          : component;
+      const sourceIndex = storage.packed
+        ? packedComponentIndex(particle, packedAddress!, component)
+        : particle * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] + physicalComponent;
+      logical[particle * attribute.components + component] = physical[sourceIndex] ?? 0;
+    }
+  }
+  return logical;
 }

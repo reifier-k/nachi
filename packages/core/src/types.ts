@@ -127,8 +127,28 @@ export type AttributeSchema = Readonly<Record<string, AttributeDefinition>>;
 
 /** Logical component count. Backend layout owns padding (for example, mat3 has physical stride 12). */
 export type AttributeComponentCount = 1 | 2 | 3 | 4 | 9 | 16;
-export type TslStorageType = 'float' | 'int' | 'mat3' | 'mat4' | 'uint' | 'vec2' | 'vec3' | 'vec4';
+export type TslStorageType =
+  | 'float'
+  | 'int'
+  | 'ivec4'
+  | 'mat3'
+  | 'mat4'
+  | 'uint'
+  | 'uvec4'
+  | 'vec2'
+  | 'vec3'
+  | 'vec4';
 export type ResolvedAttributeSource = 'built-in' | 'custom';
+
+export interface ResolvedAttributePhysicalAllocation {
+  /** Index into ResolvedAttributeSchema.storageArrays. */
+  readonly bufferIndex: number;
+  /** Vec4 record within a particle's packed stride. Dedicated buffers always use group 0. */
+  readonly group: number;
+  /** First component lane within the vec4 record. Dedicated buffers always use offset 0. */
+  readonly offset: 0 | 1 | 2 | 3;
+  readonly packed: boolean;
+}
 
 export interface ResolvedAttribute {
   readonly components: AttributeComponentCount;
@@ -136,17 +156,24 @@ export interface ResolvedAttribute {
   readonly logicalType: AttributeType;
   readonly name: string;
   readonly path: ParticleAttributePath;
+  readonly physical: ResolvedAttributePhysicalAllocation;
   readonly source: ResolvedAttributeSource;
+  /** Stable logical enumeration order. Physical storage is selected by physical.bufferIndex. */
   readonly storageIndex: number;
   readonly storageType: TslStorageType;
   readonly transient: boolean;
 }
 
 export interface ResolvedAttributeStorage {
-  readonly attribute: string;
+  readonly attributes: readonly string[];
+  readonly componentType: 'float' | 'int' | 'uint';
+  /** Number of vec4 records per particle. Dedicated buffers use a stride of one. */
+  readonly groupCount: number;
   readonly index: number;
   readonly kind: 'instanced-array';
   readonly length: number;
+  readonly name: string;
+  readonly packed: boolean;
   readonly type: TslStorageType;
 }
 
@@ -342,6 +369,11 @@ export interface FlipbookDefinition {
 }
 
 export interface BillboardOptions {
+  readonly alignment?:
+    | { readonly mode: 'camera-facing' }
+    | { readonly mode: 'custom-axis'; readonly axis: Vec3 }
+    | { readonly mode: 'velocity-aligned' }
+    | { readonly mode: 'velocity-stretch'; readonly factor?: number };
   readonly blending?: BlendingMode;
   readonly map?: FlipbookDefinition | TextureRef;
   readonly soft?: boolean;

@@ -339,8 +339,18 @@ export function flipbook(
 }
 
 export function billboard(options: BillboardOptions): RenderModule {
+  const velocityRead =
+    options.alignment?.mode === 'velocity-aligned' || options.alignment?.mode === 'velocity-stretch'
+      ? (['Particles.velocity'] as const)
+      : [];
   return createModule('render', 'core/billboard', options, {
-    reads: ['Particles.color', 'Particles.position', 'Particles.size', 'Particles.spriteRotation'],
+    reads: [
+      'Particles.color',
+      'Particles.position',
+      'Particles.size',
+      'Particles.spriteRotation',
+      ...velocityRead,
+    ],
     writes: [],
   });
 }

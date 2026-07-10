@@ -5,6 +5,7 @@ import {
   attribute,
   bakeCurveLut,
   bakeGradientLut,
+  billboard,
   burst,
   colorOverLife,
   compileEmitter,
@@ -152,7 +153,8 @@ class FakeStorage implements KernelStorageNode {
   element(): KernelNode {
     return this.node;
   }
-  setName(): KernelStorageNode {
+  setName(name?: string): KernelStorageNode {
+    void name;
     return this;
   }
   toAtomic(): KernelStorageNode {
@@ -160,9 +162,14 @@ class FakeStorage implements KernelStorageNode {
   }
 }
 
-class RejectParticleOffsetNode extends FakeNode {
-  override add(): KernelNode {
-    throw new Error('Random sample offset touched the particle-index axis.');
+class CaptureNameStorage extends FakeStorage {
+  constructor(private readonly names: string[]) {
+    super();
+  }
+
+  override setName(name?: string): KernelStorageNode {
+    if (name !== undefined) this.names.push(name);
+    return this;
   }
 }
 
@@ -590,7 +597,7 @@ describe('emitter kernel compiler', () => {
     ]);
     expect(program.attributeSchema.byName.position?.default).toEqual([0, 0, 0]);
     expect(program.attributeSchema.byName.velocity?.default).toEqual([0, 0, 0]);
-    expect(program.meta.storageBufferCount).toBe(6);
+    expect(program.meta.storageBufferCount).toBe(4);
     expect(program.meta.storageBuffers.slice(-2)).toEqual([
       {
         count: 1,
@@ -614,7 +621,7 @@ describe('emitter kernel compiler', () => {
       attributes: Object.fromEntries(
         Array.from({ length: 7 }, (_, index) => {
           const name = `custom${index}`;
-          return [name, attribute(name, { default: 0, type: 'f32' })];
+          return [name, attribute(name, { default: [0, 0, 0, 0], type: 'vec4' })];
         }),
       ),
       capacity: 1,
@@ -623,8 +630,8 @@ describe('emitter kernel compiler', () => {
     });
     const program = compileEmitter(emitter);
 
-    expect(program.attributeSchema.storageArrays).toHaveLength(11);
-    expect(program.meta.storageBufferCount).toBe(13);
+    expect(program.attributeSchema.storageArrays).toHaveLength(9);
+    expect(program.meta.storageBufferCount).toBe(11);
     let buildError: unknown;
     try {
       program.buildKernels({
@@ -647,7 +654,7 @@ describe('emitter kernel compiler', () => {
     expect(() =>
       program.buildKernels({
         ...fakeAdapter(),
-        deviceLimits: { maxStorageBuffersPerShaderStage: 13 },
+        deviceLimits: { maxStorageBuffersPerShaderStage: 11 },
       }),
     ).not.toThrow();
   });
@@ -667,15 +674,12 @@ describe('emitter kernel compiler', () => {
       }),
     );
 
-    expect(program.attributeSchema.storageArrays.map(({ attribute }) => attribute)).toEqual([
-      'position',
-      'velocity',
-      'lifetime',
-      'alive',
-      'spawnGeneration',
+    expect(program.attributeSchema.storageArrays.map(({ attributes }) => attributes)).toEqual([
+      ['position', 'velocity', 'lifetime'],
+      ['alive', 'spawnGeneration'],
     ]);
-    expect(program.meta.storageBufferCount).toBe(7);
-    expect(program.meta.storageBuffers).toHaveLength(7);
+    expect(program.meta.storageBufferCount).toBe(4);
+    expect(program.meta.storageBuffers).toHaveLength(4);
     expect(() =>
       program.buildKernels({
         ...fakeAdapter(),
@@ -716,9 +720,86 @@ describe('emitter kernel compiler', () => {
       }),
     );
 
-    expect(m1.meta.storageBufferCount).toBe(10);
-    expect(m2Lifecycle.meta.storageBufferCount).toBe(7);
-    expect(m2Time.meta.storageBufferCount).toBe(9);
+    expect(m1.meta.storageBufferCount).toBe(5);
+    expect(m2Lifecycle.meta.storageBufferCount).toBe(4);
+    expect(m2Time.meta.storageBufferCount).toBe(4);
+    for (const program of [m1, m2Lifecycle, m2Time]) {
+      expect(
+        program.attributeSchema.storageArrays.every(({ name }) =>
+          /^[A-Za-z_][A-Za-z0-9_]*$/.test(name),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('compiles billboard geometry, indirect alive indexing, and packing-aware vertex reads', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 32,
+        init: [velocityCone({ angle: 0, direction: [0, 1, 0], speed: 2 }), lifetime(3)],
+        integration: 'none',
+        render: billboard({
+          alignment: { factor: 1.5, mode: 'velocity-stretch' },
+          blending: 'premultiplied',
+        }),
+        spawn: burst({ count: 8 }),
+      }),
+    );
+
+    expect(program.draws).toEqual([
+      expect.objectContaining({
+        fragment: { blending: 'premultiplied' },
+        geometry: { indexCount: 6, topology: 'triangle-list', vertexCount: 4 },
+        indirect: expect.objectContaining({
+          instanceCount: 'alive-count',
+          physicalIndex: 'alive-indices',
+        }),
+        kind: 'billboard',
+        vertex: expect.objectContaining({
+          alignment: { factor: 1.5, mode: 'velocity-stretch' },
+          attributes: ['position', 'size', 'color', 'spriteRotation', 'velocity'],
+        }),
+      }),
+    ]);
+    expect(program.meta.backendBudgets.webgpu.vertexStorageBufferCount).toBeLessThanOrEqual(8);
+    expect(
+      program.attributeSchema.storageArrays.every(({ name }) =>
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(name),
+      ),
+    ).toBe(true);
+    expect(
+      program.meta.storageBuffers.find(({ name }) => name === 'Particles.packed_float'),
+    ).toMatchObject({
+      attributes: expect.arrayContaining([
+        expect.objectContaining({ name: 'position', group: 0, offset: 0 }),
+        expect.objectContaining({ name: 'size', offset: 1 }),
+        expect.objectContaining({ name: 'velocity', group: 1, offset: 0 }),
+      ]),
+    });
+  });
+
+  it('diagnoses invalid custom-axis and velocity-stretch billboard configurations', () => {
+    const invalidAxis = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ alignment: { axis: [0, 0, 0], mode: 'custom-axis' } }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const invalidStretch = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ alignment: { factor: -1, mode: 'velocity-stretch' } }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(invalidAxis.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_BILLBOARD_AXIS_INVALID' }),
+    );
+    expect(invalidStretch.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_BILLBOARD_STRETCH_INVALID' }),
+    );
   });
 
   it('materializes separate lifecycle state and indirect-argument buffers', () => {
@@ -738,13 +819,47 @@ describe('emitter kernel compiler', () => {
     });
 
     expect(indirectArrays).toBe(1);
-    expect(instancedArrays).toBe(5);
+    expect(instancedArrays).toBe(3);
     expect(built.aliveCount).toBe(built.aliveIndices);
     expect(built.aliveCount).toBe(built.freeCount);
     expect(built.drawIndirect).toBe(built.spawnDispatch);
     expect(built.drawIndirect).not.toBe(built.aliveCount);
     expect(built.freeListOffset).toBeLessThan(built.aliveIndicesOffset);
     expect(built.drawIndirectOffsetBytes).toBe(3 * Uint32Array.BYTES_PER_ELEMENT);
+  });
+
+  it('uses WGSL identifiers for every materialized storage buffer name', () => {
+    const names: string[] = [];
+    const adapter = fakeAdapter();
+    const program = compileEmitter(
+      defineEmitter({
+        attributes: {
+          'custom-value': attribute('custom-value', {
+            default: [0, 0, 0, 0],
+            type: 'vec4',
+          }),
+          signed: attribute('signed', { default: 0, type: 'i32' }),
+        },
+        capacity: 1,
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    program.buildKernels({
+      ...adapter,
+      indirectArray: () => Object.assign(new CaptureNameStorage(names), { indirectResource: {} }),
+      instancedArray: () => new CaptureNameStorage(names),
+    });
+
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.every((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))).toBe(true);
+    expect(names.some((name) => name.includes('-'))).toBe(false);
+    expect(
+      program.meta.storageBuffers.every(({ name }) =>
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(name.replace(/^Particles\./, '')),
+      ),
+    ).toBe(true);
   });
 
   it('describes both lifecycle allocation sizes exactly in metadata', () => {
@@ -1372,9 +1487,7 @@ describe('emitter kernel compiler', () => {
       baseEmitter({ init: [positionSphere({ radius: 1 })], integration: 'none' }),
     );
 
-    expect(() =>
-      program.buildKernels({ ...fakeAdapter(), instanceIndex: new RejectParticleOffsetNode() }),
-    ).not.toThrow();
+    expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
   });
 
   it('diagnoses traced write keys that are absent from the attribute schema', () => {
@@ -1483,6 +1596,38 @@ describe('emitter kernel compiler', () => {
       expect.objectContaining({ code: 'NACHI_ATTRIBUTE_UNUSED', severity: 'warning' }),
     ]);
     expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
+  });
+
+  it('rejects in-place mutation of logical attribute reads', () => {
+    const access: ModuleAccess = {
+      reads: ['Particles.velocity'],
+      writes: ['Particles.velocity'],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access,
+      build(context) {
+        context.attribute('velocity').addAssign(1);
+      },
+      stage: 'update',
+      type: 'test/in-place-mutation',
+      version: 1,
+    });
+    const module: ModuleDefinition<'update', Record<string, never>> = {
+      access,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/in-place-mutation',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      registry,
+    });
+
+    expect(() => program.buildKernels(fakeAdapter())).toThrow(
+      'Attribute "velocity" is read-only in KernelModuleBuildContext; use context.write().',
+    );
   });
 
   it('counts render and event access when checking unused custom attributes', () => {
