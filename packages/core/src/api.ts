@@ -343,6 +343,8 @@ export function billboard(options: BillboardOptions): RenderModule {
     options.alignment?.mode === 'velocity-aligned' || options.alignment?.mode === 'velocity-stretch'
       ? (['Particles.velocity'] as const)
       : [];
+  const flipbookRead =
+    options.map?.kind === 'flipbook' ? (['Particles.normalizedAge'] as const) : [];
   return createModule('render', 'core/billboard', options, {
     reads: [
       'Particles.color',
@@ -350,6 +352,7 @@ export function billboard(options: BillboardOptions): RenderModule {
       'Particles.size',
       'Particles.spriteRotation',
       ...velocityRead,
+      ...flipbookRead,
     ],
     writes: [],
   });

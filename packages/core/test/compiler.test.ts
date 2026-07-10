@@ -16,6 +16,7 @@ import {
   defineEmitter,
   defineParameter,
   drag,
+  flipbook,
   gradient,
   gravity,
   KernelModuleRegistry,
@@ -749,7 +750,12 @@ describe('emitter kernel compiler', () => {
     expect(program.draws).toEqual([
       expect.objectContaining({
         fragment: { blending: 'premultiplied' },
-        geometry: { indexCount: 6, topology: 'triangle-list', vertexCount: 4 },
+        geometry: {
+          indexCount: 6,
+          shape: 'quad',
+          topology: 'triangle-list',
+          vertexCount: 4,
+        },
         indirect: expect.objectContaining({
           instanceCount: 'alive-count',
           physicalIndex: 'alive-indices',
@@ -776,6 +782,87 @@ describe('emitter kernel compiler', () => {
         expect.objectContaining({ name: 'velocity', group: 1, offset: 0 }),
       ]),
     });
+  });
+
+  it('compiles flipbook interpolation, motion vectors, cutout, and soft depth fade', () => {
+    const atlas = { assetType: 'texture', kind: 'asset-ref', uri: 'atlas' } as const;
+    const motion = { assetType: 'texture', kind: 'asset-ref', uri: 'motion' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        init: [lifetime(2)],
+        render: billboard({
+          cutout: { vertices: 6 },
+          map: flipbook(atlas, { cols: 4, motionVectors: motion, rows: 2 }),
+          soft: true,
+        }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.diagnostics).toEqual([]);
+    expect(program.draws[0]).toMatchObject({
+      fragment: {
+        flipbook: {
+          cols: 4,
+          interpolate: true,
+          motionVectors: motion,
+          progressAttribute: 'normalizedAge',
+          rows: 2,
+        },
+        map: atlas,
+        soft: { fadeDistance: 0.035 },
+      },
+      geometry: {
+        indexCount: 12,
+        shape: 'cutout',
+        topology: 'triangle-list',
+        vertexCount: 6,
+      },
+      vertex: { attributes: expect.arrayContaining(['normalizedAge']) },
+    });
+  });
+
+  it('warns and uses plain interpolation when flipbook motion vectors lack a resource', () => {
+    const atlas = { assetType: 'texture', kind: 'asset-ref', uri: 'atlas' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [lifetime(1)],
+        render: billboard({ map: flipbook(atlas, { cols: 2, motionVectors: true, rows: 2 }) }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_FLIPBOOK_MOTION_VECTOR_FALLBACK',
+        severity: 'warning',
+      }),
+    );
+    expect(program.draws[0]?.fragment.flipbook).not.toHaveProperty('motionVectors');
+  });
+
+  it('diagnoses invalid flipbook grids and cutout vertex counts', () => {
+    const atlas = { assetType: 'texture', kind: 'asset-ref', uri: 'atlas' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [lifetime(1)],
+        render: billboard({
+          cutout: { vertices: 9 as 8 },
+          map: flipbook(atlas, { cols: 0, rows: 1 }),
+        }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'NACHI_BILLBOARD_CUTOUT_VERTICES_INVALID' }),
+        expect.objectContaining({ code: 'NACHI_FLIPBOOK_GRID_INVALID' }),
+      ]),
+    );
   });
 
   it('diagnoses invalid custom-axis and velocity-stretch billboard configurations', () => {

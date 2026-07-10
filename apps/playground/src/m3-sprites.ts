@@ -5,17 +5,19 @@ import {
   colorOverLife,
   defineEffect,
   defineEmitter,
+  flipbook,
   gradient,
   lifetime,
   positionSphere,
   velocityCone,
 } from '@nachi/core';
-import type { BillboardOptions, VfxEmitterRuntimeView } from '@nachi/core';
+import type { BillboardOptions, TextureRef, VfxEmitterRuntimeView } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
+  createThreeTextureResolver,
   materializeThreeSpriteDraw,
   readLogicalAttribute,
 } from './three-kernel-adapter';
@@ -79,9 +81,12 @@ function spriteEffect(options: {
   readonly blending?: NonNullable<BillboardOptions['blending']>;
   readonly capacity?: number;
   readonly count?: number;
+  readonly cutout?: BillboardOptions['cutout'];
   readonly duration?: number;
   readonly lifetimeSeconds?: number;
   readonly loopCount?: number;
+  readonly map?: BillboardOptions['map'];
+  readonly soft?: boolean;
   readonly spread?: number;
   readonly speed?: number;
 }) {
@@ -106,6 +111,9 @@ function spriteEffect(options: {
         render: billboard({
           ...(options.alignment === undefined ? {} : { alignment: options.alignment }),
           blending: options.blending ?? 'alpha',
+          ...(options.cutout === undefined ? {} : { cutout: options.cutout }),
+          ...(options.map === undefined ? {} : { map: options.map }),
+          ...(options.soft === undefined ? {} : { soft: options.soft }),
         }),
         spawn: burst({ count: options.count ?? 4 }),
         update: [colorOverLife(gradient([1, 0.18, 0.04, 0.38], [1, 0.18, 0.04, 0.38]))],
@@ -143,6 +151,37 @@ function comparePixels(pixels: ArrayLike<number>, baseline: ArrayLike<number>) {
     foregroundPixelRatio: changed / (WIDTH * HEIGHT),
     meanForegroundBrightness: changed === 0 ? 0 : brightness / (changed * 3),
   };
+}
+
+function compareReadbacks(left: ArrayLike<number>, right: ArrayLike<number>) {
+  if (left.length !== right.length || left.length === 0) {
+    throw new Error('M3 sprite readback buffers were empty or had mismatched lengths.');
+  }
+  let changedPixels = 0;
+  let totalDifference = 0;
+  for (let offset = 0; offset < left.length; offset += 4) {
+    const difference =
+      (Math.abs((left[offset] ?? 0) - (right[offset] ?? 0)) +
+        Math.abs((left[offset + 1] ?? 0) - (right[offset + 1] ?? 0)) +
+        Math.abs((left[offset + 2] ?? 0) - (right[offset + 2] ?? 0))) /
+      3;
+    totalDifference += difference;
+    if (difference > 6) changedPixels += 1;
+  }
+  const pixelCount = left.length / 4;
+  return {
+    changedPixelRatio: changedPixels / pixelCount,
+    meanAbsoluteDifference: totalDifference / pixelCount,
+  };
+}
+
+function centerBrightness(pixels: ArrayLike<number>): number {
+  const offset = (Math.floor(HEIGHT / 2) * WIDTH + Math.floor(WIDTH / 2)) * 4;
+  return ((pixels[offset] ?? 0) + (pixels[offset + 1] ?? 0) + (pixels[offset + 2] ?? 0)) / 3;
+}
+
+function textureRef(uri: string): TextureRef {
+  return { assetType: 'texture', kind: 'asset-ref', uri };
 }
 
 async function indirectCount(renderer: THREE.WebGPURenderer, view: VfxEmitterRuntimeView) {
@@ -188,6 +227,17 @@ async function run(): Promise<void> {
   camera.position.set(0, 0, 5);
   camera.lookAt(0, 0, 0);
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  const atlasRef = textureRef('procedural://m3-sprites/flipbook-atlas');
+  const atlasTexture = new THREE.DataTexture(
+    new Uint8Array([255, 255, 255, 255, 16, 16, 16, 255]),
+    2,
+    1,
+  );
+  atlasTexture.magFilter = THREE.NearestFilter;
+  atlasTexture.minFilter = THREE.NearestFilter;
+  atlasTexture.generateMipmaps = false;
+  atlasTexture.needsUpdate = true;
+  const resolveTexture = createThreeTextureResolver(new Map([[atlasRef.uri, atlasTexture]]));
 
   const render = async (mesh?: THREE.Object3D) => {
     if (mesh) scene.add(mesh);
@@ -207,7 +257,7 @@ async function run(): Promise<void> {
     });
     const instance = system.spawn(spriteEffect(options), { seed: 41 }) as RuntimeInstance;
     const view = emitter(instance);
-    const mesh = materializeThreeSpriteDraw(view.program, view.kernels);
+    const mesh = materializeThreeSpriteDraw(view.program, view.kernels, 0, { resolveTexture });
     await system.update(0);
     await system.update(STEP);
     return { instance, mesh, system, view };
@@ -230,6 +280,61 @@ async function run(): Promise<void> {
   });
   const facingShape = comparePixels(await render(facing.mesh), baseline);
   const stretchedShape = comparePixels(await render(stretched.mesh), baseline);
+
+  const flipbookMap = flipbook(atlasRef, { cols: 2, rows: 1 });
+  const interpolatedFlipbook = await createSprite({
+    count: 1,
+    lifetimeSeconds: STEP * 8,
+    map: flipbookMap,
+  });
+  const firstFlipbookPixels = await render(interpolatedFlipbook.mesh);
+  await interpolatedFlipbook.system.update(STEP * 2);
+  const progressedFlipbookPixels = await render(interpolatedFlipbook.mesh);
+  const discreteFlipbook = await createSprite({
+    count: 1,
+    lifetimeSeconds: STEP * 8,
+    map: flipbook(atlasRef, { cols: 2, interpolate: false, rows: 1 }),
+  });
+  const discreteFlipbookPixels = await render(discreteFlipbook.mesh);
+  const frameProgressDifference = compareReadbacks(firstFlipbookPixels, progressedFlipbookPixels);
+  const interpolationDifference = compareReadbacks(firstFlipbookPixels, discreteFlipbookPixels);
+  const flipbookBrightness = {
+    discrete: centerBrightness(discreteFlipbookPixels),
+    first: centerBrightness(firstFlipbookPixels),
+    progressed: centerBrightness(progressedFlipbookPixels),
+  };
+
+  const quadSprite = await createSprite({ count: 1, cutout: { vertices: 4 } });
+  const cutoutSprite = await createSprite({ count: 1, cutout: { vertices: 6 } });
+  const quadPixels = await render(quadSprite.mesh);
+  const cutoutPixels = await render(cutoutSprite.mesh);
+  const quadMetrics = comparePixels(quadPixels, baseline);
+  const cutoutMetrics = comparePixels(cutoutPixels, baseline);
+  const cutoutCenterDifference = Math.abs(
+    centerBrightness(quadPixels) - centerBrightness(cutoutPixels),
+  );
+  const cutoutDraw = cutoutSprite.view.program.draws[0];
+
+  const hardIntersectionSprite = await createSprite({ count: 1 });
+  const softIntersectionSprite = await createSprite({ count: 1, soft: true });
+  hardIntersectionSprite.mesh.position.z = 0.72;
+  softIntersectionSprite.mesh.position.z = 0.72;
+  const occluder = new THREE.Mesh(
+    new THREE.BoxGeometry(0.85, 1.35, 1.3),
+    new THREE.MeshBasicMaterial({ color: 0x5a78a8 }),
+  );
+  occluder.position.set(0.18, 0, 0);
+  occluder.rotation.y = 0.58;
+  scene.add(occluder);
+  const occluderBaseline = await render();
+  const hardIntersectionPixels = await render(hardIntersectionSprite.mesh);
+  const softIntersectionPixels = await render(softIntersectionSprite.mesh);
+  scene.remove(occluder);
+  const hardIntersection = comparePixels(hardIntersectionPixels, occluderBaseline);
+  const softIntersection = comparePixels(softIntersectionPixels, occluderBaseline);
+  const hardIntersectionContribution = compareReadbacks(hardIntersectionPixels, occluderBaseline);
+  const softIntersectionContribution = compareReadbacks(softIntersectionPixels, occluderBaseline);
+  const softFadeDifference = compareReadbacks(hardIntersectionPixels, softIntersectionPixels);
 
   const lifecycleSystem = new VFXSystem(runtimeRenderer, undefined, {
     aliveCountReadbackInterval: 1,
@@ -304,11 +409,33 @@ async function run(): Promise<void> {
       Math.abs((blendBrightness.additive ?? 0) - (blendBrightness.alpha ?? 0)) > 2 &&
       Math.abs((blendBrightness.multiply ?? 0) - (blendBrightness.alpha ?? 0)) > 2 &&
       (blendMetrics.premultiplied?.foregroundPixelRatio ?? 0) > 0,
+    cutoutShape:
+      cutoutDraw?.geometry.shape === 'cutout' &&
+      cutoutDraw.geometry.vertexCount === 6 &&
+      cutoutDraw.geometry.indexCount === 12 &&
+      cutoutCenterDifference < 2 &&
+      cutoutMetrics.foregroundPixelRatio > 0 &&
+      cutoutMetrics.foregroundPixelRatio < quadMetrics.foregroundPixelRatio,
     consoleClean: consoleMessages.length === 0,
+    flipbookFrameProgress:
+      frameProgressDifference.changedPixelRatio > 0.005 &&
+      frameProgressDifference.meanAbsoluteDifference > 0.1 &&
+      flipbookBrightness.first > flipbookBrightness.progressed,
+    flipbookInterpolation:
+      interpolationDifference.changedPixelRatio > 0.005 &&
+      interpolationDifference.meanAbsoluteDifference > 0.1 &&
+      flipbookBrightness.discrete > flipbookBrightness.first,
     m2NumericRegression:
       regressionView.program.meta.storageBufferCount <= 8 &&
       Math.abs(movementDelta - STEP) < 0.0002,
     respawnReflected: respawned,
+    softIntersectionFade:
+      softFadeDifference.changedPixelRatio > 0.001 &&
+      softFadeDifference.meanAbsoluteDifference > 0.05 &&
+      softIntersection.foregroundPixelRatio > 0.001 &&
+      softIntersectionContribution.meanAbsoluteDifference > 0 &&
+      softIntersectionContribution.meanAbsoluteDifference <
+        hardIntersectionContribution.meanAbsoluteDifference,
     spriteForeground: foreground.foregroundPixelRatio > 0.01,
     velocityStretchShape:
       stretchedShape.bounds.height > facingShape.bounds.height * 1.5 &&
@@ -317,7 +444,18 @@ async function run(): Promise<void> {
   const result = {
     aliveHistory,
     blendMetrics,
+    cutout: {
+      centerDifference: cutoutCenterDifference,
+      draw: cutoutDraw?.geometry,
+      hex: cutoutMetrics,
+      quad: quadMetrics,
+    },
     consoleMessages,
+    flipbook: {
+      brightness: flipbookBrightness,
+      frameProgressDifference,
+      interpolationDifference,
+    },
     foreground,
     m2Regression: {
       movementDelta,
@@ -327,6 +465,13 @@ async function run(): Promise<void> {
     ok: Object.values(validation).every(Boolean),
     pixelHistory,
     shapes: { facing: facingShape.bounds, stretched: stretchedShape.bounds },
+    softParticles: {
+      fadeDifference: softFadeDifference,
+      hard: hardIntersection,
+      hardContribution: hardIntersectionContribution,
+      soft: softIntersection,
+      softContribution: softIntersectionContribution,
+    },
     validation,
   };
   await performanceMonitor.resolveGpuTimestamps();

@@ -365,7 +365,10 @@ export interface FlipbookDefinition {
   readonly texture: TextureRef;
   readonly cols: number;
   readonly rows: number;
-  readonly motionVectors?: boolean;
+  /** Defaults to true. False selects discrete frames without adjacent-frame blending. */
+  readonly interpolate?: boolean;
+  /** A TextureRef enables MV UV warping. True without a resource falls back with a warning. */
+  readonly motionVectors?: boolean | TextureRef;
 }
 
 export interface BillboardOptions {
@@ -375,6 +378,7 @@ export interface BillboardOptions {
     | { readonly mode: 'velocity-aligned' }
     | { readonly mode: 'velocity-stretch'; readonly factor?: number };
   readonly blending?: BlendingMode;
+  readonly cutout?: { readonly vertices: 4 | 5 | 6 | 7 | 8 };
   readonly map?: FlipbookDefinition | TextureRef;
   readonly soft?: boolean;
 }

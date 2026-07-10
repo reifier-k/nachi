@@ -8,6 +8,7 @@ import type {
   KernelTslAdapter,
   KernelUniformNode,
   ParameterPath,
+  TextureRef,
   TslStorageType,
   VfxDeviceLossInfo,
   VfxRuntimeRenderer,
@@ -26,13 +27,19 @@ import {
   cos,
   cameraViewMatrix,
   float,
+  floor,
+  fract,
   instanceIndex,
   instancedArray,
   int,
   mat3,
   mat4,
+  linearDepth,
+  mix,
+  mod,
   mx_atan2,
   sin,
+  screenUV,
   storage,
   texture,
   uv,
@@ -42,6 +49,7 @@ import {
   vec2,
   vec3,
   vec4,
+  viewportDepthTexture,
 } from 'three/tsl';
 
 export interface ThreeKernelAdapterOptions {
@@ -52,7 +60,15 @@ export interface ThreeKernelAdapterOptions {
 }
 
 export interface ThreeSpriteMaterializationOptions {
-  readonly resolveTexture?: (uri: string) => THREE.Texture;
+  readonly resolveTexture?: ThreeTextureResolver;
+}
+
+export type ThreeTextureResolver = (reference: TextureRef) => THREE.Texture | undefined;
+
+export function createThreeTextureResolver(
+  textures: ReadonlyMap<string, THREE.Texture>,
+): ThreeTextureResolver {
+  return (reference) => textures.get(reference.uri);
 }
 
 function asNode(value: unknown): KernelNode {
@@ -61,6 +77,10 @@ function asNode(value: unknown): KernelNode {
 
 function nodeLength(value: KernelNode): KernelNode {
   return (value as KernelNode & { length(): KernelNode }).length();
+}
+
+function nodeXY(value: KernelNode): KernelNode {
+  return (value as KernelNode & { readonly xy: KernelNode }).xy;
 }
 
 function vectorValues(value: unknown, length: number): number[] {
@@ -286,13 +306,44 @@ function spriteBlending(mode: 'additive' | 'alpha' | 'multiply' | 'premultiplied
   };
 }
 
+export function createThreeSpriteGeometry(vertexCount: 4 | 5 | 6 | 7 | 8): THREE.BufferGeometry {
+  const positions = new Float32Array(vertexCount * 3);
+  const uvs = new Float32Array(vertexCount * 2);
+  for (let index = 0; index < vertexCount; index += 1) {
+    const quad = [
+      [-0.5, -0.5],
+      [0.5, -0.5],
+      [0.5, 0.5],
+      [-0.5, 0.5],
+    ] as const;
+    const angle = -Math.PI / 2 + (index / vertexCount) * Math.PI * 2;
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    const radius = 0.5 / Math.max(Math.abs(cosine), Math.abs(sine));
+    const x = vertexCount === 4 ? quad[index]![0] : cosine * radius;
+    const y = vertexCount === 4 ? quad[index]![1] : sine * radius;
+    positions.set([x, y, 0], index * 3);
+    uvs.set([x + 0.5, y + 0.5], index * 2);
+  }
+  const indices: number[] = [];
+  for (let triangle = 1; triangle < vertexCount - 1; triangle += 1) {
+    indices.push(0, triangle, triangle + 1);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
 /** Materializes one compiler draw description without exposing physical packing to author code. */
 export function materializeThreeSpriteDraw(
   program: CompiledEmitterProgram,
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeSpriteMaterializationOptions = {},
-): THREE.InstancedMesh<THREE.PlaneGeometry, THREE.SpriteNodeMaterial> {
+): THREE.InstancedMesh<THREE.BufferGeometry, THREE.SpriteNodeMaterial> {
   const draw = program.draws[drawIndex];
   if (!draw) throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
   if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
@@ -379,12 +430,71 @@ export function materializeThreeSpriteDraw(
 
   let fragmentColor = asNode(varying(particleColor as never));
   if (draw.fragment.map) {
-    const map = options.resolveTexture?.(draw.fragment.map.uri);
+    const map = options.resolveTexture?.(draw.fragment.map);
     if (!map) {
       throw new Error(`No texture resolver supplied for sprite map "${draw.fragment.map.uri}".`);
     }
-    fragmentColor = fragmentColor.mul(asNode(texture(map, uv())));
+    const flipbook = draw.fragment.flipbook;
+    if (flipbook) {
+      const localUv = asNode(uv());
+      const progress = asNode(
+        varying(logicalAttribute(flipbook.progressAttribute, compactedIndex) as never),
+      ).clamp(0, 1);
+      const frameCount = flipbook.cols * flipbook.rows;
+      const framePosition = flipbook.interpolate
+        ? progress.mul(frameCount).clamp(0, frameCount - 1)
+        : asNode(floor(progress.mul(frameCount) as never)).clamp(0, frameCount - 1);
+      const firstFrame = asNode(floor(framePosition as never));
+      const secondFrame = firstFrame.add(1).clamp(0, frameCount - 1);
+      const frameBlend = flipbook.interpolate
+        ? asNode(fract(framePosition as never))
+        : asNode(float(0));
+      const atlasUv = (frame: KernelNode, sourceUv: KernelNode): KernelNode => {
+        const column = asNode(mod(frame as never, flipbook.cols));
+        const row = asNode(floor(frame.div(flipbook.cols) as never));
+        return asNode(
+          vec2(
+            sourceUv.x.add(column).div(flipbook.cols) as never,
+            sourceUv.y.add(row).div(flipbook.rows) as never,
+          ),
+        );
+      };
+      let firstUv = atlasUv(firstFrame, localUv);
+      let secondUv = atlasUv(secondFrame, localUv);
+      if (flipbook.interpolate && flipbook.motionVectors) {
+        const motionTexture = options.resolveTexture?.(flipbook.motionVectors);
+        if (!motionTexture) {
+          throw new Error(
+            `No texture resolver supplied for flipbook motion vectors "${flipbook.motionVectors.uri}".`,
+          );
+        }
+        const firstMotion = nodeXY(asNode(texture(motionTexture, firstUv as never)))
+          .mul(2)
+          .sub(1);
+        const secondMotion = nodeXY(asNode(texture(motionTexture, secondUv as never)))
+          .mul(2)
+          .sub(1);
+        firstUv = atlasUv(firstFrame, localUv.sub(firstMotion.mul(frameBlend)));
+        secondUv = atlasUv(
+          secondFrame,
+          localUv.add(secondMotion.mul(asNode(float(1)).sub(frameBlend))),
+        );
+      }
+      const firstSample = asNode(texture(map, firstUv as never));
+      const mapSample = flipbook.interpolate
+        ? asNode(mix(firstSample as never, texture(map, secondUv as never), frameBlend as never))
+        : firstSample;
+      fragmentColor = fragmentColor.mul(mapSample);
+    } else {
+      fragmentColor = fragmentColor.mul(asNode(texture(map, uv())));
+    }
   }
+  const softFade = draw.fragment.soft
+    ? asNode(linearDepth(viewportDepthTexture(screenUV)))
+        .sub(asNode(linearDepth()))
+        .div(draw.fragment.soft.fadeDistance)
+        .clamp(0, 1)
+    : asNode(float(1));
   const blend = spriteBlending(draw.fragment.blending);
   const material = new THREE.SpriteNodeMaterial({
     blending: blend.blending,
@@ -397,9 +507,9 @@ export function materializeThreeSpriteDraw(
   material.rotationNode = rotationNode as never;
   material.scaleNode = scaleNode as never;
   material.colorNode = fragmentColor.rgb as never;
-  material.opacityNode = fragmentColor.a as never;
+  material.opacityNode = fragmentColor.a.mul(softFade) as never;
 
-  const geometry = new THREE.PlaneGeometry(1, 1);
+  const geometry = createThreeSpriteGeometry(draw.geometry.vertexCount);
   const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
   const indirectWords = indirect.array as Uint32Array;
   const indexCountWord = draw.indirect.drawArgumentsOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;

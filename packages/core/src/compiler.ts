@@ -417,12 +417,21 @@ export interface CompiledEmitterProgram {
 export interface CompiledSpriteDrawDescription {
   readonly fragment: {
     readonly blending: BlendingMode;
+    readonly flipbook?: {
+      readonly cols: number;
+      readonly interpolate: boolean;
+      readonly motionVectors?: TextureRef;
+      readonly progressAttribute: 'normalizedAge';
+      readonly rows: number;
+    };
     readonly map?: TextureRef;
+    readonly soft?: { readonly fadeDistance: number };
   };
   readonly geometry: {
-    readonly indexCount: 6;
+    readonly indexCount: number;
+    readonly shape: 'cutout' | 'quad';
     readonly topology: 'triangle-list';
-    readonly vertexCount: 4;
+    readonly vertexCount: 4 | 5 | 6 | 7 | 8;
   };
   readonly indirect: {
     readonly aliveIndicesOffsetWords: number;
@@ -1365,6 +1374,42 @@ function compileSpriteDraws(
         ),
       );
     }
+    const cutoutVertices = options.cutout?.vertices ?? 4;
+    if (!Number.isInteger(cutoutVertices) || cutoutVertices < 4 || cutoutVertices > 8) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_BILLBOARD_CUTOUT_VERTICES_INVALID',
+          'Billboard cutout vertices must be an integer from 4 through 8.',
+          `${path}.config.cutout.vertices`,
+        ),
+      );
+    }
+    const flipbook = options.map?.kind === 'flipbook' ? options.map : undefined;
+    if (
+      flipbook &&
+      (!Number.isSafeInteger(flipbook.cols) ||
+        flipbook.cols <= 0 ||
+        !Number.isSafeInteger(flipbook.rows) ||
+        flipbook.rows <= 0)
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_FLIPBOOK_GRID_INVALID',
+          'Flipbook cols and rows must be positive safe integers.',
+          `${path}.config.map`,
+        ),
+      );
+    }
+    if (flipbook?.motionVectors === true) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_FLIPBOOK_MOTION_VECTOR_FALLBACK',
+          'Flipbook motion-vector blending was requested without a motion-vector TextureRef; using plain frame interpolation.',
+          `${path}.config.map.motionVectors`,
+          'warning',
+        ),
+      );
+    }
     const attributes = [
       'position',
       'size',
@@ -1373,6 +1418,7 @@ function compileSpriteDraws(
       ...(alignment.mode === 'velocity-aligned' || alignment.mode === 'velocity-stretch'
         ? ['velocity']
         : []),
+      ...(flipbook ? ['normalizedAge'] : []),
     ];
     if (attributes.some((name) => schema.byName[name] === undefined)) continue;
     const attributeBuffers = [
@@ -1400,18 +1446,37 @@ function compileSpriteDraws(
         ),
       );
     }
-    const map =
-      options.map?.kind === 'flipbook'
-        ? options.map.texture
-        : options.map?.kind === 'asset-ref'
-          ? options.map
-          : undefined;
+    const map = flipbook
+      ? flipbook.texture
+      : options.map?.kind === 'asset-ref'
+        ? options.map
+        : undefined;
+    const motionVectors =
+      flipbook && typeof flipbook.motionVectors === 'object' ? flipbook.motionVectors : undefined;
+    const geometryVertexCount = cutoutVertices as 4 | 5 | 6 | 7 | 8;
     draws.push({
       fragment: {
         blending: options.blending ?? 'alpha',
+        ...(flipbook === undefined
+          ? {}
+          : {
+              flipbook: {
+                cols: flipbook.cols,
+                interpolate: flipbook.interpolate ?? true,
+                ...(motionVectors === undefined ? {} : { motionVectors }),
+                progressAttribute: 'normalizedAge' as const,
+                rows: flipbook.rows,
+              },
+            }),
         ...(map === undefined ? {} : { map }),
+        ...(options.soft === true ? { soft: { fadeDistance: 0.035 } } : {}),
       },
-      geometry: { indexCount: 6, topology: 'triangle-list', vertexCount: 4 },
+      geometry: {
+        indexCount: (geometryVertexCount - 2) * 3,
+        shape: geometryVertexCount === 4 ? 'quad' : 'cutout',
+        topology: 'triangle-list',
+        vertexCount: geometryVertexCount,
+      },
       indirect: {
         aliveIndicesOffsetWords: lifecycleLayout.buffers.state.fields.aliveIndices.offsetWords,
         drawArgumentsOffsetBytes:
