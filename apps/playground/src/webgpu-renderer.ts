@@ -25,7 +25,6 @@ async function adapterRequiredLimits(options: RendererOptions): Promise<Record<s
   if (!gpu || options.forceWebGL) return {};
 
   const adapter = await gpu.requestAdapter({
-    featureLevel: 'compatibility',
     powerPreference: options.powerPreference,
     xrCompatible: false,
   });

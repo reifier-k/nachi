@@ -55,6 +55,7 @@ const CURVE = curve([0, 0], [0.1, 1], [1, 0]);
 type BackendName = 'WebGL2' | 'WebGPU';
 type RendererBackendLike = {
   device?: {
+    features?: { has(feature: string): boolean };
     limits?: { maxStorageBuffersPerShaderStage?: number };
     lost: Promise<{ message?: string; reason?: string }>;
   };
@@ -159,11 +160,12 @@ function uniformValue(value: unknown, type: Parameters<KernelTslAdapter['uniform
   return value;
 }
 
-function createDataTexture(lut: BakedLut): THREE.DataTexture {
+function createDataTexture(lut: BakedLut, linearFloat32Filtering: boolean): THREE.DataTexture {
   const format = lut.channels === 1 ? THREE.RedFormat : THREE.RGBAFormat;
   const dataTexture = new THREE.DataTexture(lut.data, lut.width, 1, format, THREE.FloatType);
-  dataTexture.minFilter = THREE.LinearFilter;
-  dataTexture.magFilter = THREE.LinearFilter;
+  const filter = linearFloat32Filtering ? THREE.LinearFilter : THREE.NearestFilter;
+  dataTexture.minFilter = filter;
+  dataTexture.magFilter = filter;
   dataTexture.wrapS = THREE.ClampToEdgeWrapping;
   dataTexture.wrapT = THREE.ClampToEdgeWrapping;
   dataTexture.needsUpdate = true;
@@ -180,7 +182,7 @@ const adapter: KernelTslAdapter = {
   instanceIndex: asNode(instanceIndex),
   constant: constantNode,
   cos: (value) => asNode(cos(value as never)),
-  dataTexture: createDataTexture,
+  dataTexture: (lut) => createDataTexture(lut, false),
   fn: (callback) => Fn(callback)() as unknown as ReturnType<KernelTslAdapter['fn']>,
   instancedArray: (length: number, type: TslStorageType) =>
     createInstancedArray(length, type) as KernelStorageNode,
@@ -301,11 +303,20 @@ async function runSmoke(): Promise<void> {
   root.dataset.backend = activeBackend;
   root.dataset.rendererStatus = 'ready';
   const storageBufferLimit = backend.device?.limits?.maxStorageBuffersPerShaderStage;
+  const linearFloat32Filtering =
+    !backend.isWebGPUBackend || backend.device?.features?.has('float32-filterable') === true;
+  // Windows real-GPU smoke must confirm the optional linear path; unsupported adapters use
+  // nearest filtering so float32 LUT creation remains valid without float32-filterable.
+  root.dataset.lutFilter = linearFloat32Filtering ? 'linear' : 'nearest';
   const kernelAdapter: KernelTslAdapter =
     storageBufferLimit === undefined
-      ? adapter
+      ? {
+          ...adapter,
+          dataTexture: (lut) => createDataTexture(lut, linearFloat32Filtering),
+        }
       : {
           ...adapter,
+          dataTexture: (lut) => createDataTexture(lut, linearFloat32Filtering),
           deviceLimits: { maxStorageBuffersPerShaderStage: storageBufferLimit },
         };
   const performanceMonitor = createPerformanceMonitor(renderer, {
@@ -360,7 +371,7 @@ async function runSmoke(): Promise<void> {
   const result = {
     activeBackend,
     computeOk: ok,
-    diagnostics: program.diagnostics,
+    compileDiagnostics: program.diagnostics,
     frames,
     mode: headless ? 'headless' : 'visual',
     ok,

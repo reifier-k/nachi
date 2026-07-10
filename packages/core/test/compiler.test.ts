@@ -17,6 +17,7 @@ import {
   drag,
   gradient,
   gravity,
+  KernelModuleRegistry,
   lifetime,
   positionSphere,
   range,
@@ -34,6 +35,7 @@ import type {
   KernelTslAdapter,
   KernelUniformNode,
   KernelModuleBuildContext,
+  KernelModuleImplementation,
   ModuleAccess,
   ModuleDefinition,
   TslModuleFactory,
@@ -136,6 +138,12 @@ class FakeStorage implements KernelStorageNode {
   }
   setName(): KernelStorageNode {
     return this;
+  }
+}
+
+class RejectParticleOffsetNode extends FakeNode {
+  override add(): KernelNode {
+    throw new Error('Random sample offset touched the particle-index axis.');
   }
 }
 
@@ -317,6 +325,12 @@ describe('emitter kernel compiler', () => {
       path: 'update[$integrate]',
       source: 'compiler',
     });
+    expect(program.kernels.init.modules[0]).toMatchObject({
+      access: { reads: [], writes: program.attributeSchema.attributes.map(({ path }) => path) },
+      label: '$defaults',
+      source: 'compiler',
+      type: 'core/defaults',
+    });
   });
 
   it('omits integration when integration is none', () => {
@@ -348,6 +362,10 @@ describe('emitter kernel compiler', () => {
       {
         "init": [
           {
+            "source": "compiler",
+            "type": "core/defaults",
+          },
+          {
             "source": "author",
             "type": "core/position-sphere",
           },
@@ -361,6 +379,11 @@ describe('emitter kernel compiler', () => {
           },
         ],
         "update": [
+          {
+            "label": "$age",
+            "source": "compiler",
+            "type": "core/age",
+          },
           {
             "label": null,
             "source": "author",
@@ -380,6 +403,15 @@ describe('emitter kernel compiler', () => {
         "workgroupSize": 64,
       }
     `);
+    expect(program.kernels.update.modules[0]).toMatchObject({
+      access: {
+        reads: ['Emitter.deltaTime', 'Particles.lifetime'],
+        writes: ['Particles.age', 'Particles.normalizedAge'],
+      },
+      label: '$age',
+      source: 'compiler',
+      type: 'core/age',
+    });
   });
 
   it('uses labels before normalized stage indexes for module slots', () => {
@@ -401,10 +433,9 @@ describe('emitter kernel compiler', () => {
         integration: 'none',
       }),
     );
-    expect(program.kernels.init.modules[0]?.access.reads).toEqual([
-      'Emitter.seed',
-      'Emitter.spawnGeneration',
-    ]);
+    expect(
+      program.kernels.init.modules.find(({ type }) => type === 'core/velocity-cone')?.access.reads,
+    ).toEqual(['Emitter.seed', 'Emitter.spawnGeneration']);
   });
 
   it('resolves integration attributes and carries built-in defaults', () => {
@@ -434,13 +465,17 @@ describe('emitter kernel compiler', () => {
 
     expect(program.attributeSchema.storageArrays).toHaveLength(9);
     expect(program.meta.storageBufferCount).toBe(9);
-    expect(() =>
+    let buildError: unknown;
+    try {
       program.buildKernels({
         ...fakeAdapter(),
         deviceLimits: { maxStorageBuffersPerShaderStage: 8 },
-      }),
-    ).toThrow(VfxDiagnosticError);
-    expect(program.diagnostics).toContainEqual(
+      });
+    } catch (error) {
+      buildError = error;
+    }
+    expect(buildError).toBeInstanceOf(VfxDiagnosticError);
+    expect(buildError instanceof VfxDiagnosticError ? buildError.diagnostics : []).toContainEqual(
       expect.objectContaining({
         code: 'NACHI_STORAGE_BUFFER_LIMIT',
         path: 'meta.storageBufferCount',
@@ -448,6 +483,13 @@ describe('emitter kernel compiler', () => {
         severity: 'error',
       }),
     );
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain('NACHI_STORAGE_BUFFER_LIMIT');
+    expect(() =>
+      program.buildKernels({
+        ...fakeAdapter(),
+        deviceLimits: { maxStorageBuffersPerShaderStage: 9 },
+      }),
+    ).not.toThrow();
   });
 
   it('describes system, emitter, and declared user uniforms', () => {
@@ -559,6 +601,11 @@ describe('emitter kernel compiler', () => {
     expect([...lut.data.slice(0, 4)]).toEqual([0, 0, 0, 1]);
     expect(lut.data[128 * 4]).toBeCloseTo(128 / 255);
     expect([...lut.data.slice(255 * 4, 256 * 4)]).toEqual([1, 0, 0, 1]);
+
+    const srgbGray = bakeGradientLut(gradient('#808080', '#808080'));
+    expect(srgbGray.data[0]).toBeCloseTo(0.2158605, 6);
+    const linearGray = bakeGradientLut(gradient([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]));
+    expect(linearGray.data[0]).toBeCloseTo(0.5, 6);
   });
 
   it('derives missing tslModule access from Proxy gets and returned keys', () => {
@@ -578,7 +625,9 @@ describe('emitter kernel compiler', () => {
     });
     const program = compileEmitter(emitter);
 
-    expect(program.kernels.update.modules[0]?.access).toEqual({
+    expect(
+      program.kernels.update.modules.find(({ type }) => type === 'core/tsl-module')?.access,
+    ).toEqual({
       reads: ['Particles.position', 'Particles.heat'],
       writes: ['Particles.heat', 'Particles.velocity'],
     });
@@ -608,6 +657,16 @@ describe('emitter kernel compiler', () => {
     ]);
   });
 
+  it('keeps random sample offsets off the particle-index axis during TSL construction', () => {
+    const program = compileEmitter(
+      baseEmitter({ init: [positionSphere({ radius: 1 })], integration: 'none' }),
+    );
+
+    expect(() =>
+      program.buildKernels({ ...fakeAdapter(), instanceIndex: new RejectParticleOffsetNode() }),
+    ).not.toThrow();
+  });
+
   it('diagnoses traced write keys that are absent from the attribute schema', () => {
     const factory = ((bindings: TslParticleBindings) => ({
       typo: bindings.position,
@@ -633,6 +692,48 @@ describe('emitter kernel compiler', () => {
     expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
   });
 
+  it('accepts every RFC-reserved Emitter path before M2 supplies its uniforms', () => {
+    const access: ModuleAccess = {
+      reads: [
+        'Emitter.transform',
+        'Emitter.localTime',
+        'Emitter.deltaTime',
+        'Emitter.age',
+        'Emitter.loopIndex',
+        'Emitter.seed',
+        'Emitter.spawnGeneration',
+        'Emitter.spawnCount',
+        'Emitter.events.pending',
+        'Emitter.events.onDeath',
+        'Emitter.eventPayload.position',
+      ],
+      writes: [],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access,
+      build() {},
+      stage: 'update',
+      type: 'test/reserved-emitter-paths',
+      version: 1,
+    });
+    const module: ModuleDefinition<'update', Record<string, never>> = {
+      access,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/reserved-emitter-paths',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      registry,
+    });
+
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_PARAMETER_UNKNOWN_REFERENCE',
+    );
+  });
+
   it('keeps warnings non-blocking during kernel materialization', () => {
     const emitter = defineEmitter({
       attributes: { unused: attribute('unused', { default: 3, type: 'f32' }) },
@@ -647,6 +748,39 @@ describe('emitter kernel compiler', () => {
       expect.objectContaining({ code: 'NACHI_ATTRIBUTE_UNUSED', severity: 'warning' }),
     ]);
     expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
+  });
+
+  it('counts render and event access when checking unused custom attributes', () => {
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      access: { reads: ['Particles.renderHeat'], writes: [] },
+      config: {},
+      kind: 'module',
+      stage: 'render',
+      type: 'test/custom-render-reader',
+      version: 1,
+    };
+    const event: ModuleDefinition<'event', Record<string, never>> = {
+      access: { reads: ['Particles.eventHeat'], writes: [] },
+      config: {},
+      kind: 'module',
+      stage: 'event',
+      type: 'test/custom-event-reader',
+      version: 1,
+    };
+    const emitter = defineEmitter({
+      attributes: {
+        eventHeat: attribute('eventHeat', { default: 0, type: 'f32' }),
+        renderHeat: attribute('renderHeat', { default: 0, type: 'f32' }),
+      },
+      capacity: 1,
+      events: { onDeath: event },
+      integration: 'none',
+      render,
+      spawn: burst({ count: 1 }),
+    });
+    const program = compileEmitter(emitter);
+
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain('NACHI_ATTRIBUTE_UNUSED');
   });
 
   it('materializes the full north-star init/update set through the adapter boundary', () => {
@@ -685,6 +819,23 @@ describe('emitter kernel compiler', () => {
       'core/velocity-cone': velocityCone({ angle: 30, direction: [0, 1, 0], speed: 1 }).access,
     };
     for (const [type, manifest] of Object.entries(expected)) expect(access[type]).toEqual(manifest);
+  });
+
+  it('allows idempotent registry registration but rejects replacement objects', () => {
+    const implementation = {
+      access: { reads: [], writes: [] },
+      build() {},
+      stage: 'update',
+      type: 'test/identity',
+      version: 1,
+    } satisfies KernelModuleImplementation;
+    const registry = new KernelModuleRegistry();
+
+    expect(() => registry.register(implementation)).not.toThrow();
+    expect(() => registry.register(implementation)).not.toThrow();
+    expect(() => registry.register({ ...implementation })).toThrow(
+      'Kernel module implementation test/identity@1 is already registered.',
+    );
   });
 
   it('matches traced core implementation reads and writes to every registered manifest', () => {

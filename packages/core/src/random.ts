@@ -6,6 +6,7 @@ export const PCG_RANDOM_CONSTANTS = {
   outputMultiplier: 277_803_737,
   outputShift: 22,
   particleIndexMix: 0x9e3779b1,
+  sampleOffsetMix: 0x7f4a7c15,
   spawnGenerationMix: 0x27d4eb2f,
   stateIncrement: 2_891_336_453,
   stateMultiplier: 747_796_405,
@@ -46,6 +47,13 @@ export function resolveModuleSlot(
   return module.label === undefined || module.label.length === 0
     ? normalizedStageIndex >>> 0
     : hashModuleLabel(module.label);
+}
+
+export function resolveRandomSampleSlot(moduleSlot: number, sampleOffset = 0): number {
+  // Keep sample identity on the slot axis so large particle indexes cannot alias offset streams.
+  return (
+    ((moduleSlot >>> 0) ^ Math.imul(sampleOffset >>> 0, PCG_RANDOM_CONSTANTS.sampleOffsetMix)) >>> 0
+  );
 }
 
 export function pcgHashUint32(input: number): number {

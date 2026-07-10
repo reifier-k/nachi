@@ -1,6 +1,7 @@
 import { resolveAttributeSchema, resolveTslStorageType } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
-import { hashModuleLabel, pcgRandomFloatNode, resolveModuleSlot } from './random.js';
+import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
+import { collectEmitterModules } from './emitter-modules.js';
 import type {
   AttributeSchema,
   AttributeType,
@@ -180,10 +181,12 @@ export class KernelModuleRegistry {
   readonly #implementations = new Map<string, KernelModuleImplementation>();
 
   register(implementation: KernelModuleImplementation): void {
-    this.#implementations.set(
-      registryKey(implementation.type, implementation.version),
-      implementation,
-    );
+    const key = registryKey(implementation.type, implementation.version);
+    const registered = this.#implementations.get(key);
+    if (registered !== undefined && registered !== implementation) {
+      throw new Error(`Kernel module implementation ${key} is already registered.`);
+    }
+    this.#implementations.set(key, implementation);
   }
 
   resolve(type: string, version: number): KernelModuleImplementation | undefined {
@@ -231,13 +234,41 @@ const INTEGRATE_ACCESS: ModuleAccess = {
   writes: ['Particles.position'],
 };
 
+const AGE_ACCESS: ModuleAccess = {
+  reads: ['Emitter.deltaTime', 'Particles.lifetime'],
+  writes: ['Particles.age', 'Particles.normalizedAge'],
+};
+
+const AGE_MODULE: UpdateModule = {
+  access: AGE_ACCESS,
+  config: {},
+  kind: 'module',
+  label: '$age',
+  stage: 'update',
+  type: 'core/age',
+  version: 1,
+};
+
 const SYSTEM_PATHS = new Set<ParameterPath>(['System.deltaTime', 'System.time']);
 const EMITTER_PATHS = new Set<ParameterPath>([
+  'Emitter.age',
   'Emitter.deltaTime',
+  'Emitter.events.pending',
+  'Emitter.localTime',
+  'Emitter.loopIndex',
   'Emitter.seed',
+  'Emitter.spawnCount',
   'Emitter.spawnGeneration',
   'Emitter.transform',
 ]);
+
+function isKnownEmitterPath(reference: ParameterPath): boolean {
+  return (
+    EMITTER_PATHS.has(reference) ||
+    /^Emitter\.events\..+/.test(reference) ||
+    /^Emitter\.eventPayload\..+/.test(reference)
+  );
+}
 
 function registryKey(type: string, version: number): string {
   return `${type}@${version}`;
@@ -392,6 +423,31 @@ function withDerivedConfigReads<Stage extends 'init' | 'update'>(
   });
 }
 
+function defaultsModule(schema: ResolvedAttributeSchema): InitModule {
+  const config = {
+    attributes: schema.attributes.map(
+      ({ default: defaultValue, logicalType, name, storageIndex }) => ({
+        default: defaultValue,
+        logicalType,
+        name,
+        storageIndex,
+      }),
+    ),
+  };
+  return {
+    access: {
+      reads: deriveConfigReads(config),
+      writes: schema.attributes.map(({ path }) => path),
+    },
+    config,
+    kind: 'module',
+    label: '$defaults',
+    stage: 'init',
+    type: 'core/defaults',
+    version: 1,
+  };
+}
+
 function normalizeModules(
   definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
   options: CompileEmitterOptions,
@@ -510,7 +566,7 @@ function validateReferences(
         if (reference.startsWith('Particles.')) continue;
         const known =
           SYSTEM_PATHS.has(reference) ||
-          EMITTER_PATHS.has(reference) ||
+          isKnownEmitterPath(reference) ||
           (reference.startsWith('User.') && declaredParameters.has(reference));
         if (!known) {
           diagnostics.push(
@@ -530,11 +586,11 @@ function validateReferences(
 
 function unusedAttributeWarnings(
   schema: ResolvedAttributeSchema,
-  modules: readonly CompiledKernelModule[],
+  modules: readonly Pick<ModuleDefinition, 'access'>[],
 ): VfxDiagnostic[] {
   const used = new Set(
     modules
-      .flatMap(({ access }) => [...access.reads, ...access.writes])
+      .flatMap(({ access }) => (access ? [...access.reads, ...access.writes] : []))
       .filter((path) => path.startsWith('Particles.')),
   );
   return schema.attributes
@@ -587,10 +643,14 @@ function normalizeColor(input: ColorInput): Vec4 {
   const expanded =
     hex.length === 3 ? [...hex].map((character) => character.repeat(2)).join('') : hex;
   if (!/^[0-9a-fA-F]{6}$/.test(expanded)) throw new Error(`Unsupported color "${input}".`);
+  const srgbToLinear = (channel: number): number =>
+    channel < 0.04045
+      ? channel * 0.0773993808
+      : Math.pow(channel * 0.9478672986 + 0.0521327014, 2.4);
   return [
-    Number.parseInt(expanded.slice(0, 2), 16) / 255,
-    Number.parseInt(expanded.slice(2, 4), 16) / 255,
-    Number.parseInt(expanded.slice(4, 6), 16) / 255,
+    srgbToLinear(Number.parseInt(expanded.slice(0, 2), 16) / 255),
+    srgbToLinear(Number.parseInt(expanded.slice(2, 4), 16) / 255),
+    srgbToLinear(Number.parseInt(expanded.slice(4, 6), 16) / 255),
     1,
   ];
 }
@@ -699,16 +759,16 @@ function createBuildKernels(
   program: Omit<CompiledEmitterProgram, 'buildKernels'>,
   registry: KernelModuleRegistry,
   factories: ReadonlyMap<string, TslModuleFactory>,
-  diagnostics: VfxDiagnostic[],
 ): (adapter: KernelTslAdapter) => BuiltEmitterKernels {
   return (adapter) => {
+    const buildDiagnostics = [...program.diagnostics];
     const storageBufferLimit = adapter.deviceLimits?.maxStorageBuffersPerShaderStage;
     if (
       storageBufferLimit !== undefined &&
       program.meta.storageBufferCount > storageBufferLimit &&
-      !diagnostics.some(({ code }) => code === 'NACHI_STORAGE_BUFFER_LIMIT')
+      !buildDiagnostics.some(({ code }) => code === 'NACHI_STORAGE_BUFFER_LIMIT')
     ) {
-      diagnostics.push({
+      buildDiagnostics.push({
         code: 'NACHI_STORAGE_BUFFER_LIMIT',
         hint: 'Request a higher device limit or reduce the resolved attribute schema.',
         message: `Emitter requires ${program.meta.storageBufferCount} storage buffers, but the device exposes ${storageBufferLimit} per shader stage.`,
@@ -717,7 +777,7 @@ function createBuildKernels(
         severity: 'error',
       });
     }
-    if (hasErrors(diagnostics)) throw new VfxDiagnosticError(diagnostics);
+    if (hasErrors(buildDiagnostics)) throw new VfxDiagnosticError(buildDiagnostics);
 
     const storages = Object.fromEntries(
       program.attributeSchema.storageArrays.map((storage) => [
@@ -763,14 +823,10 @@ function createBuildKernels(
       }
       if (kind === 'range') {
         const range = input as RangeGenerator<number | readonly number[]>;
-        const randomIndex =
-          sampleOffset === 0
-            ? adapter.instanceIndex
-            : adapter.instanceIndex.add(sampleOffset * 0x9e37);
         const random = pcgRandomFloatNode<KernelNode, KernelNode>(
-          adapter.uint(randomIndex),
+          adapter.uint(adapter.instanceIndex),
           adapter.uint(uniformNode('Emitter.seed')),
-          module.slot,
+          resolveRandomSampleSlot(module.slot, sampleOffset),
           adapter.uint(uniformNode('Emitter.spawnGeneration')),
         );
         const minimum = constant(range.min, type);
@@ -784,18 +840,13 @@ function createBuildKernels(
       adapter,
       module,
       attribute: attributeNode,
-      random: (sampleOffset = 0) => {
-        const randomIndex =
-          sampleOffset === 0
-            ? adapter.instanceIndex
-            : adapter.instanceIndex.add(sampleOffset * 0x9e37);
-        return pcgRandomFloatNode<KernelNode, KernelNode>(
-          adapter.uint(randomIndex),
+      random: (sampleOffset = 0) =>
+        pcgRandomFloatNode<KernelNode, KernelNode>(
+          adapter.uint(adapter.instanceIndex),
           adapter.uint(uniformNode('Emitter.seed')),
-          module.slot,
+          resolveRandomSampleSlot(module.slot, sampleOffset),
           adapter.uint(uniformNode('Emitter.spawnGeneration')),
-        );
-      },
+        ),
       sampleLut: (id, coordinate) => {
         const texture = lutTextures[id];
         const lut = program.luts.find((candidate) => candidate.id === id);
@@ -843,30 +894,8 @@ function createBuildKernels(
       implementation.build(buildContext(module));
     };
 
-    const defaultsModule: CompiledKernelModule = {
-      access: { reads: [], writes: [] },
-      config: {},
-      label: '$defaults',
-      path: '$defaults',
-      slot: hashModuleLabel('$defaults'),
-      source: 'compiler',
-      stage: 'init',
-      stageIndex: 0,
-      type: 'core/defaults',
-      version: 1,
-    };
     const init = adapter
       .fn(() => {
-        for (const attribute of program.attributeSchema.attributes) {
-          attributeNode(attribute.name).assign(
-            buildValue(
-              attribute.default,
-              attribute.logicalType,
-              defaultsModule,
-              attribute.storageIndex,
-            ),
-          );
-        }
         for (const module of program.kernels.init.modules) buildModule(module);
       })
       .compute(program.attributeSchema.capacity, [program.kernels.init.workgroupSize])
@@ -874,13 +903,6 @@ function createBuildKernels(
 
     const update = adapter
       .fn(() => {
-        const age = storages.age ? attributeNode('age') : undefined;
-        const lifetime = storages.lifetime ? attributeNode('lifetime') : undefined;
-        const normalizedAge = storages.normalizedAge ? attributeNode('normalizedAge') : undefined;
-        if (age && lifetime) {
-          age.addAssign(uniformNode('Emitter.deltaTime'));
-          normalizedAge?.assign(age.div(lifetime).clamp(0, 1));
-        }
         for (const module of program.kernels.update.modules) buildModule(module);
       })
       .compute(program.attributeSchema.capacity, [program.kernels.update.workgroupSize])
@@ -905,26 +927,40 @@ export function compileEmitter<
   );
   diagnostics.push(...normalized.diagnostics);
 
-  const normalizedDefinition = {
+  const authorDefinition = {
     ...definition,
     init: normalized.init,
     update: normalized.update,
   } as EmitterDefinition<AttributeSchema, ParameterSchema>;
-  const attributeResult = resolveAttributeSchema(normalizedDefinition);
+  const authorAttributeResult = resolveAttributeSchema(authorDefinition);
+  const includeAgeModule =
+    authorAttributeResult.value?.byName.age !== undefined &&
+    authorAttributeResult.value.byName.lifetime !== undefined;
+  const normalizedDefinition = includeAgeModule
+    ? ({
+        ...authorDefinition,
+        update: [AGE_MODULE, ...normalized.update],
+      } as EmitterDefinition<AttributeSchema, ParameterSchema>)
+    : authorDefinition;
+  const attributeResult = includeAgeModule
+    ? resolveAttributeSchema(normalizedDefinition)
+    : authorAttributeResult;
   diagnostics.push(...attributeResult.diagnostics);
   const attributeSchema = attributeResult.value ?? emptyAttributeSchema(definition.capacity);
+  const updateStageOffset = includeAgeModule ? 1 : 0;
 
-  const authorUpdateCount = normalized.update.filter(({ label }) => label !== '$integrate').length;
   const initialModules: CompiledKernelModule[] = [
+    moduleDescriptor(defaultsModule(attributeSchema), 'init[$defaults]', 0, 'compiler'),
     ...normalized.init.map((module, index) =>
-      moduleDescriptor(module, `init[${index}]`, index, 'author'),
+      moduleDescriptor(module, `init[${index}]`, index + 1, 'author'),
     ),
+    ...(includeAgeModule ? [moduleDescriptor(AGE_MODULE, 'update[$age]', 0, 'compiler')] : []),
     ...normalized.update.map((module, index) =>
       moduleDescriptor(
         module,
         module.label === '$integrate' ? 'update[$integrate]' : `update[${index}]`,
-        index,
-        index < authorUpdateCount ? 'author' : 'compiler',
+        index + updateStageOffset,
+        module.label === '$integrate' ? 'compiler' : 'author',
       ),
     ),
   ];
@@ -932,7 +968,12 @@ export function compileEmitter<
   diagnostics.push(...validateReferences(initialModules, definition.parameters));
 
   const baked = bakeModuleLuts(initialModules, diagnostics);
-  diagnostics.push(...unusedAttributeWarnings(attributeSchema, baked.modules));
+  diagnostics.push(
+    ...unusedAttributeWarnings(
+      attributeSchema,
+      collectEmitterModules(normalizedDefinition).map(({ module }) => module),
+    ),
+  );
   const workgroupSize = options.workgroupSize ?? DEFAULT_WORKGROUP_SIZE;
   const initModules = baked.modules.filter(({ stage }) => stage === 'init');
   const updateModules = baked.modules.filter(({ stage }) => stage === 'update');
@@ -974,7 +1015,7 @@ export function compileEmitter<
   };
   return {
     ...description,
-    buildKernels: createBuildKernels(description, registry, normalized.factories, diagnostics),
+    buildKernels: createBuildKernels(description, registry, normalized.factories),
   };
 }
 
@@ -1006,6 +1047,39 @@ function normalizedBasis(direction: Vec3): { forward: Vec3; right: Vec3; up: Vec
 
 export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   const registry = new KernelModuleRegistry();
+  registry.register({
+    access: { reads: [], writes: [] },
+    build(context) {
+      const config = context.module.config as {
+        attributes: readonly {
+          default: unknown;
+          logicalType: AttributeType;
+          name: string;
+          storageIndex: number;
+        }[];
+      };
+      for (const attribute of config.attributes) {
+        context.write(
+          attribute.name,
+          context.value(attribute.default, attribute.logicalType, attribute.storageIndex),
+        );
+      }
+    },
+    stage: 'init',
+    type: 'core/defaults',
+    version: 1,
+  });
+  registry.register({
+    access: AGE_ACCESS,
+    build(context) {
+      const age = context.attribute('age').add(context.uniform('Emitter.deltaTime'));
+      context.write('age', age);
+      context.write('normalizedAge', age.div(context.attribute('lifetime')).clamp(0, 1));
+    },
+    stage: 'update',
+    type: 'core/age',
+    version: 1,
+  });
   registry.register({
     access: {
       reads: ['Emitter.transform', 'Emitter.seed', 'Emitter.spawnGeneration'],
@@ -1209,6 +1283,8 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
   const registry = createCoreKernelModuleRegistry();
   return Object.fromEntries(
     [
+      'core/defaults',
+      'core/age',
       'core/position-sphere',
       'core/velocity-cone',
       'core/lifetime',

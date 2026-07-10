@@ -7,6 +7,7 @@ import {
   pcgRandomFloat,
   pcgRandomFloatNode,
   resolveModuleSlot,
+  resolveRandomSampleSlot,
 } from '../src/index.js';
 import type { TslPcgFloatNode, TslPcgUintNode } from '../src/index.js';
 
@@ -72,6 +73,7 @@ describe('deterministic PCG random', () => {
       outputMultiplier: 277_803_737,
       outputShift: 22,
       particleIndexMix: 0x9e3779b1,
+      sampleOffsetMix: 0x7f4a7c15,
       spawnGenerationMix: 0x27d4eb2f,
       stateIncrement: 2_891_336_453,
       stateMultiplier: 747_796_405,
@@ -156,6 +158,26 @@ describe('deterministic PCG random', () => {
         pcgRandomFloat(particleIndex, 10, 3, 0) !== pcgRandomFloat(particleIndex, 10, 4, 0),
     ).filter(Boolean);
     expect(differences.length).toBeGreaterThan(250);
+  });
+
+  it('mixes sample offsets into the slot axis without the old particle-index collision', () => {
+    const moduleSlot = 17;
+    expect(resolveRandomSampleSlot(moduleSlot, 0)).toBe(moduleSlot);
+    expect(
+      new Set(
+        Array.from({ length: 256 }, (_, offset) => resolveRandomSampleSlot(moduleSlot, offset)),
+      ).size,
+    ).toBe(256);
+
+    const formerCollisionDistance = 0x9e37;
+    const offsetSample = pcgRandomFloat(0, 73, resolveRandomSampleSlot(moduleSlot, 1), 0);
+    const distantParticle = pcgRandomFloat(
+      formerCollisionDistance,
+      73,
+      resolveRandomSampleSlot(moduleSlot, 0),
+      0,
+    );
+    expect(offsetSample).not.toBe(distantParticle);
   });
 
   it('changes streams when the spawn generation changes', () => {
