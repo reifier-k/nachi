@@ -925,21 +925,26 @@ describe('emitter kernel compiler', () => {
     expect(program.meta.backendBudgets.webgpu.vertexStorageBufferCount).toBeLessThanOrEqual(8);
   });
 
-  it('compiles mesh orientation modes and diagnoses an invalid custom axis', () => {
+  it('compiles each mesh orientation mode and diagnoses an invalid custom axis', () => {
     const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'debris' } as const;
-    const program = compileEmitter(
-      defineEmitter({
-        capacity: 1,
-        render: [
-          meshRenderer({ alignment: { mode: 'none' }, geometry }),
-          meshRenderer({ alignment: { mode: 'quaternion' }, geometry }),
-          meshRenderer({ alignment: { axis: [1, 0, 0], mode: 'custom-axis' }, geometry }),
-        ],
-        spawn: burst({ count: 1 }),
-      }),
-    );
-    expect(program.draws.map((draw) => draw.kind)).toEqual(['mesh', 'mesh', 'mesh']);
-    expect(program.diagnostics).toEqual([]);
+    const alignments = [
+      { mode: 'none' as const },
+      { mode: 'quaternion' as const },
+      { axis: [1, 0, 0] as const, mode: 'custom-axis' as const },
+    ];
+    for (const alignment of alignments) {
+      const program = compileEmitter(
+        defineEmitter({
+          capacity: 1,
+          render: meshRenderer({ alignment, geometry }),
+          spawn: burst({ count: 1 }),
+        }),
+      );
+      expect(program.draws).toEqual([
+        expect.objectContaining({ kind: 'mesh', vertex: expect.objectContaining({ alignment }) }),
+      ]);
+      expect(program.diagnostics).toEqual([]);
+    }
 
     const invalid = compileEmitter(
       defineEmitter({
@@ -954,6 +959,26 @@ describe('emitter kernel compiler', () => {
     expect(invalid.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_MESH_AXIS_INVALID' }),
     );
+  });
+
+  it('rejects more than one render module per emitter during M3', () => {
+    const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'debris' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: [billboard({}), meshRenderer({ geometry })],
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_RENDER_MODULE_LIMIT',
+        path: 'render[1]',
+        severity: 'error',
+      }),
+    );
+    expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
   });
 
   it('diagnoses invalid flipbook grids and cutout vertex counts', () => {

@@ -276,6 +276,16 @@ export function resolveAttributeSchema<
       );
       continue;
     }
+    if (definition.name.startsWith('packed_')) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_ATTRIBUTE_RESERVED_PREFIX',
+          `Custom attribute "${definition.name}" uses the compiler-reserved "packed_" prefix.`,
+          `attributes.${key}`,
+        ),
+      );
+      continue;
+    }
     if (!isAttributeType(definition.type)) {
       diagnostics.push(
         diagnostic(

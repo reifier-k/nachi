@@ -41,9 +41,9 @@
 | Spawn: rate / burst / per-distance | M2 | ✅ 2026-07-11監査確認(WebGPU。WebGL2は単発burstのみ) |
 | エミッタライフサイクル(duration/loop/prewarm) | M2 | ✅ 2026-07-11監査確認(prewarmビット一致実証) |
 | ローカル時間・タイムスケール(ヒットストップ) | M2 | ✅ 2026-07-11監査確認(hitStop API含む。タイムライン統合はM9) |
-| スプライトレンダラ(整列モード・cutout・フリップブック) | M3 | ⬜ |
-| メッシュレンダラ(インスタンス・向きモード) | M3 | ⬜ |
-| ソフトパーティクル | M3 | ⬜ |
+| スプライトレンダラ(整列モード・cutout・フリップブック) | M3 | ✅ 2026-07-11監査確認(12検証。SubImage任意Index/ランダム開始フレームは差分記録) |
+| メッシュレンダラ(インスタンス・向きモード) | M3 | ✅ 2026-07-11監査確認(向き数学はTSL rotate転置規約対応+GPU 6方向実測。メッシュ配列/マテリアルスロットは差分記録) |
+| ソフトパーティクル | M3 | ✅ 2026-07-11監査確認(fadeDistanceは正規化深度単位=RFC明示) |
 | フォース群(重力/抗力/渦/引力/カールノイズ) | M4 | ⬜ |
 | ベクタフィールド(FGAインポート) | M4 | ⬜ |
 | 向き制御・回転・kill volume | M4 | ⬜ |
@@ -104,7 +104,7 @@
 - [x] VFXSystemスケジューラ(複数エフェクト・複数エミッタの更新統括)— update直列化、WeakMapコンパイルキャッシュ(3インスタンス共有を実証)、状態機械(error遷移・デバイスロスト伝播込み)
 - [x] 🔍 **マイルストーン監査** — 2026-07-11実施(初回FAIL→修正→再監査)。再監査はCodex=FAIL/Claude=PASS(実GPU3層実証)で対立→統括裁定: Claudeの解消実証を主判定とし、Codexの残存4指摘(mat3コンポーネント予算/WebGL2再発火/capabilities必須化/parameter型検査)を最終修正で全て閉じて **PASS**。§16のvec4パッキング判断も記録済み(M3バッチ1で実装)
 
-## M3 — レンダラ第一陣
+## M3 — レンダラ第一陣 ✅(PASS)
 
 - [x] スプライトレンダラ:カメラフェーシング/速度整列/カスタム軸/velocity stretch — billboard()コンパイル+InstancedMesh間接描画、/m3-sprites/でピクセル実証(基盤。フリップブック/cutoutは残)
 - [x] フリップブック再生(補間、モーションベクタブレンディング)— discrete/補間/MVワープ、ピクセル検証済み。**行順序規約(flipY)は次バッチで確定**
@@ -113,7 +113,7 @@
 - [x] ソフトパーティクル(depthFade)— 交差フェードをピクセル実証(soft/hard寄与比較)。fadeDistanceのAPI公開は次バッチ
 - [x] ブレンドモード一式(additive/alpha/multiply/premultiplied)— ピクセル差検証済み、multiplyはpremultipliedAlpha
 - [x] 🎯 ゴールデン#2「爆発」(歪みなし版)がplaygroundで動く — /golden-explosion/ 3エミッタ(MVフリップブック+破片メッシュ+ソフト煙)、6検証+視覚基準3点。**ライブラリ初のゴールデンエフェクト**
-- [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
+- [x] 🔍 **マイルストーン監査** — 2026-07-11実施(両監査FAIL→修正→限定再検証でPASS。詳細はセッションログ)
 
 ## M4 — ビヘイビアライブラリ
 
@@ -235,6 +235,7 @@
 | 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
 | 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |
+| 2026-07-11 | **M3マイルストーン監査**: 両監査FAIL→裁定・修正→**PASS**。①Claude監査がメッシュ向きの残存反転をGPU readbackで実証 — 真因は**TSL rotate()が列優先構築により標準CCWの転置(逆回転)として作用**するthree r185規約(前回修正はTHREE.Euler基準で不十分)→オイラー全成分符号反転+TSL実規約のCPU参照テストに差し替え+**監査人のGPUプローブで6方向一致を統括実測** ②複数renderモジュールの間接引数衝突(両監査一致)→NACHI_RENDER_MODULE_LIMITで1個制限+RFC§9にM7対応と明記 ③RFC§9.1にcutout/ブレンド意味論網羅、packed_*予約、README/CLAUDE.md更新。性能(SwiftShader): spike-compute 3.9ms(劣化なし)、m3-sprites compute 0.083/render 0.059ms、golden compute 0.306/render 47.7ms(新規基準)。ゴールデン視覚基準3点を修正後に再取得。**M4持ち越し**: [SHOULD] flipY両設定の固有色アトラスGPU検証/premultiplied検証強化(α<1テクスチャ)、[NIT] UVクランプのテクセルマージン/facing-camera-position整列モード |
 | 2026-07-11 | M3バッチ2+最終バッチ完了: フリップブック(行順規約+MVブレンディング)/cutout/ソフトパーティクル(fadeDistance API)/メッシュレンダラ/**ゴールデン#2「爆発」達成**(6検証+視覚基準)。レビューがメッシュ向き鏡映を数値反証(スモークでは構造的に検出不能だった)→修正。根本原因の学び: fixedTimeStep maxSubSteps不足でnormalizedAge停滞。テスト172本・全6スモーク緑。**M3残: マイルストーン監査のみ** |
 | 2026-07-11 | M3バッチ1完了: **vec4属性パッキング**(バッファ数 M1 10→5・M2 9→4、決定論的first-fit、論理→物理マッピング公開)+**スプライトレンダラ基盤**(billboard→InstancedMesh間接描画、整列4モード、ブレンド4種)+/m3-sprites/(オフスクリーンピクセル検証7種)。差し戻し6回(WGSL識別子/パックレーン書き戻し/WebGL2 aliveパック誤読=レビューBLOCKER等)→全緑159テスト・7スモーク。**パーティクル初描画**。**M3残**: フリップブック、cutout、メッシュレンダラ、ソフトパーティクル、ゴールデン#2 |
 | 2026-07-11 | **M2マイルストーン監査**: 初回=両監査FAIL(バッファ予算回帰でm1-kernel崩壊/WebGL2無音全滅/専有パス無保護)→修正4ラウンド(ライフサイクルバッファ5→2本統合、mat3物理ストライド48B、同期スコープ分離、所有権表、WebGL2正直ゲート)→再監査Codex=FAIL/Claude=PASS→裁定: 残存4指摘を最終修正で閉じて**PASS**。テスト151本、全GPUスモーク緑、性能劣化なし(spike-compute 3.8ms)。**M3への引き継ぎ**: vec4属性パッキングはM3バッチ1でレンダラ頂点ステージ予算と統合設計(§16に決定記録)、GPU overflow既定報告の要否はM3判断、Emitter.spawnCount書込許可のcore限定はRFC注記済み |

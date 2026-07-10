@@ -228,6 +228,31 @@ describe('resolved attribute schema', () => {
     expect(names).toContain('_9heat_value_2');
   });
 
+  it('rejects custom attribute names using the physical packed_ prefix', () => {
+    const result = resolveAttributeSchema({
+      attributes: {
+        packed_float: attribute('packed_float', { default: 0, type: 'f32' }),
+        packed_intensity: attribute('packed_intensity', { default: 0, type: 'f32' }),
+      },
+      capacity: 1,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'NACHI_ATTRIBUTE_RESERVED_PREFIX',
+          path: 'attributes.packed_float',
+        }),
+        expect.objectContaining({
+          code: 'NACHI_ATTRIBUTE_RESERVED_PREFIX',
+          path: 'attributes.packed_intensity',
+        }),
+      ]),
+    );
+  });
+
   it('round-trips every logical type through packed particle-major storage', () => {
     const result = resolveAttributeSchema({
       attributes: {

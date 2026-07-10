@@ -29,6 +29,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m1-kernel/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgpu\&scenario=lifecycle
 node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgpu\&scenario=time
 node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/m3-sprites/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/golden-explosion/?backend=webgpu
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
 ```

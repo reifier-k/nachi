@@ -142,22 +142,30 @@ describe('three kernel adapter', () => {
     expect(mesh.material.transparent).toBe(true);
   });
 
-  it('maps mesh +Y to velocity and custom-axis directions without reflection', () => {
+  it('maps mesh +Y to five directions using the transposed TSL rotate convention', () => {
     const directions = [
       [0, 0, 1],
       [1, 0, 0],
       [0, 0, -1],
       [-1, 0, 0],
-      [0, 1, 0],
       [0.3, 0.8, 0.5],
     ] as const;
+    const applyTslRotate = (
+      position: THREE.Vector3,
+      euler: readonly [number, number, number],
+    ): THREE.Vector3 => {
+      // three r185 RotateNode constructs its mat4 columns as transposed standard rotations.
+      const matrix = new THREE.Matrix4()
+        .makeRotationX(-euler[0])
+        .multiply(new THREE.Matrix4().makeRotationY(-euler[1]))
+        .multiply(new THREE.Matrix4().makeRotationZ(-euler[2]));
+      return position.applyMatrix4(matrix);
+    };
 
     for (const direction of directions) {
       const expected = new THREE.Vector3(...direction).normalize();
       const euler = directionEulerAngles(direction);
-      const actual = new THREE.Vector3(0, 1, 0)
-        .applyEuler(new THREE.Euler(...euler, 'XYZ'))
-        .normalize();
+      const actual = applyTslRotate(new THREE.Vector3(0, 1, 0), euler).normalize();
       for (let component = 0; component < 3; component += 1) {
         expect(actual.getComponent(component)).toBeCloseTo(expected.getComponent(component), 6);
       }

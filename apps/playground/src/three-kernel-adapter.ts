@@ -583,16 +583,16 @@ export function directionEulerAngles(
   direction: readonly [number, number, number],
 ): readonly [number, 0, number] {
   const [x, y, z] = direction;
-  return [Math.atan2(z, y), 0, Math.atan2(-x, Math.hypot(y, z))];
+  return [-Math.atan2(z, y), 0, Math.atan2(x, Math.hypot(y, z))];
 }
 
 function directionEuler(direction: KernelNode): KernelNode {
   const yzLength = asNode(direction.y.mul(direction.y).add(direction.z.mul(direction.z)).sqrt());
   return asNode(
     vec3(
-      mx_atan2(direction.z as never, direction.y as never) as never,
+      asNode(mx_atan2(direction.z as never, direction.y as never)).mul(-1) as never,
       0,
-      mx_atan2(direction.x.mul(-1) as never, yzLength as never) as never,
+      mx_atan2(direction.x as never, yzLength as never) as never,
     ),
   );
 }

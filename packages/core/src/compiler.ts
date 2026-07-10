@@ -601,6 +601,22 @@ function hasErrors(diagnostics: readonly VfxDiagnostic[]): boolean {
   return diagnostics.some(({ severity }) => severity === 'error');
 }
 
+function validateRenderModuleLimit(
+  definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
+): VfxDiagnostic[] {
+  const renderModules = collectEmitterModules(definition).filter(
+    ({ module }) => module.stage === 'render',
+  );
+  if (renderModules.length <= 1) return [];
+  return [
+    diagnostic(
+      'NACHI_RENDER_MODULE_LIMIT',
+      `M3 supports one render module per emitter; received ${renderModules.length}. Per-draw indirect argument slots are planned for M7.`,
+      renderModules[1]!.path,
+    ),
+  ];
+}
+
 function includesImplementationAccess(declared: ModuleAccess, expected: ModuleAccess): boolean {
   return (
     expected.reads.every((path) => declared.reads.includes(path)) &&
@@ -2270,6 +2286,7 @@ export function compileEmitter<
   diagnostics.push(...collectEmitterLifecycleDiagnostics(untypedDefinition));
   diagnostics.push(...collectEmitterModuleLabelDiagnostics(untypedDefinition));
   diagnostics.push(...collectParameterDeclarationDiagnostics(untypedDefinition.parameters));
+  diagnostics.push(...validateRenderModuleLimit(untypedDefinition));
   const normalized = normalizeModules(untypedDefinition, options);
   diagnostics.push(...normalized.diagnostics);
 
