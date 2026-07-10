@@ -350,6 +350,57 @@ export interface CurlNoiseOptions {
   readonly strength: ValueInput<number>;
 }
 
+export interface VortexOptions {
+  readonly axis: Vec3;
+  readonly center?: ValueInput<Vec3>;
+  /** Optional acceleration towards the vortex axis. */
+  readonly inwardStrength?: ValueInput<number>;
+  readonly strength: ValueInput<number>;
+}
+
+export interface PointAttractorOptions {
+  /** Power applied to distance attenuation. Defaults to 2. */
+  readonly falloff?: ValueInput<number>;
+  readonly position: ValueInput<Vec3>;
+  /** Optional world-space influence radius. */
+  readonly radius?: ValueInput<number>;
+  /** Positive values attract and negative values repel. */
+  readonly strength: ValueInput<number>;
+}
+
+export interface LinearForceOptions {
+  readonly force: ValueInput<Vec3>;
+}
+
+export interface TurbulenceOptions {
+  readonly frequency: ValueInput<number>;
+  /** Fractal simplex octave count, clamped to 1-4. Defaults to 3. */
+  readonly octaves?: number;
+  readonly strength: ValueInput<number>;
+}
+
+interface KillVolumeBaseOptions {
+  readonly mode: 'inside' | 'outside';
+}
+
+export type KillVolumeOptions =
+  | (KillVolumeBaseOptions & {
+      readonly center?: ValueInput<Vec3>;
+      readonly shape: 'box';
+      readonly size: ValueInput<Vec3>;
+    })
+  | (KillVolumeBaseOptions & {
+      readonly center?: ValueInput<Vec3>;
+      readonly radius: ValueInput<number>;
+      readonly shape: 'sphere';
+    })
+  | (KillVolumeBaseOptions & {
+      /** Local-space plane normal. The inside half-space has dot(normal, p) <= offset. */
+      readonly normal: Vec3;
+      readonly offset?: ValueInput<number>;
+      readonly shape: 'plane';
+    });
+
 export type BlendingMode = 'additive' | 'alpha' | 'multiply' | 'premultiplied';
 
 export interface AssetRef<AssetType extends string = string> {

@@ -11,7 +11,7 @@ import {
   positionSphere,
   velocityCone,
 } from '@nachi/core';
-import type { BillboardOptions, TextureRef, VfxEmitterRuntimeView } from '@nachi/core';
+import type { BillboardOptions, TextureRef, Vec4, VfxEmitterRuntimeView } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -80,6 +80,7 @@ function spriteEffect(options: {
   readonly alignment?: BillboardOptions['alignment'];
   readonly blending?: NonNullable<BillboardOptions['blending']>;
   readonly capacity?: number;
+  readonly color?: Vec4;
   readonly count?: number;
   readonly cutout?: BillboardOptions['cutout'];
   readonly duration?: number;
@@ -116,7 +117,14 @@ function spriteEffect(options: {
           ...(options.soft === undefined ? {} : { soft: options.soft }),
         }),
         spawn: burst({ count: options.count ?? 4 }),
-        update: [colorOverLife(gradient([1, 0.18, 0.04, 0.38], [1, 0.18, 0.04, 0.38]))],
+        update: [
+          colorOverLife(
+            gradient(
+              options.color ?? [1, 0.18, 0.04, 0.38],
+              options.color ?? [1, 0.18, 0.04, 0.38],
+            ),
+          ),
+        ],
       }),
     },
   });
@@ -180,6 +188,16 @@ function centerBrightness(pixels: ArrayLike<number>): number {
   return ((pixels[offset] ?? 0) + (pixels[offset + 1] ?? 0) + (pixels[offset + 2] ?? 0)) / 3;
 }
 
+function centerColor(pixels: ArrayLike<number>): readonly [number, number, number, number] {
+  const offset = (Math.floor(HEIGHT / 2) * WIDTH + Math.floor(WIDTH / 2)) * 4;
+  return [
+    pixels[offset] ?? 0,
+    pixels[offset + 1] ?? 0,
+    pixels[offset + 2] ?? 0,
+    pixels[offset + 3] ?? 0,
+  ];
+}
+
 function textureRef(uri: string): TextureRef {
   return { assetType: 'texture', kind: 'asset-ref', uri };
 }
@@ -238,7 +256,38 @@ async function run(): Promise<void> {
   atlasTexture.minFilter = THREE.NearestFilter;
   atlasTexture.generateMipmaps = false;
   atlasTexture.needsUpdate = true;
-  const resolveTexture = createThreeTextureResolver(new Map([[atlasRef.uri, atlasTexture]]));
+  const uniqueAtlasBytes = new Uint8Array([
+    255, 24, 24, 255, 24, 255, 24, 255, 24, 24, 255, 255, 255, 230, 24, 255,
+  ]);
+  const atlasFlipYRef = textureRef('procedural://m3-sprites/unique-atlas-flipy');
+  const atlasNoFlipRef = textureRef('procedural://m3-sprites/unique-atlas-no-flip');
+  const uniqueAtlasFlipY = new THREE.DataTexture(uniqueAtlasBytes.slice(), 2, 2);
+  const uniqueAtlasNoFlip = new THREE.DataTexture(uniqueAtlasBytes.slice(), 2, 2);
+  for (const [texture, flipY] of [
+    [uniqueAtlasFlipY, true],
+    [uniqueAtlasNoFlip, false],
+  ] as const) {
+    texture.flipY = flipY;
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+  }
+  const translucentRef = textureRef('procedural://m3-sprites/translucent');
+  const translucentTexture = new THREE.DataTexture(new Uint8Array([255, 96, 32, 72]), 1, 1);
+  translucentTexture.needsUpdate = true;
+  const opaqueControlRef = textureRef('procedural://m3-sprites/opaque-control');
+  const opaqueControlTexture = new THREE.DataTexture(new Uint8Array([255, 96, 32, 255]), 1, 1);
+  opaqueControlTexture.needsUpdate = true;
+  const resolveTexture = createThreeTextureResolver(
+    new Map([
+      [atlasRef.uri, atlasTexture],
+      [atlasFlipYRef.uri, uniqueAtlasFlipY],
+      [atlasNoFlipRef.uri, uniqueAtlasNoFlip],
+      [translucentRef.uri, translucentTexture],
+      [opaqueControlRef.uri, opaqueControlTexture],
+    ]),
+  );
 
   const render = async (mesh?: THREE.Object3D) => {
     if (mesh) scene.add(mesh);
@@ -272,6 +321,35 @@ async function run(): Promise<void> {
     const sprite = await createSprite({ blending, count: 4, spread: 0.2 });
     blendMetrics[blending] = comparePixels(await render(sprite.mesh), baseline);
   }
+  const translucentAlpha = await createSprite({
+    blending: 'alpha',
+    color: [1, 1, 1, 1],
+    count: 1,
+    map: translucentRef,
+  });
+  const translucentPremultiplied = await createSprite({
+    blending: 'premultiplied',
+    color: [1, 1, 1, 1],
+    count: 1,
+    map: translucentRef,
+  });
+  const opaquePremultiplied = await createSprite({
+    blending: 'premultiplied',
+    color: [1, 1, 1, 1],
+    count: 1,
+    map: opaqueControlRef,
+  });
+  const translucentAlphaPixels = await render(translucentAlpha.mesh);
+  const translucentPremultipliedPixels = await render(translucentPremultiplied.mesh);
+  const opaquePremultipliedPixels = await render(opaquePremultiplied.mesh);
+  const premultipliedTextureDifference = compareReadbacks(
+    translucentAlphaPixels,
+    translucentPremultipliedPixels,
+  );
+  const premultipliedOpacityDifference = compareReadbacks(
+    translucentPremultipliedPixels,
+    opaquePremultipliedPixels,
+  );
 
   const facing = await createSprite({ count: 1, speed: 2 });
   const stretched = await createSprite({
@@ -318,6 +396,34 @@ async function run(): Promise<void> {
   const flipbookDraw = interpolatedFlipbook.view.program.draws[0];
   const flipbookDescription =
     flipbookDraw?.kind === 'billboard' ? flipbookDraw.fragment.flipbook : undefined;
+  const sampleUniqueAtlas = async (reference: TextureRef) => {
+    const sprite = await createSprite({
+      color: [1, 1, 1, 1],
+      count: 1,
+      lifetimeSeconds: STEP * 8,
+      map: flipbook(reference, { cols: 2, interpolate: false, rows: 2 }),
+    });
+    const colors: (readonly [number, number, number, number])[] = [];
+    for (let frame = 0; frame < 4; frame += 1) {
+      colors.push(centerColor(await render(sprite.mesh)));
+      if (frame < 3) await sprite.system.update(STEP * 2);
+    }
+    return colors;
+  };
+  const flipYColors = await sampleUniqueAtlas(atlasFlipYRef);
+  const noFlipColors = await sampleUniqueAtlas(atlasNoFlipRef);
+  const atlasPairDifference = flipYColors.map((color, index) =>
+    color.reduce((sum, channel, channelIndex) => {
+      return sum + Math.abs(channel - (noFlipColors[index]?.[channelIndex] ?? 0));
+    }, 0),
+  );
+  const atlasFrameSeparation = flipYColors.flatMap((color, left) =>
+    flipYColors.slice(left + 1).map((other) =>
+      color.slice(0, 3).reduce((sum, channel, channelIndex) => {
+        return sum + Math.abs(channel - (other[channelIndex] ?? 0));
+      }, 0),
+    ),
+  );
 
   const quadSprite = await createSprite({ count: 1, cutout: { vertices: 4 } });
   const cutoutSprite = await createSprite({ count: 1, cutout: { vertices: 6 } });
@@ -446,10 +552,20 @@ async function run(): Promise<void> {
       flipbookBrightness.first < interpolationBrightnessRange.maximum - 1,
     flipbookTopLeftRows:
       flipbookDescription?.rowOrder === 'top-left' && flipbookDescription.rows === 2,
+    flipYAtlasParity:
+      atlasPairDifference.every((difference) => difference <= 8) &&
+      atlasFrameSeparation.every((difference) => difference > 30),
     m2NumericRegression:
       regressionView.program.meta.storageBufferCount <= 8 &&
       Math.abs(movementDelta - STEP) < 0.0002,
     respawnReflected: respawned,
+    premultipliedTranslucentTexture:
+      translucentPremultiplied.mesh.material.premultipliedAlpha &&
+      !translucentAlpha.mesh.material.premultipliedAlpha &&
+      premultipliedOpacityDifference.changedPixelRatio > 0.001 &&
+      premultipliedOpacityDifference.meanAbsoluteDifference > 0.05 &&
+      centerBrightness(translucentPremultipliedPixels) <
+        centerBrightness(opaquePremultipliedPixels),
     softIntersectionFade:
       softFadeDifference.changedPixelRatio > 0.001 &&
       softFadeDifference.meanAbsoluteDifference > 0.05 &&
@@ -473,6 +589,8 @@ async function run(): Promise<void> {
     },
     consoleMessages,
     flipbook: {
+      atlasFlipY: flipYColors,
+      atlasNoFlip: noFlipColors,
       brightness: flipbookBrightness,
       description: flipbookDescription,
       discreteFrameDifference,
@@ -480,6 +598,8 @@ async function run(): Promise<void> {
       interpolationDifference,
     },
     foreground,
+    premultipliedOpacityDifference,
+    premultipliedTextureDifference,
     m2Regression: {
       movementDelta,
       storageBufferCount: regressionView.program.meta.storageBufferCount,

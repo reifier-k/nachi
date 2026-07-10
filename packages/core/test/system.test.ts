@@ -88,7 +88,16 @@ class FakeNode implements KernelUniformNode {
   greaterThanEqual(): KernelNode {
     return this;
   }
+  lessThanEqual(): KernelNode {
+    return this;
+  }
   lessThan(): KernelNode {
+    return this;
+  }
+  and(): KernelNode {
+    return this;
+  }
+  not(): KernelNode {
     return this;
   }
   mul(): KernelNode {
@@ -167,7 +176,9 @@ function fakeAdapter(): KernelTslAdapter {
     },
     instancedArray: () => new FakeStorage(),
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
+    inverse: node,
     sampleTexture: node,
+    simplexNoise: node,
     sin: node,
     uniform: (value) => new FakeNode(value),
     uint: node,

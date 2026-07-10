@@ -10,6 +10,7 @@ export default defineConfig({
         m1Kernel: 'm1-kernel/index.html',
         m2Runtime: 'm2-runtime/index.html',
         m3Sprites: 'm3-sprites/index.html',
+        m4Behaviors: 'm4-behaviors/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },

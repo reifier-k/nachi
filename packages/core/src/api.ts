@@ -31,6 +31,8 @@ import type {
   HitStopAction,
   InitModule,
   JsonValue,
+  KillVolumeOptions,
+  LinearForceOptions,
   ModuleAccess,
   ModuleDefinition,
   ModuleStage,
@@ -41,12 +43,14 @@ import type {
   PerDistanceSpawnOptions,
   PlayAction,
   PositionSphereOptions,
+  PointAttractorOptions,
   RangeGenerator,
   RateSpawnOptions,
   RenderModule,
   SpawnModule,
   StopAction,
   TextureRef,
+  TurbulenceOptions,
   TimelineAction,
   TimelineActionTarget,
   TimelineEntry,
@@ -62,6 +66,7 @@ import type {
   Vec3,
   Vec4,
   VelocityConeOptions,
+  VortexOptions,
 } from './types.js';
 
 function createModule<Stage extends ModuleStage, Config extends object>(
@@ -295,6 +300,34 @@ export function curlNoise(options: CurlNoiseOptions): UpdateModule {
   });
 }
 
+export function vortex(options: VortexOptions): UpdateModule {
+  return createModule('update', 'core/vortex', options, {
+    reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+    writes: ['Particles.velocity'],
+  });
+}
+
+export function pointAttractor(options: PointAttractorOptions): UpdateModule {
+  return createModule('update', 'core/point-attractor', options, {
+    reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+    writes: ['Particles.velocity'],
+  });
+}
+
+export function linearForce(options: LinearForceOptions): UpdateModule {
+  return createModule('update', 'core/linear-force', options, {
+    reads: ['Emitter.deltaTime', 'Particles.velocity'],
+    writes: ['Particles.velocity'],
+  });
+}
+
+export function turbulence(options: TurbulenceOptions): UpdateModule {
+  return createModule('update', 'core/turbulence', options, {
+    reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+    writes: ['Particles.velocity'],
+  });
+}
+
 export function sizeOverLife(value: CurveGenerator<number>): UpdateModule {
   return createModule(
     'update',
@@ -305,6 +338,37 @@ export function sizeOverLife(value: CurveGenerator<number>): UpdateModule {
       writes: ['Particles.size'],
     },
   );
+}
+
+export function rotationOverLife(value: CurveGenerator<number>): UpdateModule {
+  return createModule(
+    'update',
+    'core/rotation-over-life',
+    { value },
+    {
+      reads: ['Particles.normalizedAge'],
+      writes: ['Particles.spriteRotation'],
+    },
+  );
+}
+
+export function velocityOverLife(value: CurveGenerator<number>): UpdateModule {
+  return createModule(
+    'update',
+    'core/velocity-over-life',
+    { value },
+    {
+      reads: ['Particles.normalizedAge', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+  );
+}
+
+export function killVolume(options: KillVolumeOptions): UpdateModule {
+  return createModule('update', 'core/kill-volume', options, {
+    reads: ['Emitter.transform', 'Particles.position'],
+    writes: ['Particles.alive'],
+  });
 }
 
 export function colorOverLife(value: GradientGenerator): UpdateModule {

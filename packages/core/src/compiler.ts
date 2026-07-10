@@ -40,11 +40,15 @@ import type {
   TslParticleBindings,
   TslStorageType,
   TextureRef,
+  TurbulenceOptions,
   UpdateModule,
   ValueInput,
   Vec3,
   Vec4,
   VfxDiagnostic,
+  VortexOptions,
+  PointAttractorOptions,
+  KillVolumeOptions,
 } from './types.js';
 
 export const DEFAULT_LUT_RESOLUTION = 256;
@@ -209,7 +213,10 @@ export interface KernelNode {
   div(value: KernelNodeInput): KernelNode;
   equal(value: KernelNodeInput): KernelNode;
   greaterThanEqual(value: KernelNodeInput): KernelNode;
+  lessThanEqual(value: KernelNodeInput): KernelNode;
   lessThan(value: KernelNodeInput): KernelNode;
+  and(value: KernelNodeInput): KernelNode;
+  not(): KernelNode;
   mul(value: KernelNodeInput): KernelNode;
   mulAssign(value: KernelNodeInput): KernelNode;
   pow(value: KernelNodeInput): KernelNode;
@@ -268,7 +275,9 @@ export interface KernelTslAdapter {
   fn(callback: () => void): KernelComputeBuilder;
   instancedArray(length: number, type: TslStorageType): KernelStorageNode;
   indirectArray(values: Uint32Array): KernelIndirectStorageNode;
+  inverse(value: KernelNode): KernelNode;
   sampleTexture(texture: unknown, uv: KernelNode): KernelNode;
+  simplexNoise(position: KernelNode): KernelNode;
   sin(value: KernelNodeInput): KernelNode;
   uniform(value: unknown, type: TslStorageType): KernelUniformNode;
   uint(value: KernelNodeInput): KernelNode;
@@ -1305,7 +1314,11 @@ function bakeModuleLuts(
   const luts: BakedLut[] = [];
   const normalized = modules.map((module) => {
     try {
-      if (module.type === 'core/size-over-life') {
+      if (
+        module.type === 'core/size-over-life' ||
+        module.type === 'core/rotation-over-life' ||
+        module.type === 'core/velocity-over-life'
+      ) {
         const curve = (module.config as { value: CurveGenerator<number> }).value;
         if (
           curve.keys.length < 2 ||
@@ -2763,6 +2776,156 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
+      reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as VortexOptions;
+      const basis = normalizedBasis(config.axis);
+      const center = context.value(config.center ?? [0, 0, 0], 'vec3');
+      const position = context.attribute('position');
+      const offset = context.adapter.vec3(
+        position.x.sub(center.x),
+        position.y.sub(center.y),
+        position.z.sub(center.z),
+      );
+      const axial = offset.x
+        .mul(basis.up[0])
+        .add(offset.y.mul(basis.up[1]))
+        .add(offset.z.mul(basis.up[2]));
+      const radial = context.adapter.vec3(
+        offset.x.sub(axial.mul(basis.up[0])),
+        offset.y.sub(axial.mul(basis.up[1])),
+        offset.z.sub(axial.mul(basis.up[2])),
+      );
+      const radialLength = radial.x
+        .mul(radial.x)
+        .add(radial.y.mul(radial.y))
+        .add(radial.z.mul(radial.z))
+        .sqrt()
+        .clamp(0.000001, 1e20);
+      const tangentDirection = context.adapter.vec3(
+        radial.z.mul(basis.up[1]).sub(radial.y.mul(basis.up[2])),
+        radial.x.mul(basis.up[2]).sub(radial.z.mul(basis.up[0])),
+        radial.y.mul(basis.up[0]).sub(radial.x.mul(basis.up[1])),
+      );
+      const tangential = tangentDirection
+        .div(radialLength)
+        .mul(context.value(config.strength, 'f32'));
+      const inward = radial.div(radialLength).mul(context.value(config.inwardStrength ?? 0, 'f32'));
+      const acceleration = tangential.sub(inward);
+      context.write(
+        'velocity',
+        context.attribute('velocity').add(acceleration.mul(context.uniform('Emitter.deltaTime'))),
+      );
+    },
+    stage: 'update',
+    type: 'core/vortex',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as PointAttractorOptions;
+      const target = context.value(config.position, 'vec3');
+      const position = context.attribute('position');
+      const outward = context.adapter.vec3(
+        position.x.sub(target.x),
+        position.y.sub(target.y),
+        position.z.sub(target.z),
+      );
+      const distance = outward.x
+        .mul(outward.x)
+        .add(outward.y.mul(outward.y))
+        .add(outward.z.mul(outward.z))
+        .sqrt()
+        .clamp(0.000001, 1e20);
+      const magnitude = context
+        .value(config.strength, 'f32')
+        .div(distance.pow(context.value(config.falloff ?? 2, 'f32')));
+      const acceleration = outward.div(distance).mul(magnitude).mul(-1);
+      const apply = () => {
+        context.write(
+          'velocity',
+          context.attribute('velocity').add(acceleration.mul(context.uniform('Emitter.deltaTime'))),
+        );
+      };
+      if (config.radius === undefined) apply();
+      else context.adapter.branch(distance.lessThan(context.value(config.radius, 'f32')), apply);
+    },
+    stage: 'update',
+    type: 'core/point-attractor',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.deltaTime', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    build(context) {
+      const force = context.value(
+        (context.module.config as { force: ValueInput<Vec3> }).force,
+        'vec3',
+      );
+      context.write(
+        'velocity',
+        context.attribute('velocity').add(force.mul(context.uniform('Emitter.deltaTime'))),
+      );
+    },
+    stage: 'update',
+    type: 'core/linear-force',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as TurbulenceOptions;
+      const position = context.attribute('position');
+      const base = context.adapter
+        .vec3(position.x, position.y, position.z)
+        .mul(context.value(config.frequency, 'f32'));
+      const octaves = Math.max(1, Math.min(4, Math.floor(config.octaves ?? 3)));
+      let amplitude = 1;
+      let frequency = 1;
+      let x = context.adapter.constant(0, 'f32');
+      let y = context.adapter.constant(0, 'f32');
+      let z = context.adapter.constant(0, 'f32');
+      for (let octave = 0; octave < octaves; octave += 1) {
+        const sample = base.mul(frequency);
+        x = x.add(context.adapter.simplexNoise(sample).sub(0.5).mul(amplitude));
+        y = y.add(
+          context.adapter
+            .simplexNoise(sample.add(context.adapter.vec3(31.416, -47.853, 12.793)))
+            .sub(0.5)
+            .mul(amplitude),
+        );
+        z = z.add(
+          context.adapter
+            .simplexNoise(sample.add(context.adapter.vec3(-19.271, 73.157, 41.039)))
+            .sub(0.5)
+            .mul(amplitude),
+        );
+        amplitude *= 0.5;
+        frequency *= 2;
+      }
+      const acceleration = context.adapter.vec3(x, y, z).mul(context.value(config.strength, 'f32'));
+      context.write(
+        'velocity',
+        context.attribute('velocity').add(acceleration.mul(context.uniform('Emitter.deltaTime'))),
+      );
+    },
+    stage: 'update',
+    type: 'core/turbulence',
+    version: 1,
+  });
+  registry.register({
+    access: {
       reads: ['Particles.normalizedAge'],
       writes: ['Particles.size'],
     },
@@ -2775,6 +2938,90 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/size-over-life',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Particles.normalizedAge'],
+      writes: ['Particles.spriteRotation'],
+    },
+    build(context) {
+      if (!context.module.lutId) throw new Error('rotationOverLife LUT is missing.');
+      context.write(
+        'spriteRotation',
+        context.sampleLut(context.module.lutId, context.attribute('normalizedAge')).r,
+      );
+    },
+    stage: 'update',
+    type: 'core/rotation-over-life',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Particles.normalizedAge', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    build(context) {
+      if (!context.module.lutId) throw new Error('velocityOverLife LUT is missing.');
+      const scale = context.sampleLut(context.module.lutId, context.attribute('normalizedAge')).r;
+      context.write('velocity', context.attribute('velocity').mul(scale));
+    },
+    stage: 'update',
+    type: 'core/velocity-over-life',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.transform', 'Particles.position'],
+      writes: ['Particles.alive'],
+    },
+    build(context) {
+      const config = context.module.config as KillVolumeOptions;
+      const position = context.attribute('position');
+      const local = context.adapter
+        .inverse(context.uniform('Emitter.transform'))
+        .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz;
+      let inside: KernelNode;
+      if (config.shape === 'sphere') {
+        const center = context.value(config.center ?? [0, 0, 0], 'vec3');
+        const delta = context.adapter.vec3(
+          local.x.sub(center.x),
+          local.y.sub(center.y),
+          local.z.sub(center.z),
+        );
+        const radius = context.value(config.radius, 'f32');
+        inside = delta.x
+          .mul(delta.x)
+          .add(delta.y.mul(delta.y))
+          .add(delta.z.mul(delta.z))
+          .lessThanEqual(radius.mul(radius));
+      } else if (config.shape === 'box') {
+        const center = context.value(config.center ?? [0, 0, 0], 'vec3');
+        const halfSize = context.value(config.size, 'vec3').mul(0.5);
+        const delta = context.adapter.vec3(
+          local.x.sub(center.x),
+          local.y.sub(center.y),
+          local.z.sub(center.z),
+        );
+        inside = delta.x
+          .mul(delta.x)
+          .lessThanEqual(halfSize.x.mul(halfSize.x))
+          .and(delta.y.mul(delta.y).lessThanEqual(halfSize.y.mul(halfSize.y)))
+          .and(delta.z.mul(delta.z).lessThanEqual(halfSize.z.mul(halfSize.z)));
+      } else {
+        const basis = normalizedBasis(config.normal);
+        const signed = local.x
+          .mul(basis.up[0])
+          .add(local.y.mul(basis.up[1]))
+          .add(local.z.mul(basis.up[2]));
+        inside = signed.lessThanEqual(context.value(config.offset ?? 0, 'f32'));
+      }
+      context.adapter.branch(config.mode === 'inside' ? inside : inside.not(), () => {
+        context.write('alive', context.adapter.constant(false, 'bool'));
+      });
+    },
+    stage: 'update',
+    type: 'core/kill-volume',
     version: 1,
   });
   registry.register({
@@ -2825,7 +3072,14 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/gravity',
       'core/drag',
       'core/curl-noise',
+      'core/vortex',
+      'core/point-attractor',
+      'core/linear-force',
+      'core/turbulence',
       'core/size-over-life',
+      'core/rotation-over-life',
+      'core/velocity-over-life',
+      'core/kill-volume',
       'core/color-over-life',
       'core/integrate',
     ].map((type) => [type, registry.resolve(type, 1)?.access]),

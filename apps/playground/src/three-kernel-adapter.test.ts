@@ -4,9 +4,18 @@ import {
   burst,
   compileEmitter,
   defineEmitter,
+  curve,
   flipbook,
+  killVolume,
+  linearForce,
   lifetime,
   meshRenderer,
+  pointAttractor,
+  positionSphere,
+  rotationOverLife,
+  turbulence,
+  velocityOverLife,
+  vortex,
 } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
@@ -21,6 +30,29 @@ import {
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
+  it('materializes all M4 behavior modules as Three.js TSL graphs', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        init: [positionSphere({ radius: 1 })],
+        render: billboard({}),
+        spawn: burst({ count: 4 }),
+        update: [
+          vortex({ axis: [0, 1, 0], inwardStrength: 0.2, strength: 2 }),
+          pointAttractor({ falloff: 1, position: [0, 0, 0], radius: 4, strength: 3 }),
+          linearForce({ force: [1, 2, 3] }),
+          turbulence({ frequency: 0.5, octaves: 4, strength: 1 }),
+          rotationOverLife(curve([0, 0], [1, 2])),
+          velocityOverLife(curve([0, 1], [1, 0])),
+          killVolume({ center: [0, 0, 0], mode: 'outside', shape: 'box', size: [4, 4, 4] }),
+        ],
+      }),
+    );
+
+    expect(program.diagnostics).toEqual([]);
+    expect(() => program.buildKernels(createThreeKernelAdapter())).not.toThrow();
+  });
+
   it('materializes mat3 storage with its vec4-aligned physical length', () => {
     const storage = createThreeKernelAdapter().instancedArray(1, 'mat3');
     const attribute = storage.value as { array: Float32Array; count: number };

@@ -34,6 +34,7 @@ import {
   instanceIndex,
   instancedArray,
   int,
+  inverse,
   mat3,
   mat4,
   linearDepth,
@@ -55,6 +56,7 @@ import {
   vec4,
   viewportDepthTexture,
 } from 'three/tsl';
+import { snoise } from 'three/examples/jsm/tsl/math/curlNoise.js';
 
 export interface ThreeKernelAdapterOptions {
   readonly backend?: 'webgl2' | 'webgpu';
@@ -244,7 +246,9 @@ export function createThreeKernelAdapter(
       Object.defineProperty(node, 'indirectResource', { value: attribute });
       return node;
     },
+    inverse: (value) => asNode(inverse(value as never)),
     sampleTexture: (value, uv) => asNode(texture(value as THREE.Texture, uv as never)),
+    simplexNoise: (position) => asNode(snoise(position as never)),
     sin: (value) => asNode(sin(value as never)),
     uniform: (value, type) =>
       createUniform(uniformValue(value, type), type) as ReturnType<KernelTslAdapter['uniform']>,

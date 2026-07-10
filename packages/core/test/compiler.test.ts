@@ -19,19 +19,26 @@ import {
   flipbook,
   gradient,
   gravity,
+  killVolume,
   KernelModuleRegistry,
+  linearForce,
   lifetime,
   meshRenderer,
   parameter,
   perDistance,
+  pointAttractor,
   pcgRandomFloat,
   positionSphere,
   range,
   rate,
   resolveRandomSampleSlot,
   sizeOverLife,
+  rotationOverLife,
   tslModule,
+  turbulence,
+  velocityOverLife,
   velocityCone,
+  vortex,
 } from '../src/index.js';
 import type {
   CompiledKernelModule,
@@ -122,7 +129,16 @@ class FakeNode implements KernelUniformNode {
   greaterThanEqual(): KernelNode {
     return this;
   }
+  lessThanEqual(): KernelNode {
+    return this;
+  }
   lessThan(): KernelNode {
+    return this;
+  }
+  and(): KernelNode {
+    return this;
+  }
+  not(): KernelNode {
     return this;
   }
   mul(): KernelNode {
@@ -346,7 +362,9 @@ function fakeAdapter(): KernelTslAdapter {
     },
     instancedArray: () => new FakeStorage(),
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
+    inverse: node,
     sampleTexture: node,
+    simplexNoise: node,
     sin: node,
     uniform: (value) => new FakeNode(value),
     uint: node,
@@ -1924,7 +1942,14 @@ describe('emitter kernel compiler', () => {
         gravity(-9.8),
         drag(0.1),
         curlNoise({ frequency: 0.5, strength: 0.2 }),
+        vortex({ axis: [0, 1, 0], strength: 2 }),
+        pointAttractor({ position: [0, 0, 0], strength: 1 }),
+        linearForce({ force: [1, 0, 0] }),
+        turbulence({ frequency: 0.5, octaves: 2, strength: 1 }),
         sizeOverLife(curve([0, 0], [1, 1])),
+        rotationOverLife(curve([0, 0], [1, Math.PI])),
+        velocityOverLife(curve([0, 1], [1, 0])),
+        killVolume({ mode: 'inside', radius: 0.1, shape: 'sphere' }),
         colorOverLife(gradient('#000', '#fff')),
       ],
     });
@@ -1944,10 +1969,17 @@ describe('emitter kernel compiler', () => {
       'core/curl-noise': curlNoise({ frequency: 1, strength: 1 }).access,
       'core/drag': drag(1).access,
       'core/gravity': gravity(-9.8).access,
+      'core/kill-volume': killVolume({ mode: 'inside', radius: 1, shape: 'sphere' }).access,
+      'core/linear-force': linearForce({ force: [1, 2, 3] }).access,
       'core/lifetime': lifetime(1).access,
+      'core/point-attractor': pointAttractor({ position: [0, 0, 0], strength: 1 }).access,
       'core/position-sphere': positionSphere({ radius: 1 }).access,
+      'core/rotation-over-life': rotationOverLife(curve([0, 0], [1, 1])).access,
       'core/size-over-life': sizeOverLife(curve([0, 0], [1, 1])).access,
+      'core/turbulence': turbulence({ frequency: 1, strength: 1 }).access,
+      'core/velocity-over-life': velocityOverLife(curve([0, 1], [1, 0])).access,
       'core/velocity-cone': velocityCone({ angle: 30, direction: [0, 1, 0], speed: 1 }).access,
+      'core/vortex': vortex({ axis: [0, 1, 0], strength: 1 }).access,
     };
     for (const [type, manifest] of Object.entries(expected)) expect(access[type]).toEqual(manifest);
   });
@@ -1978,7 +2010,14 @@ describe('emitter kernel compiler', () => {
       ['core/gravity', { value: -9.8 }],
       ['core/drag', { value: 0.1 }],
       ['core/curl-noise', { frequency: 1, strength: 0.2 }],
+      ['core/vortex', { axis: [0, 1, 0], center: [0, 0, 0], strength: 1 }],
+      ['core/point-attractor', { falloff: 2, position: [0, 0, 0], strength: 1 }],
+      ['core/linear-force', { force: [1, 2, 3] }],
+      ['core/turbulence', { frequency: 1, octaves: 3, strength: 0.2 }],
       ['core/size-over-life', { value: curve([0, 0], [1, 1]) }, 'size-lut'],
+      ['core/rotation-over-life', { value: curve([0, 0], [1, 1]) }, 'rotation-lut'],
+      ['core/velocity-over-life', { value: curve([0, 1], [1, 0]) }, 'velocity-lut'],
+      ['core/kill-volume', { mode: 'inside', radius: 1, shape: 'sphere' }],
       ['core/color-over-life', { value: gradient('#000', '#fff') }, 'color-lut'],
       ['core/integrate', {}],
     ];
@@ -1991,5 +2030,115 @@ describe('emitter kernel compiler', () => {
         writes: [...(access?.writes ?? [])].sort(),
       });
     }
+  });
+
+  it.each([
+    [vortex({ axis: [0, 1, 0], strength: 2 }), 'core/vortex', 'Particles.velocity'],
+    [
+      pointAttractor({ position: [0, 0, 0], strength: -2 }),
+      'core/point-attractor',
+      'Particles.velocity',
+    ],
+    [linearForce({ force: [1, 2, 3] }), 'core/linear-force', 'Particles.velocity'],
+    [turbulence({ frequency: 2, strength: 3 }), 'core/turbulence', 'Particles.velocity'],
+    [
+      rotationOverLife(curve([0, 0], [1, 1])),
+      'core/rotation-over-life',
+      'Particles.spriteRotation',
+    ],
+    [velocityOverLife(curve([0, 1], [1, 0])), 'core/velocity-over-life', 'Particles.velocity'],
+    [
+      killVolume({ mode: 'inside', radius: 1, shape: 'sphere' }),
+      'core/kill-volume',
+      'Particles.alive',
+    ],
+  ] as const)('declares the %s authoring manifest', (module, type, write) => {
+    expect(module).toMatchObject({ kind: 'module', stage: 'update', type, version: 1 });
+    expect(module.access?.writes).toContain(write);
+  });
+
+  it.each([
+    killVolume({ center: [1, 2, 3], mode: 'inside', radius: 2, shape: 'sphere' }),
+    killVolume({ center: [1, 2, 3], mode: 'outside', shape: 'box', size: [2, 4, 6] }),
+    killVolume({ mode: 'inside', normal: [0, 1, 0], offset: 2, shape: 'plane' }),
+  ])('compiles a kill-volume shape through the free-list death attribute', (module) => {
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }));
+    expect(program.diagnostics).toEqual([]);
+    expect(program.attributeSchema.byName.alive).toBeDefined();
+  });
+
+  it.each([
+    linearForce({ force: parameter('User.force', [1, 2, 3] as [number, number, number]) }),
+    pointAttractor({
+      position: parameter('User.target', [0, 0, 0] as [number, number, number]),
+      strength: 1,
+    }),
+    vortex({
+      axis: [0, 1, 0],
+      center: parameter('User.center', [0, 0, 0] as [number, number, number]),
+      strength: 1,
+    }),
+  ])('derives nested parameter reads for an M4 force helper', (module) => {
+    expect(module.access?.reads.some((path) => path.startsWith('User.'))).toBe(true);
+  });
+
+  it.each([
+    rotationOverLife(curve([0, 0], [1, Math.PI])),
+    velocityOverLife(curve([0, 1], [1, 0.5])),
+    sizeOverLife(curve([0, 0], [1, 2])),
+  ])('bakes an over-life module to the shared curve LUT path', (module) => {
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }));
+    expect(program.diagnostics).toEqual([]);
+    expect(program.luts).toHaveLength(1);
+    expect(program.luts[0]).toMatchObject({ channels: 1, kind: 'curve', width: 256 });
+  });
+
+  it('preserves all M4 author update modules in observable order', () => {
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [
+          vortex({ axis: [0, 1, 0], strength: 1 }),
+          pointAttractor({ position: [0, 0, 0], strength: 1 }),
+          linearForce({ force: [1, 0, 0] }),
+          turbulence({ frequency: 1, strength: 1 }),
+          rotationOverLife(curve([0, 0], [1, 1])),
+          velocityOverLife(curve([0, 1], [1, 0])),
+          killVolume({ mode: 'inside', radius: 1, shape: 'sphere' }),
+        ],
+      }),
+    );
+    expect(program.kernels.update.modules.map(({ type }) => type)).toEqual([
+      'core/vortex',
+      'core/point-attractor',
+      'core/linear-force',
+      'core/turbulence',
+      'core/rotation-over-life',
+      'core/velocity-over-life',
+      'core/kill-volume',
+    ]);
+  });
+
+  it('keeps turbulence deterministic by avoiding random-stream manifest inputs', () => {
+    const module = turbulence({ frequency: 1, octaves: 4, strength: 1 });
+    expect(module.access?.reads).not.toContain('Emitter.seed');
+    expect(module.access?.reads).not.toContain('Particles.spawnGeneration');
+    expect(module.access?.reads).toContain('Particles.position');
+  });
+
+  it('supports an optional inward acceleration in the vortex config', () => {
+    expect(vortex({ axis: [0, 1, 0], inwardStrength: 0.5, strength: 2 }).config).toEqual({
+      axis: [0, 1, 0],
+      inwardStrength: 0.5,
+      strength: 2,
+    });
+  });
+
+  it('encodes positive attraction and negative repulsion without changing the manifest', () => {
+    const attraction = pointAttractor({ position: [0, 0, 0], strength: 2 });
+    const repulsion = pointAttractor({ position: [0, 0, 0], strength: -2 });
+    expect(attraction.access).toEqual(repulsion.access);
+    expect(attraction.config).toMatchObject({ strength: 2 });
+    expect(repulsion.config).toMatchObject({ strength: -2 });
   });
 });
