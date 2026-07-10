@@ -117,12 +117,12 @@
 
 ## M4 — ビヘイビアライブラリ
 
-- [ ] フォース:gravity / drag / vortex / pointAttractor / linearForce
-- [ ] curlNoise / turbulence(シンプレックスベース)
+- [x] フォース:gravity / drag / vortex / pointAttractor / linearForce — 数学は全検算済み(レビュー)
+- [x] curlNoise / turbulence(シンプレックスベース)— 位置純関数で決定論。強度正規化規約は最終バッチで
 - [ ] ベクタフィールド:FGAローダ+3Dテクスチャサンプリング
-- [ ] sizeOverLife / colorOverLife / rotationOverLife / velocityOverLife
+- [x] sizeOverLife / colorOverLife / rotationOverLife / velocityOverLife — velocityはf32等方(vec3対応は最終バッチで判断)
 - [ ] 向き制御:orientToVelocity / faceCamera / カスタム
-- [ ] killVolume(box/sphere/plane)、寿命外強制回収
+- [x] killVolume(box/sphere/plane)— emitter-local規約、フリーリスト回収統合。寿命外強制回収は最終バッチ
 - [ ] 🎯 ゴールデン#4「環境ループ」が動く
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
