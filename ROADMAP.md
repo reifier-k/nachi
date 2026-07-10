@@ -97,7 +97,7 @@
 ## M2 — スポーンとライフサイクル
 
 - [x] GPUフリーリスト(アトミックカウンタによる確保/解放)— スナップショット分割割当(フレーム内レース排除)、per-particle spawnGeneration、枯渇時クランプ+診断
-- [x] 生存数駆動のdrawIndirect(WebGL2フォールバック方針含む)— aliveカウント→instanceCount(3系統照合で実証)、capabilities分岐メタ、WebGL2はburstのみ許可+CPU readback(rate/perDistanceは明示診断で拒否)
+- [ ] 生存数駆動のdrawIndirect(WebGL2フォールバック方針含む)— 🚧 M2監査で差し戻し: WebGL2 burstがTF varyings超過で無音全滅(実ブラウザ実証)、バッファ予算超過でm1-kernel回帰。WebGPU側の実証(3系統照合)は維持
 - [x] spawn: rate / burst / per-distance(移動量比例)— 端数アキュムレータ(分割不変)、GPU生成dispatch引数のdispatchIndirect、ステージ書込権限検証(RFC§4.1全表=M1監査先送り分消化)
 - [x] エミッタライフサイクル:startDelay、duration、loopCount('infinite'可)、prewarm(cold経路とビット一致を実証)— ループ世代→spawnGeneration接続
 - [x] エフェクトローカル時間、タイムスケール、fixed timestepオプション — System.timeはワールド維持・Emitter.deltaTimeのみスケール、hitStop API、アキュムレータ(スパイラル防止+破棄明示)、分割不変性テスト済み
