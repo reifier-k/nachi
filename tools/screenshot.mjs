@@ -117,6 +117,13 @@ try {
     );
   }
 
+  const expectedBackend = target.backend === 'webgpu' ? 'WebGPU' : 'WebGL2';
+  if (harnessState.backend !== expectedBackend) {
+    throw new Error(
+      `Backend mismatch: requested ${expectedBackend}, active ${harnessState.backend ?? 'unknown'}.`,
+    );
+  }
+
   await page.evaluate(
     () =>
       new Promise((resolve) => {

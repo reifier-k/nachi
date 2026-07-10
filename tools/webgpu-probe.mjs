@@ -24,7 +24,7 @@ function parseAdapter(arguments_) {
     }
   }
 
-  if (!(adapter in ADAPTER_FLAGS)) {
+  if (!Object.hasOwn(ADAPTER_FLAGS, adapter)) {
     throw new Error(`Invalid adapter "${adapter}". Expected swiftshader, vulkan, or default.`);
   }
 

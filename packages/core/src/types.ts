@@ -1,0 +1,540 @@
+export type JsonPrimitive = boolean | null | number | string;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+export type Vec2 = readonly [number, number];
+export type Vec3 = readonly [number, number, number];
+export type Vec4 = readonly [number, number, number, number];
+export type ColorInput = string | Vec3 | Vec4;
+export type RotationInput =
+  | Vec3
+  | Vec4
+  | { readonly x: number; readonly y: number; readonly z: number };
+export type PositionInput = Vec3 | { readonly x: number; readonly y: number; readonly z: number };
+
+export type ParameterNamespace = 'Emitter' | 'Particles' | 'System' | 'User';
+export type ParameterPath<
+  Namespace extends ParameterNamespace = ParameterNamespace,
+  Name extends string = string,
+> = `${Namespace}.${Name}`;
+export type UserParameterPath<Name extends string = string> = ParameterPath<'User', Name>;
+export type ParticleAttributePath<Name extends string = string> = ParameterPath<'Particles', Name>;
+export type DataReference = ParameterPath;
+export type EmitterEventQueuePath<Name extends string = string> = ParameterPath<
+  'Emitter',
+  `events.${Name}`
+>;
+export type EmitterEventPayloadPath<Name extends string = string> = ParameterPath<
+  'Emitter',
+  `eventPayload.${Name}`
+>;
+
+export type AttributeType =
+  | 'bool'
+  | 'color'
+  | 'f32'
+  | 'i32'
+  | 'mat3'
+  | 'mat4'
+  | 'quat'
+  | 'u32'
+  | 'vec2'
+  | 'vec3'
+  | 'vec4';
+
+export interface AttributeTypeMap {
+  bool: boolean;
+  color: Vec4;
+  f32: number;
+  i32: number;
+  mat3: readonly number[];
+  mat4: readonly number[];
+  quat: Vec4;
+  u32: number;
+  vec2: Vec2;
+  vec3: Vec3;
+  vec4: Vec4;
+}
+
+export interface BuiltInParticleAttributes {
+  age: number;
+  alive: boolean;
+  color: Vec4;
+  lifetime: number;
+  mass: number;
+  normalizedAge: number;
+  position: Vec3;
+  rotation: Vec4;
+  scale: Vec3;
+  size: number;
+  spriteRotation: number;
+  velocity: Vec3;
+}
+
+export interface RangeGenerator<T> {
+  readonly kind: 'range';
+  readonly distribution: 'uniform';
+  readonly max: T;
+  readonly min: T;
+}
+
+export type CurveInterpolation = 'constant' | 'cubic' | 'linear';
+
+export interface CurveKey<T> {
+  readonly interpolation?: CurveInterpolation;
+  readonly time: number;
+  readonly value: T;
+}
+
+export interface CurveGenerator<T> {
+  readonly kind: 'curve';
+  readonly keys: readonly CurveKey<T>[];
+}
+
+export interface GradientStop {
+  readonly color: ColorInput;
+  readonly position: number;
+}
+
+export interface GradientGenerator {
+  readonly kind: 'gradient';
+  readonly stops: readonly GradientStop[];
+}
+
+export interface ParameterGenerator<T = JsonValue> {
+  readonly kind: 'parameter';
+  readonly path: ParameterPath;
+  readonly fallback?: T;
+}
+
+export type ValueGenerator<T> = CurveGenerator<T> | ParameterGenerator<T> | RangeGenerator<T>;
+export type ValueInput<T> = T | ValueGenerator<T>;
+
+export interface AttributeDefinition<
+  Name extends string = string,
+  Type extends AttributeType = AttributeType,
+> {
+  readonly kind: 'attribute';
+  readonly name: Name;
+  readonly type: Type;
+  readonly default: ValueInput<AttributeTypeMap[Type]>;
+  readonly transient?: boolean;
+}
+
+export type AttributeSchema = Readonly<Record<string, AttributeDefinition>>;
+
+export interface ParameterDefinition<
+  Path extends ParameterPath = ParameterPath,
+  Type extends AttributeType = AttributeType,
+> {
+  readonly kind: 'parameter-definition';
+  readonly path: Path;
+  readonly type: Type;
+  readonly default: AttributeTypeMap[Type];
+  readonly mutable?: boolean;
+}
+
+export type ParameterSchema = Readonly<Record<ParameterPath, ParameterDefinition>>;
+export type EmptyParameterSchema = Readonly<Record<string, never>>;
+
+export type ModuleStage = 'event' | 'init' | 'render' | 'spawn' | 'update';
+
+export interface ModuleAccess {
+  readonly reads: readonly DataReference[];
+  readonly writes: readonly DataReference[];
+  readonly optionalReads?: readonly DataReference[];
+}
+
+export interface ModuleDefinition<
+  Stage extends ModuleStage = ModuleStage,
+  Config extends object = Record<string, JsonValue>,
+> {
+  readonly access?: ModuleAccess;
+  readonly config: Readonly<Config>;
+  readonly kind: 'module';
+  readonly label?: string;
+  readonly stage: Stage;
+  readonly type: string;
+  readonly version: number;
+}
+
+export type SpawnModule = ModuleDefinition<'spawn', object>;
+export type InitModule = ModuleDefinition<'init', object>;
+export type UpdateModule = ModuleDefinition<'update', object>;
+export type EventModule = ModuleDefinition<'event', object>;
+export type RenderModule = ModuleDefinition<'render', object>;
+
+export interface ModuleRegistration<
+  Stage extends ModuleStage = ModuleStage,
+  Config extends object = Record<string, JsonValue>,
+> {
+  readonly type: string;
+  readonly version: number;
+  readonly stage: Stage;
+  readonly access: ModuleAccess;
+  readonly validate?: (config: Readonly<Config>) => readonly VfxDiagnostic[];
+  readonly compile: (context: TslCompileContext, config: Readonly<Config>) => void;
+}
+
+export interface TslExpression<T> {
+  readonly valueType?: T;
+  add(value: T | TslExpression<T>): TslExpression<T>;
+  div(value: number | TslExpression<number>): TslExpression<T>;
+  mul(value: number | TslExpression<number>): TslExpression<T>;
+  sub(value: T | TslExpression<T>): TslExpression<T>;
+}
+
+export interface BuiltInTslParticleBindings {
+  readonly age: TslExpression<number>;
+  readonly alive: TslExpression<boolean>;
+  readonly color: TslExpression<Vec4>;
+  readonly lifetime: TslExpression<number>;
+  readonly mass: TslExpression<number>;
+  readonly normalizedAge: TslExpression<number>;
+  readonly position: TslExpression<Vec3>;
+  readonly rotation: TslExpression<Vec4>;
+  readonly scale: TslExpression<Vec3>;
+  readonly size: TslExpression<number>;
+  readonly spriteRotation: TslExpression<number>;
+  readonly velocity: TslExpression<Vec3>;
+}
+
+export type NoCustomAttributes = Record<never, never>;
+
+export type TslParticleBindings<
+  CustomAttributes extends Readonly<Record<string, unknown>> = NoCustomAttributes,
+> = BuiltInTslParticleBindings & {
+  readonly [Name in keyof CustomAttributes as `custom.${Extract<Name, string>}`]: TslExpression<
+    CustomAttributes[Name]
+  >;
+};
+
+export type TslModuleOutputs<Bindings extends object> = Partial<{
+  [Key in keyof Bindings]: Bindings[Key];
+}>;
+
+export type TslModuleFactory<Bindings extends object = TslParticleBindings> = (
+  bindings: Readonly<Bindings>,
+) => TslModuleOutputs<Bindings>;
+
+export interface TslFunctionRef<Bindings extends object = TslParticleBindings> {
+  readonly kind: 'function-ref';
+  readonly id: string;
+  readonly version: number;
+  /** Type-only carrier; this property is never materialized or serialized. */
+  readonly __bindings?: Bindings;
+}
+
+export interface TslFunctionRegistration<Bindings extends object = TslParticleBindings> {
+  readonly kind: 'tsl-function-registration';
+  readonly ref: TslFunctionRef<Bindings>;
+  readonly factory: TslModuleFactory<Bindings>;
+}
+
+export interface TslModuleOptions<Stage extends 'init' | 'update' = 'init' | 'update'> {
+  readonly access?: ModuleAccess;
+  readonly stage?: Stage;
+}
+
+export interface TslModuleConfig<Bindings extends object = TslParticleBindings> {
+  readonly source: { readonly kind: 'inline' } | TslFunctionRef<Bindings>;
+}
+
+export interface TslModuleDefinition<
+  Stage extends 'init' | 'update' = 'init' | 'update',
+  Bindings extends object = TslParticleBindings,
+> extends ModuleDefinition<Stage, TslModuleConfig<Bindings>> {
+  /** Non-enumerable authoring data. It is never written into the JSON asset. */
+  readonly factory?: TslModuleFactory<Bindings>;
+}
+
+export interface TslCompileContext {
+  readonly stage: ModuleStage;
+  readonly attributes: Readonly<Record<string, TslExpression<unknown>>>;
+  readonly parameters: Readonly<Record<ParameterPath, TslExpression<unknown>>>;
+}
+
+export interface BurstOptions {
+  readonly count: ValueInput<number>;
+  readonly cycles?: number;
+  readonly interval?: number;
+}
+
+export interface PositionSphereOptions {
+  readonly radius: ValueInput<number>;
+  readonly surfaceOnly?: boolean;
+}
+
+export interface VelocityConeOptions {
+  readonly angle: ValueInput<number>;
+  readonly direction: Vec3;
+  readonly speed: ValueInput<number>;
+}
+
+export interface CurlNoiseOptions {
+  readonly frequency: ValueInput<number>;
+  readonly strength: ValueInput<number>;
+}
+
+export type BlendingMode = 'additive' | 'alpha' | 'multiply' | 'premultiplied';
+
+export interface AssetRef<AssetType extends string = string> {
+  readonly kind: 'asset-ref';
+  readonly assetType: AssetType;
+  readonly uri: string;
+}
+
+export type TextureRef = AssetRef<'texture'>;
+
+export interface FlipbookDefinition {
+  readonly kind: 'flipbook';
+  readonly texture: TextureRef;
+  readonly cols: number;
+  readonly rows: number;
+  readonly motionVectors?: boolean;
+}
+
+export interface BillboardOptions {
+  readonly blending?: BlendingMode;
+  readonly map?: FlipbookDefinition | TextureRef;
+  readonly soft?: boolean;
+}
+
+export interface EmitToOptions {
+  readonly inherit?: readonly string[];
+}
+
+export type ParticleEventName = 'onCollision' | 'onCustom' | 'onDeath' | 'onSpawn' | (string & {});
+
+export interface EmitterLifecycle {
+  readonly delay?: number;
+  readonly duration?: number;
+  readonly loop?: boolean | number;
+  readonly prewarm?: number;
+}
+
+export type EmitterIntegration = 'euler' | 'none';
+
+export interface EmitterConfig<
+  Attributes extends AttributeSchema = AttributeSchema,
+  Parameters extends ParameterSchema = EmptyParameterSchema,
+> {
+  readonly capacity: number;
+  readonly attributes?: Attributes;
+  readonly events?: Partial<Record<ParticleEventName, EventModule | readonly EventModule[]>>;
+  readonly init?: readonly InitModule[];
+  readonly integration?: EmitterIntegration;
+  readonly lifecycle?: EmitterLifecycle;
+  readonly parameters?: Parameters;
+  readonly render: RenderModule | readonly RenderModule[];
+  readonly spawn: SpawnModule | readonly SpawnModule[];
+  readonly update?: readonly UpdateModule[];
+}
+
+export interface EmitterDefinition<
+  Attributes extends AttributeSchema = AttributeSchema,
+  Parameters extends ParameterSchema = EmptyParameterSchema,
+> extends EmitterConfig<Attributes, Parameters> {
+  readonly kind: 'emitter';
+}
+
+export interface VisualElementDefinition<Config extends object = object> {
+  readonly config: Readonly<Config>;
+  readonly kind: 'visual-element';
+  readonly type: string;
+  readonly version: number;
+}
+
+export type EffectElementDefinition = EmitterDefinition | VisualElementDefinition;
+export type EffectElements = Readonly<Record<string, EffectElementDefinition>>;
+
+export interface PlayAction<Target extends string = string> {
+  readonly kind: 'play';
+  readonly target: Target;
+}
+
+export interface StopAction<Target extends string = string> {
+  readonly kind: 'stop';
+  readonly target: Target;
+}
+
+export interface CameraShakeAction {
+  readonly kind: 'camera-shake';
+  readonly duration?: number;
+  readonly frequency?: number;
+  readonly strength: number;
+}
+
+export interface HitStopAction {
+  readonly kind: 'hit-stop';
+  readonly durationMs: number;
+  readonly timeScale?: number;
+}
+
+export type TimelineAction<Target extends string = string> =
+  | CameraShakeAction
+  | HitStopAction
+  | PlayAction<Target>
+  | StopAction<Target>;
+
+export type TimelineActionTarget<Action> =
+  Action extends PlayAction<infer Target>
+    ? Target
+    : Action extends StopAction<infer Target>
+      ? Target
+      : never;
+
+export interface TimelineEntry<Target extends string = string> {
+  readonly actions: readonly TimelineAction<Target>[];
+  readonly at: number;
+}
+
+export interface EffectConfig<
+  Elements extends EffectElements = EffectElements,
+  Parameters extends ParameterSchema = EmptyParameterSchema,
+> {
+  readonly elements: Elements;
+  readonly parameters?: Parameters;
+  readonly timeline?: readonly TimelineEntry<Extract<keyof Elements, string>>[];
+}
+
+export interface EffectDefinition<
+  Elements extends EffectElements = EffectElements,
+  Parameters extends ParameterSchema = EmptyParameterSchema,
+> extends EffectConfig<Elements, Parameters> {
+  readonly kind: 'effect';
+}
+
+export type DefinitionParameterSchema<Definition> = Definition extends {
+  readonly parameters?: infer Parameters;
+}
+  ? Parameters extends ParameterSchema
+    ? Parameters
+    : EmptyParameterSchema
+  : EmptyParameterSchema;
+
+export type UserParameterKeys<Definition> = Extract<
+  keyof DefinitionParameterSchema<Definition>,
+  UserParameterPath
+>;
+
+export type DefinitionParameterValue<Definition, Path extends UserParameterKeys<Definition>> =
+  DefinitionParameterSchema<Definition>[Path] extends ParameterDefinition<ParameterPath, infer Type>
+    ? AttributeTypeMap[Type]
+    : never;
+
+export type DefinitionParameterValues<Definition> = Readonly<
+  Partial<{
+    [Path in UserParameterKeys<Definition>]: DefinitionParameterValue<Definition, Path>;
+  }>
+>;
+
+export interface EffectSpawnOptions<Definition = EffectDefinition> {
+  readonly parameters?: DefinitionParameterValues<Definition>;
+  readonly position?: PositionInput;
+  readonly rotation?: RotationInput;
+  readonly seed?: number;
+  readonly timeScale?: number;
+}
+
+export type EffectInstanceState = 'active' | 'complete' | 'released' | 'stopped';
+
+export interface EffectInstance<Definition = EffectDefinition> {
+  readonly definition: Definition;
+  readonly id: string;
+  readonly state: EffectInstanceState;
+  release(): void;
+  setParameter<Path extends UserParameterKeys<Definition>>(
+    path: Path,
+    value: DefinitionParameterValue<Definition, Path>,
+  ): void;
+  stop(): void;
+}
+
+export interface FxMaterialDefinition {
+  readonly kind: 'fx-material';
+  readonly options: FxMaterialOptions;
+}
+
+export interface UvDefinition {
+  readonly kind: 'uv';
+  readonly type: string;
+  readonly flow?: { readonly speed: Vec2 };
+}
+
+export interface PolarUvBuilder {
+  flow(options: { readonly speed: Vec2 }): UvDefinition;
+}
+
+export interface FxMaterialOptions {
+  readonly blending?: BlendingMode;
+  readonly dissolve?: {
+    readonly overLife: CurveGenerator<number>;
+    readonly texture: TextureRef;
+  };
+  readonly fresnel?: {
+    readonly color: ColorInput;
+    readonly power: number;
+  };
+  readonly uv?: UvDefinition;
+}
+
+export interface SlashArcOptions {
+  readonly angle: number;
+  readonly material: FxMaterialDefinition;
+}
+
+export type SlashArcFactory = (
+  options: SlashArcOptions,
+) => VisualElementDefinition<SlashArcOptions>;
+export type FxMaterialFactory = (options: FxMaterialOptions) => FxMaterialDefinition;
+export type PolarUvFactory = () => PolarUvBuilder;
+
+export type DiagnosticPhase = 'compile' | 'deserialize' | 'runtime' | 'serialize';
+export type DiagnosticSeverity = 'error' | 'warning';
+
+export interface VfxDiagnostic {
+  readonly code: string;
+  readonly message: string;
+  readonly path?: string;
+  readonly phase: DiagnosticPhase;
+  readonly severity: DiagnosticSeverity;
+  readonly hint?: string;
+}
+
+export interface VfxAssetDocument {
+  readonly kind: 'vfx-effect';
+  readonly schema: 'com.vfx.effect';
+  readonly schemaVersion: number;
+  readonly effect: JsonValue;
+}
+
+export type RuntimeCallback = (...arguments_: unknown[]) => unknown;
+
+export interface CallbackRef {
+  readonly kind: 'callback-ref';
+  readonly id: string;
+  readonly version: number;
+}
+
+export interface CallbackRegistration {
+  readonly kind: 'callback-registration';
+  readonly ref: CallbackRef;
+  readonly callback: RuntimeCallback;
+}
+
+export interface VfxRegistry {
+  registerCallback(registration: CallbackRegistration): void;
+  registerModule(registration: ModuleRegistration): void;
+  registerTsl(registration: TslFunctionRegistration): void;
+  resolveCallback(reference: CallbackRef): RuntimeCallback | undefined;
+  resolveModule(type: string, version: number): ModuleRegistration | undefined;
+  resolveTsl<Bindings extends object>(
+    reference: TslFunctionRef<Bindings>,
+  ): TslModuleFactory<Bindings> | undefined;
+}
+
+export interface CompileResult<T> {
+  readonly diagnostics: readonly VfxDiagnostic[];
+  readonly ok: boolean;
+  readonly value?: T;
+}
