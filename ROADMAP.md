@@ -99,9 +99,9 @@
 - [ ] GPUフリーリスト(アトミックカウンタによる確保/解放)
 - [ ] 生存数駆動のdrawIndirect(WebGL2フォールバック方針含む)
 - [ ] spawn: rate / burst / per-distance(移動量比例)
-- [ ] エミッタライフサイクル:duration、loop回数、遅延、prewarm
-- [ ] エフェクトローカル時間、タイムスケール、fixed timestepオプション
-- [ ] VFXSystemスケジューラ(複数エフェクト・複数エミッタの更新統括)
+- [x] エミッタライフサイクル:startDelay、duration、loopCount('infinite'可)、prewarm(cold経路とビット一致を実証)— ループ世代→spawnGeneration接続
+- [x] エフェクトローカル時間、タイムスケール、fixed timestepオプション — System.timeはワールド維持・Emitter.deltaTimeのみスケール、hitStop API、アキュムレータ(スパイラル防止+破棄明示)、分割不変性テスト済み
+- [x] VFXSystemスケジューラ(複数エフェクト・複数エミッタの更新統括)— update直列化、WeakMapコンパイルキャッシュ(3インスタンス共有を実証)、状態機械(error遷移・デバイスロスト伝播込み)
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
 ## M3 — レンダラ第一陣
@@ -235,6 +235,7 @@
 | 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
 | 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |
+| 2026-07-11 | M2バッチ1完了:VFXSystemランタイム+時間管理+エミッタライフサイクル(system.ts、/m2-runtime/スモーク6検証全緑、テスト98本)→ClaudeレビューPASS(prewarmビット一致・タイムスケール厳密性を独立再現)→コミット。**バッチ2へ持ち越し**: [SHOULD] maximumLifetimeがcore/lifetime以外のlifetime書込を無視(tslModule時にInfinityフォールバック)/releasedインスタンス使用のNACHI_INSTANCE_RELEASED化、[NIT] prewarm等価性の適用範囲文書化/timeScaleのdtスケール方式文書化/stop()既定意味論/lifetime無宣言エミッタの扱い/デバイスロストのラッチ/RotationInput単位文書化。per-particle世代管理の要否をバッチ2設計で確認 |
 | 2026-07-11 | **M1マイルストーン監査実施**(Codex=fresh/Claude=新規の独立監査→統括裁定)。Codex判定FAIL/Claude判定条件付きPASS→裁定: ①Codexのビルド・テスト失敗はread-onlyサンドボックス起因で**却下**(実環境54/54+build全緑をClaude監査が独立確認) ②Codex実質指摘を採用: $ageマニフェストにParticles.age read追加/二重積分検出(NACHI_INTEGRATION_DOUBLE_APPLY)/gradientのGPU readback検証/名前空間パラメータのGPU反映検証 ③統合VfxRegistryはM12へ・ステージ書込権限検証はM2/M5へ**明示的に先送り**(RFC注記で黙認解消) ④Claude実証指摘を全採用: 乱数ステージ衝突(stage hash混合で解消)/capacity検証/parameterサイレント定数化のエラー化/compileEmitter直呼びラベル検証/vec range成分独立化/WebGL2クリーンゲート。修正後: **テスト68本・GPUスモーク9検証全合格**。パフォーマンス(SwiftShader): spike-compute 100k=3.7ms(前回4.2-5.0msから劣化なし)、m1-kernel 64粒子=0.56ms/4096粒子=2.7ms(M1ベースライン)。ゴールデン回帰は改名前の陳腐化1件のみ(再取得済み)。**最終判定: 条件付きPASS** — M2着手可、ただし**Windows実GPU目視(M0の3項目+float32-filterable)が未消化のままM2の生存数駆動実装に入ることは不可** |
 | 2026-07-11 | M1バッチ2+3完了:カーネルコンパイラ本体(compiler.ts/emitter-modules.ts、2層構造、Proxyトレース、LUTベイク、名前空間uniform v1)→GPUスモーク差し戻し2件(uniform型変換漏れ、**ストレージバッファ上限8超過=SoAのデバイス上限制約を発見**→requiredLimits+コンパイラ診断で解決)→レビューPASS→SHOULD4+NIT6全件修正($defaults/$age顕在化、乱数ストリーム衝突解消、sRGB→linear、レジストリ上書き禁止等)→GPUスモーク7検証全緑・54テスト。**M2前の設計確認事項**: Emitter.spawnGenerationはper-particle世代属性が必要になる公算(レビューNIT-7)。**M1監査時のWindows実GPU確認**: float32-filterable対応 |
 | 2026-07-10 | M1バッチ1完了:属性システム(attributes.ts)+VfxDiagnostic蓄積型(diagnostics.ts)+決定論的乱数(random.ts)、テスト27本→Claudeレビュー PASS(11論理型マッピング・PCG正典定数・ミラー一致テストを独立検算)→コミット。**バッチ2仕様に組込む持ち越し**: [SHOULD] 乱数にspawnGeneration入力追加(インデックス再利用時の同一乱数列防止)/throwゲートをseverity==='error'でフィルタ+未使用カスタム属性warning/ResolvedAttributeにdefault搬送+built-inデフォルト表、[NIT] componentsは論理数と型コメント明記(mat3のGPUストライドは12)/optionalReadsの非対称規則の文書化/JSミラーf64とGPU f32の乖離許容の明文化/モジュール走査ヘルパー統合/mat3・boolのGPUスモーク |
