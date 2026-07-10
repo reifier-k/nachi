@@ -78,13 +78,13 @@
 ## M1 — コンパイラ&データモデル
 
 - [x] 属性システム:属性宣言→ストレージバッファレイアウト(SoA・instancedArray互換)の自動割付 — RFC§5の11論理型マッピング検算済み、VfxDiagnostic蓄積型検証(RFC§12.2)含む
-- [ ] モジュールインターフェース定義(read/write属性の宣言、ステージ所属)
-- [ ] モジュール合成→TSL initカーネル/updateカーネル生成(コンパイラ本体)
-- [ ] 名前空間パラメータ(System/Emitter/Particles/User)とuniformバッファ束ね
+- [x] モジュールインターフェース定義(read/write属性の宣言、ステージ所属)— モジュール契約+実装レジストリ(上書き禁止)+実装トレースとマニフェストの機械照合テスト
+- [x] モジュール合成→TSL initカーネル/updateカーネル生成(コンパイラ本体)— compileEmitter() 2層構造(three非依存記述+buildKernels実体化)、$defaults/$age/$integrate予約モジュール、GPUスモーク7検証合格
+- [x] 名前空間パラメータ(System/Emitter/Particles/User)とuniformバッファ束ね — v1(System.time/deltaTime、Emitter.deltaTime、User.*デフォルトuniform。実時間管理の配線はM2)
 - [x] 決定論的乱数(PCGハッシュ、シード管理)— PCG RXS-M-XS、TSLノード+JSミラーの演算列一致テスト付き。**注**: spawn generation入力の追加(RFC§2.6完全準拠)はバッチ2冒頭で
-- [ ] curve()/gradient() → LUTテクスチャベイク
-- [ ] tslModule() エスケープハッチ
-- [ ] コンパイラのユニットテスト(生成カーネルのスナップショット+数値検証)
+- [x] curve()/gradient() → LUTテクスチャベイク — 256サンプル線形補間、色はsRGB→linear変換、CPU参照とのGPU実測一致
+- [x] tslModule() エスケープハッチ — Proxyトレースによるaccess導出(不在時)+宣言⊇トレース検証(RFC§8.1)
+- [x] コンパイラのユニットテスト(生成カーネルのスナップショット+数値検証)— 54テスト(スナップショット・LUT数値・トレース・乱数ストリーム回帰含む)
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
 ## M2 — スポーンとライフサイクル
@@ -228,4 +228,5 @@
 | 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
 | 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |
+| 2026-07-11 | M1バッチ2+3完了:カーネルコンパイラ本体(compiler.ts/emitter-modules.ts、2層構造、Proxyトレース、LUTベイク、名前空間uniform v1)→GPUスモーク差し戻し2件(uniform型変換漏れ、**ストレージバッファ上限8超過=SoAのデバイス上限制約を発見**→requiredLimits+コンパイラ診断で解決)→レビューPASS→SHOULD4+NIT6全件修正($defaults/$age顕在化、乱数ストリーム衝突解消、sRGB→linear、レジストリ上書き禁止等)→GPUスモーク7検証全緑・54テスト。**M2前の設計確認事項**: Emitter.spawnGenerationはper-particle世代属性が必要になる公算(レビューNIT-7)。**M1監査時のWindows実GPU確認**: float32-filterable対応 |
 | 2026-07-10 | M1バッチ1完了:属性システム(attributes.ts)+VfxDiagnostic蓄積型(diagnostics.ts)+決定論的乱数(random.ts)、テスト27本→Claudeレビュー PASS(11論理型マッピング・PCG正典定数・ミラー一致テストを独立検算)→コミット。**バッチ2仕様に組込む持ち越し**: [SHOULD] 乱数にspawnGeneration入力追加(インデックス再利用時の同一乱数列防止)/throwゲートをseverity==='error'でフィルタ+未使用カスタム属性warning/ResolvedAttributeにdefault搬送+built-inデフォルト表、[NIT] componentsは論理数と型コメント明記(mat3のGPUストライドは12)/optionalReadsの非対称規則の文書化/JSミラーf64とGPU f32の乖離許容の明文化/モジュール走査ヘルパー統合/mat3・boolのGPUスモーク |
