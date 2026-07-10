@@ -72,6 +72,7 @@ describe('deterministic PCG random', () => {
       outputMultiplier: 277_803_737,
       outputShift: 22,
       particleIndexMix: 0x9e3779b1,
+      spawnGenerationMix: 0x27d4eb2f,
       stateIncrement: 2_891_336_453,
       stateMultiplier: 747_796_405,
       stateShift: 28,
@@ -84,13 +85,16 @@ describe('deterministic PCG random', () => {
       new TraceUint(123, operations),
       new TraceUint(456, operations),
       9,
+      new TraceUint(7, operations),
     );
 
-    expect(nodeValue.value).toBe(pcgRandomFloat(123, 456, 9));
+    expect(nodeValue.value).toBe(pcgRandomFloat(123, 456, 9, 7));
     expect(operations.map(([name]) => name)).toEqual([
       'uint.mul',
       'uint.mul',
       'uint.bitXor',
+      'uint.bitXor',
+      'uint.mul',
       'uint.bitXor',
       'uint.mul',
       'uint.add',
@@ -106,22 +110,23 @@ describe('deterministic PCG random', () => {
     ]);
     expect(operations[0]?.[1]).toBe(0x9e3779b1);
     expect(operations[1]?.[1]).toBe(0x85ebca77);
-    expect(operations[4]?.[1]).toBe(747_796_405);
-    expect(operations[5]?.[1]).toBe(2_891_336_453);
-    expect(operations[10]?.[1]).toBe(277_803_737);
+    expect(operations[4]?.[1]).toBe(0x27d4eb2f);
+    expect(operations[6]?.[1]).toBe(747_796_405);
+    expect(operations[7]?.[1]).toBe(2_891_336_453);
+    expect(operations[12]?.[1]).toBe(277_803_737);
   });
 
   it('returns deterministic values for identical inputs', () => {
-    const expected = pcgRandomFloat(12_345, 678, 9);
-    expect(pcgRandomFloat(12_345, 678, 9)).toBe(expected);
-    expect(pcgRandomFloat(12_345, 678, 9)).toBe(expected);
+    const expected = pcgRandomFloat(12_345, 678, 9, 2);
+    expect(pcgRandomFloat(12_345, 678, 9, 2)).toBe(expected);
+    expect(pcgRandomFloat(12_345, 678, 9, 2)).toBe(expected);
   });
 
   it('stays in [0, 1) with a coarse uniform distribution', () => {
     const bins = Array.from({ length: 10 }, () => 0);
     let total = 0;
     for (let particleIndex = 0; particleIndex < 10_000; particleIndex += 1) {
-      const value = pcgRandomFloat(particleIndex, 73, 5);
+      const value = pcgRandomFloat(particleIndex, 73, 5, 0);
       expect(value).toBeGreaterThanOrEqual(0);
       expect(value).toBeLessThan(1);
       total += value;
@@ -139,7 +144,7 @@ describe('deterministic PCG random', () => {
     const differences = Array.from(
       { length: 256 },
       (_, particleIndex) =>
-        pcgRandomFloat(particleIndex, 10, 3) !== pcgRandomFloat(particleIndex, 11, 3),
+        pcgRandomFloat(particleIndex, 10, 3, 0) !== pcgRandomFloat(particleIndex, 11, 3, 0),
     ).filter(Boolean);
     expect(differences.length).toBeGreaterThan(250);
   });
@@ -148,7 +153,16 @@ describe('deterministic PCG random', () => {
     const differences = Array.from(
       { length: 256 },
       (_, particleIndex) =>
-        pcgRandomFloat(particleIndex, 10, 3) !== pcgRandomFloat(particleIndex, 10, 4),
+        pcgRandomFloat(particleIndex, 10, 3, 0) !== pcgRandomFloat(particleIndex, 10, 4, 0),
+    ).filter(Boolean);
+    expect(differences.length).toBeGreaterThan(250);
+  });
+
+  it('changes streams when the spawn generation changes', () => {
+    const differences = Array.from(
+      { length: 256 },
+      (_, particleIndex) =>
+        pcgRandomFloat(particleIndex, 10, 3, 0) !== pcgRandomFloat(particleIndex, 10, 3, 1),
     ).filter(Boolean);
     expect(differences.length).toBeGreaterThan(250);
   });

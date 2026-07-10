@@ -38,6 +38,9 @@ importers:
 
   apps/playground:
     dependencies:
+      '@nachi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       three:
         specifier: 0.185.1
         version: 0.185.1

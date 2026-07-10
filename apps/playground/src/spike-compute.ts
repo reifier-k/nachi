@@ -21,6 +21,7 @@ import {
 } from 'three/tsl';
 
 import { createPerformanceMonitor } from './perf';
+import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';
 
 const DEFAULT_PARTICLE_COUNT = 100_000;
@@ -284,7 +285,7 @@ function installWebGlShaderErrorTrap(renderer: THREE.WebGPURenderer): void {
 }
 
 async function runSpike(): Promise<void> {
-  const renderer = new THREE.WebGPURenderer({
+  const renderer = await createPlaygroundRenderer({
     antialias: !headless,
     forceWebGL: requestedBackend === 'webgl',
     trackTimestamp: true,

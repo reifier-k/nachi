@@ -15,6 +15,7 @@ import {
 } from 'three/tsl';
 
 import { createPerformanceMonitor } from './perf';
+import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-depth.css';
 
 type BackendName = 'WebGL2' | 'WebGPU';
@@ -117,7 +118,7 @@ function recordFailure(error: unknown): void {
 async function runDepthSpike(): Promise<void> {
   const width = Math.max(window.innerWidth, 640);
   const height = Math.max(window.innerHeight, 360);
-  const renderer = new THREE.WebGPURenderer({
+  const renderer = await createPlaygroundRenderer({
     antialias: true,
     forceWebGL: requestedBackend === 'webgl',
     trackTimestamp: true,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   VfxDiagnosticError,
+  BUILT_IN_ATTRIBUTE_DEFAULTS,
   attribute,
   billboard,
   burst,
@@ -41,6 +42,23 @@ function diagnosticCodes(error: unknown): string[] {
 }
 
 describe('resolved attribute schema', () => {
+  it('defines deterministic defaults for every built-in attribute', () => {
+    expect(BUILT_IN_ATTRIBUTE_DEFAULTS).toEqual({
+      age: 0,
+      alive: true,
+      color: [1, 1, 1, 1],
+      lifetime: 1,
+      mass: 1,
+      normalizedAge: 0,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0, 1],
+      scale: [1, 1, 1],
+      size: 1,
+      spriteRotation: 0,
+      velocity: [0, 0, 0],
+    });
+  });
+
   it('maps all eleven logical types to TSL instanced-array storage types', () => {
     const result = resolveAttributeSchema({
       attributes: {
@@ -113,6 +131,8 @@ describe('resolved attribute schema', () => {
       'spriteRotation',
     ]);
     expect(result.value?.attributes.every(({ source }) => source === 'built-in')).toBe(true);
+    expect(result.value?.byName.position?.default).toEqual([0, 0, 0]);
+    expect(result.value?.byName.velocity?.default).toEqual([0, 0, 0]);
     expect(result.value?.storageArrays.map(({ index }) => index)).toEqual([0, 1, 2, 3, 4]);
   });
 

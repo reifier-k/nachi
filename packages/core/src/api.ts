@@ -1,5 +1,6 @@
 import { resolveAttributeSchema } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
+import { collectEmitterModules } from './emitter-modules.js';
 import type {
   AttributeDefinition,
   AttributeSchema,
@@ -127,42 +128,8 @@ function addEventQueueWrite(module: EventModule, eventName: string): EventModule
   };
 }
 
-type LocatedModule = {
-  readonly module: ModuleDefinition<ModuleStage, object>;
-  readonly path: string;
-};
-
 function compileDiagnostic(code: string, message: string, path: string): VfxDiagnostic {
   return { code, message, path, phase: 'compile', severity: 'error' };
-}
-
-function appendLocatedModules(
-  target: LocatedModule[],
-  path: string,
-  value:
-    | ModuleDefinition<ModuleStage, object>
-    | readonly ModuleDefinition<ModuleStage, object>[]
-    | undefined,
-): void {
-  if (value === undefined) return;
-  const modules = Array.isArray(value) ? value : [value];
-  for (const [index, module] of modules.entries()) {
-    target.push({ module, path: `${path}[${index}]` });
-  }
-}
-
-function collectEmitterModules(
-  config: EmitterConfig<AttributeSchema, ParameterSchema>,
-): LocatedModule[] {
-  const modules: LocatedModule[] = [];
-  appendLocatedModules(modules, 'spawn', config.spawn);
-  appendLocatedModules(modules, 'init', config.init);
-  appendLocatedModules(modules, 'update', config.update);
-  for (const [eventName, handlers] of Object.entries(config.events ?? {})) {
-    appendLocatedModules(modules, `events.${eventName}`, handlers);
-  }
-  appendLocatedModules(modules, 'render', config.render);
-  return modules;
 }
 
 function collectModuleLabelDiagnostics(
@@ -217,8 +184,8 @@ function collectModuleLabelDiagnostics(
 }
 
 export function range<T extends number | Vec2 | Vec3 | Vec4>(min: T, max: T): RangeGenerator<T> {
-  // The M1 stage compiler will resolve this generator with pcgRandomFloatNode(), using the
-  // containing module's label-derived slot or normalized stage index. This helper stays data-only.
+  // The stage compiler resolves this with pcgRandomFloatNode(particleIndex, emitterSeed,
+  // moduleSlot, spawnGeneration). moduleSlot is label-derived or the normalized stage index.
   return { distribution: 'uniform', kind: 'range', max, min };
 }
 
@@ -306,7 +273,9 @@ export function defineEmitter<
     ...collectModuleLabelDiagnostics(normalizedConfig),
     ...collectParameterPathDiagnostics(normalizedConfig.parameters),
   ];
-  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
+  if (diagnostics.some(({ severity }) => severity === 'error')) {
+    throw new VfxDiagnosticError(diagnostics);
+  }
 
   return { ...normalizedConfig, kind: 'emitter' } as EmitterDefinition<Attributes, Parameters>;
 }
@@ -320,14 +289,14 @@ export function burst(options: BurstOptions): SpawnModule {
 
 export function positionSphere(options: PositionSphereOptions): InitModule {
   return createModule('init', 'core/position-sphere', options, {
-    reads: ['Emitter.transform'],
+    reads: ['Emitter.transform', 'Emitter.seed', 'Emitter.spawnGeneration'],
     writes: ['Particles.position'],
   });
 }
 
 export function velocityCone(options: VelocityConeOptions): InitModule {
   return createModule('init', 'core/velocity-cone', options, {
-    reads: ['Particles.position'],
+    reads: ['Emitter.seed', 'Emitter.spawnGeneration'],
     writes: ['Particles.velocity'],
   });
 }
@@ -523,7 +492,9 @@ export function defineEffect<
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
 >(config: EffectConfig<Elements, Parameters>): EffectDefinition<Elements, Parameters> {
   const diagnostics = collectParameterPathDiagnostics(config.parameters);
-  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
+  if (diagnostics.some(({ severity }) => severity === 'error')) {
+    throw new VfxDiagnosticError(diagnostics);
+  }
   return { ...config, kind: 'effect' } as EffectDefinition<Elements, Parameters>;
 }
 

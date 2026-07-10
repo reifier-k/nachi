@@ -1,3 +1,4 @@
+import { collectEmitterModules } from './emitter-modules.js';
 import type {
   AttributeComponentCount,
   AttributeDefinition,
@@ -6,8 +7,6 @@ import type {
   CompileResult,
   EmitterConfig,
   EmptyParameterSchema,
-  ModuleDefinition,
-  ModuleStage,
   ParameterSchema,
   ResolvedAttribute,
   ResolvedAttributeSchema,
@@ -34,61 +33,50 @@ const ATTRIBUTE_LAYOUTS: Readonly<Record<AttributeType, AttributeLayout>> = {
   vec4: { components: 4, storageType: 'vec4' },
 };
 
-const BUILT_IN_ATTRIBUTES = [
-  ['position', 'vec3'],
-  ['velocity', 'vec3'],
-  ['age', 'f32'],
-  ['lifetime', 'f32'],
-  ['normalizedAge', 'f32'],
-  ['alive', 'bool'],
-  ['color', 'color'],
-  ['size', 'f32'],
-  ['scale', 'vec3'],
-  ['rotation', 'quat'],
-  ['spriteRotation', 'f32'],
-  ['mass', 'f32'],
-] as const satisfies readonly (readonly [string, AttributeType])[];
+export function resolveTslStorageType(type: AttributeType): TslStorageType {
+  return ATTRIBUTE_LAYOUTS[type].storageType;
+}
 
-const BUILT_IN_TYPES = new Map<string, AttributeType>(BUILT_IN_ATTRIBUTES);
+export const BUILT_IN_ATTRIBUTE_DEFAULTS = {
+  age: 0,
+  alive: true,
+  color: [1, 1, 1, 1],
+  lifetime: 1,
+  mass: 1,
+  normalizedAge: 0,
+  position: [0, 0, 0],
+  rotation: [0, 0, 0, 1],
+  scale: [1, 1, 1],
+  size: 1,
+  spriteRotation: 0,
+  velocity: [0, 0, 0],
+} as const;
+
+const BUILT_IN_ATTRIBUTES = [
+  ['position', 'vec3', BUILT_IN_ATTRIBUTE_DEFAULTS.position],
+  ['velocity', 'vec3', BUILT_IN_ATTRIBUTE_DEFAULTS.velocity],
+  ['age', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.age],
+  ['lifetime', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.lifetime],
+  ['normalizedAge', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.normalizedAge],
+  ['alive', 'bool', BUILT_IN_ATTRIBUTE_DEFAULTS.alive],
+  ['color', 'color', BUILT_IN_ATTRIBUTE_DEFAULTS.color],
+  ['size', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.size],
+  ['scale', 'vec3', BUILT_IN_ATTRIBUTE_DEFAULTS.scale],
+  ['rotation', 'quat', BUILT_IN_ATTRIBUTE_DEFAULTS.rotation],
+  ['spriteRotation', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.spriteRotation],
+  ['mass', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.mass],
+] as const satisfies readonly (readonly [string, AttributeType, unknown])[];
+
+const BUILT_IN_TYPES = new Map<string, AttributeType>(
+  BUILT_IN_ATTRIBUTES.map(([name, type]) => [name, type]),
+);
 
 function isAttributeType(value: unknown): value is AttributeType {
   return typeof value === 'string' && Object.hasOwn(ATTRIBUTE_LAYOUTS, value);
 }
 
-type LocatedModule = {
-  readonly module: ModuleDefinition<ModuleStage, object>;
-  readonly path: string;
-};
-
 function diagnostic(code: string, message: string, path: string): VfxDiagnostic {
   return { code, message, path, phase: 'compile', severity: 'error' };
-}
-
-function appendModules(
-  target: LocatedModule[],
-  path: string,
-  value:
-    | ModuleDefinition<ModuleStage, object>
-    | readonly ModuleDefinition<ModuleStage, object>[]
-    | undefined,
-): void {
-  if (value === undefined) return;
-  const modules = Array.isArray(value) ? value : [value];
-  for (const [index, module] of modules.entries()) {
-    target.push({ module, path: `${path}[${index}]` });
-  }
-}
-
-function collectModules(config: EmitterConfig<AttributeSchema, ParameterSchema>): LocatedModule[] {
-  const modules: LocatedModule[] = [];
-  appendModules(modules, 'spawn', config.spawn);
-  appendModules(modules, 'init', config.init);
-  appendModules(modules, 'update', config.update);
-  for (const [eventName, handlers] of Object.entries(config.events ?? {})) {
-    appendModules(modules, `events.${eventName}`, handlers);
-  }
-  appendModules(modules, 'render', config.render);
-  return modules;
 }
 
 function readParticleAttribute(reference: string): string | undefined {
@@ -149,7 +137,7 @@ export function resolveAttributeSchema<
   }
 
   const usedBuiltIns = new Set<string>();
-  for (const { module, path } of collectModules(config)) {
+  for (const { module, path } of collectEmitterModules(config)) {
     const requiredAccesses = [
       ['reads', module.access?.reads],
       ['writes', module.access?.writes],
@@ -171,6 +159,8 @@ export function resolveAttributeSchema<
         }
       }
     }
+    // Missing required reads are errors. Optional reads are asymmetric: a known built-in is
+    // allocated, while an absent optional path is intentionally ignored so its fallback can run.
     for (const reference of module.access?.optionalReads ?? []) {
       const name = readParticleAttribute(reference);
       if (name !== undefined && BUILT_IN_TYPES.has(name)) usedBuiltIns.add(name);
@@ -179,19 +169,27 @@ export function resolveAttributeSchema<
 
   const resolvedInputs: Array<{
     readonly logicalType: AttributeType;
+    readonly default: ResolvedAttribute['default'];
     readonly name: string;
     readonly source: 'built-in' | 'custom';
     readonly transient: boolean;
   }> = [];
-  for (const [name, logicalType] of BUILT_IN_ATTRIBUTES) {
+  for (const [name, logicalType, defaultValue] of BUILT_IN_ATTRIBUTES) {
     if (usedBuiltIns.has(name)) {
-      resolvedInputs.push({ logicalType, name, source: 'built-in', transient: false });
+      resolvedInputs.push({
+        default: defaultValue as ResolvedAttribute['default'],
+        logicalType,
+        name,
+        source: 'built-in',
+        transient: false,
+      });
     }
   }
   for (const [name, definition] of [...customAttributes.entries()].sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
     resolvedInputs.push({
+      default: definition.default as ResolvedAttribute['default'],
       logicalType: definition.type,
       name,
       source: 'custom',

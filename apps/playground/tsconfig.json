@@ -1,8 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "baseUrl": "../..",
     "types": ["vite/client"],
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@nachi/core": ["packages/core/src/index.ts"]
+    }
   },
   "include": ["src/**/*.ts", "vite.config.ts"]
 }

@@ -122,12 +122,14 @@ export interface AttributeDefinition<
 
 export type AttributeSchema = Readonly<Record<string, AttributeDefinition>>;
 
+/** Logical component count. Backend layout owns padding (for example, mat3 has physical stride 12). */
 export type AttributeComponentCount = 1 | 2 | 3 | 4 | 9 | 16;
 export type TslStorageType = 'float' | 'int' | 'mat3' | 'mat4' | 'uint' | 'vec2' | 'vec3' | 'vec4';
 export type ResolvedAttributeSource = 'built-in' | 'custom';
 
 export interface ResolvedAttribute {
   readonly components: AttributeComponentCount;
+  readonly default: ValueInput<AttributeTypeMap[AttributeType]>;
   readonly logicalType: AttributeType;
   readonly name: string;
   readonly path: ParticleAttributePath;

@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@nachi/core": "workspace:*",
     "three": "0.185.1",
     "tweakpane": "4.0.5"
   },

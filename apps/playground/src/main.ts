@@ -3,6 +3,7 @@ import { color, mix, normalLocal, positionLocal, sin, time } from 'three/tsl';
 import { Pane } from 'tweakpane';
 
 import { createPerformanceMonitor } from './perf';
+import { createPlaygroundRenderer } from './webgpu-renderer';
 import './style.css';
 
 const sceneHost = document.querySelector<HTMLDivElement>('#scene');
@@ -26,7 +27,11 @@ scene.background = new THREE.Color(0x050813);
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
 camera.position.set(0, 0.15, 4.6);
 
-const renderer = new THREE.WebGPURenderer({ antialias: true, forceWebGL, trackTimestamp: true });
+const renderer = await createPlaygroundRenderer({
+  antialias: true,
+  forceWebGL,
+  trackTimestamp: true,
+});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 sceneHost.append(renderer.domElement);
