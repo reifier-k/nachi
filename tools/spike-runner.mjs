@@ -27,7 +27,7 @@ function parseArguments(arguments_) {
 
   if (positional.length > 1 || !Object.hasOwn(ADAPTER_FLAGS, adapter)) {
     throw new Error(
-      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default]',
+      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default] (requires `pnpm dev` to be running)',
     );
   }
 
@@ -42,6 +42,7 @@ function parseArguments(arguments_) {
 
 const diagnostics = { console: [], pageErrors: [] };
 let browser;
+let adapterInfo;
 let target = { adapter: 'swiftshader', url: `${DEFAULT_URL}?headless=1` };
 let outcome;
 
@@ -63,6 +64,12 @@ try {
   });
 
   await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  adapterInfo = await page.evaluate(async () => {
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (!adapter) return null;
+    const { architecture, description, device, vendor } = adapter.info;
+    return { architecture, description, device, vendor };
+  });
   await page.waitForFunction(
     () =>
       ['complete', 'error', 'device-lost'].includes(
@@ -85,14 +92,10 @@ try {
   const result = JSON.parse(harnessState.result);
   outcome = {
     ...result,
-    ok:
-      harnessState.status === 'complete' &&
-      result.ok === true &&
-      result.computeOk === true &&
-      result.atomicOk === true &&
-      result.indirectOk === true,
+    ok: harnessState.status === 'complete' && result.ok === true,
     url: target.url,
     requestedAdapter: target.adapter,
+    adapterInfo,
     backend: harnessState.backend,
     diagnostics,
   };
@@ -108,6 +111,7 @@ try {
     indirectOk: false,
     url: target.url,
     requestedAdapter: target.adapter,
+    adapterInfo,
     error: error instanceof Error ? error.message : String(error),
     diagnostics,
   };

@@ -6,6 +6,7 @@ export default defineConfig({
       input: {
         playground: 'index.html',
         spikeCompute: 'spike-compute/index.html',
+        spikeDepth: 'spike-depth/index.html',
       },
     },
   },

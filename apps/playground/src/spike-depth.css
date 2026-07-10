@@ -1,0 +1,115 @@
+:root {
+  color: #edfaff;
+  background: #050713;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app,
+#scene {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  min-width: 320px;
+  background: #050713;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.depth-hud {
+  position: fixed;
+  z-index: 2;
+  top: 1rem;
+  left: 1rem;
+  width: min(36rem, calc(100vw - 2rem));
+  padding: 0.95rem 1.05rem;
+  border: 1px solid rgb(95 222 255 / 25%);
+  border-radius: 0.8rem;
+  background: rgb(3 9 24 / 82%);
+  box-shadow: 0 1rem 3rem rgb(0 0 0 / 40%);
+  backdrop-filter: blur(14px);
+  pointer-events: none;
+}
+
+.eyebrow {
+  margin: 0 0 0.25rem;
+  color: #63e4ff;
+  font-size: 0.64rem;
+  font-weight: 750;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.08rem;
+  font-weight: 640;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0;
+}
+
+dl div {
+  min-width: 0;
+}
+
+.status-row {
+  grid-column: 1 / -1;
+}
+
+dt {
+  color: #8194aa;
+  font-size: 0.59rem;
+  letter-spacing: 0.075em;
+  text-transform: uppercase;
+}
+
+dd {
+  overflow: hidden;
+  margin: 0.12rem 0 0;
+  color: #fff;
+  font-size: 0.77rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-renderer-status='device-lost'] #status-value,
+html[data-spike-status='error'] #status-value {
+  color: #ff7088;
+}
+
+html[data-headless='true'] .depth-hud,
+html[data-headless='true'] #scene {
+  display: none;
+}
+
+@media (width <= 620px) {
+  dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

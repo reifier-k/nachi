@@ -222,4 +222,15 @@ describe('PLAN.md north-star API', () => {
       expect(module.access?.reads).not.toContain('System.deltaTime');
     }
   });
+
+  it('rejects compiler-reserved module labels on user-authored emitters', () => {
+    const reservedSpawn = { ...burst({ count: 1 }), label: '$custom' };
+    expect(() =>
+      defineEmitter({
+        capacity: 1,
+        spawn: reservedSpawn,
+        render: billboard({}),
+      }),
+    ).toThrow('compiler-reserved "$" prefix');
+  });
 });

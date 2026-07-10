@@ -124,6 +124,23 @@ function addEventQueueWrite(module: EventModule, eventName: string): EventModule
   };
 }
 
+function rejectCompilerReservedLabels(
+  config: EmitterConfig<AttributeSchema, ParameterSchema>,
+): void {
+  const asArray = (value: unknown): readonly ModuleDefinition[] =>
+    value === undefined ? [] : Array.isArray(value) ? value : [value as ModuleDefinition];
+  const modules = [
+    ...asArray(config.spawn),
+    ...asArray(config.init),
+    ...asArray(config.update),
+    ...Object.values(config.events ?? {}).flatMap(asArray),
+    ...asArray(config.render),
+  ];
+  const reserved = modules.find((module) => module.label?.startsWith('$'));
+  if (reserved)
+    throw new Error(`Module label "${reserved.label}" uses the compiler-reserved "$" prefix.`);
+}
+
 export function range<T extends number | Vec2 | Vec3 | Vec4>(min: T, max: T): RangeGenerator<T> {
   return { distribution: 'uniform', kind: 'range', max, min };
 }
@@ -180,6 +197,7 @@ export function defineEmitter<
   const Attributes extends AttributeSchema = AttributeSchema,
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
 >(config: EmitterConfig<Attributes, Parameters>): EmitterDefinition<Attributes, Parameters> {
+  rejectCompilerReservedLabels(config);
   for (const [key, definition] of Object.entries(config.attributes ?? {})) {
     if (key !== definition.name) {
       throw new Error(`Attribute key "${key}" must match its declared name "${definition.name}".`);

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#050713" />
+    <link rel="icon" href="data:," />
+    <title>VFX Depth + Post Spike</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="depth-hud" aria-label="Depth and post-processing spike status">
+        <p class="eyebrow">Technical spike 4</p>
+        <h1>Viewport Depth + TSL Post</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing…</dd>
+          </div>
+          <div>
+            <dt>Depth fade</dt>
+            <dd id="fade-value">--</dd>
+          </div>
+          <div>
+            <dt>Depth access</dt>
+            <dd id="depth-value">Pending</dd>
+          </div>
+          <div>
+            <dt>Post pipeline</dt>
+            <dd id="post-value">Pending</dd>
+          </div>
+          <div class="status-row">
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <div id="scene" aria-label="Depth fade and distortion scene"></div>
+    </main>
+    <script type="module" src="/src/spike-depth.ts"></script>
+  </body>
+</html>
