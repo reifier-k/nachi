@@ -436,7 +436,7 @@ export interface EffectSpawnOptions<Definition = EffectDefinition> {
   readonly timeScale?: number;
 }
 
-export type EffectInstanceState = 'active' | 'complete' | 'released' | 'stopped';
+export type EffectInstanceState = 'active' | 'complete' | 'error' | 'released' | 'stopped';
 
 export interface EffectInstance<Definition = EffectDefinition> {
   readonly definition: Definition;
@@ -503,7 +503,7 @@ export interface VfxDiagnostic {
 
 export interface VfxAssetDocument {
   readonly kind: 'vfx-effect';
-  readonly schema: 'com.vfx.effect';
+  readonly schema: 'com.nachi.effect';
   readonly schemaVersion: number;
   readonly effect: JsonValue;
 }

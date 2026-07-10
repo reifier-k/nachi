@@ -20,7 +20,7 @@ type GpuMetric = {
 };
 
 export type PerformanceSnapshot = {
-  schema: 'vfx.perf-baseline';
+  schema: 'nachi.perf-baseline';
   schemaVersion: 1;
   page: string;
   backend: 'WebGL2' | 'WebGPU' | 'unknown';
@@ -174,7 +174,7 @@ export class PerformanceMonitor {
         renderCalls: info.render.frameCalls,
         triangles: info.render.triangles,
       },
-      schema: 'vfx.perf-baseline',
+      schema: 'nachi.perf-baseline',
       schemaVersion: 1,
       window: { capacity: this.#options.windowSize, samples: this.#frameSamples.length },
     };

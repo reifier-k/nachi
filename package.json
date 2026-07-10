@@ -1,5 +1,5 @@
 {
-  "name": "vfx-workspace",
+  "name": "nachi-workspace",
   "version": "0.0.0",
   "private": true,
   "engines": {
@@ -23,7 +23,6 @@
     "prettier": "3.8.2",
     "typescript": "5.9.3",
     "typescript-eslint": "8.55.0",
-    "vite": "7.3.1",
     "vitest": "4.0.18"
   }
 }

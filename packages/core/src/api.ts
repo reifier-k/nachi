@@ -193,6 +193,14 @@ export function attribute<const Name extends string, const Type extends Attribut
   return { kind: 'attribute', name, ...options };
 }
 
+function validateParameterPaths(parameters: ParameterSchema | undefined): void {
+  for (const [key, definition] of Object.entries(parameters ?? {})) {
+    if (key !== definition.path) {
+      throw new Error(`Parameter key "${key}" must match its declared path "${definition.path}".`);
+    }
+  }
+}
+
 export function defineEmitter<
   const Attributes extends AttributeSchema = AttributeSchema,
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
@@ -203,6 +211,7 @@ export function defineEmitter<
       throw new Error(`Attribute key "${key}" must match its declared name "${definition.name}".`);
     }
   }
+  validateParameterPaths(config.parameters);
 
   const events = config.events
     ? Object.fromEntries(
@@ -430,6 +439,7 @@ export function defineEffect<
   const Elements extends EffectElements,
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
 >(config: EffectConfig<Elements, Parameters>): EffectDefinition<Elements, Parameters> {
+  validateParameterPaths(config.parameters);
   return { ...config, kind: 'effect' } as EffectDefinition<Elements, Parameters>;
 }
 
@@ -439,10 +449,13 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     readonly scene: Scene,
   ) {}
 
-  spawn<Definition extends { readonly kind: 'effect' }>(
-    _definition: Definition,
-    _options: EffectSpawnOptions<Definition> = {},
-  ): EffectInstance<Definition> {
+  spawn<
+    const Elements extends EffectElements,
+    const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
+  >(
+    _definition: EffectDefinition<Elements, Parameters>,
+    _options: EffectSpawnOptions<EffectDefinition<Elements, Parameters>> = {},
+  ): EffectInstance<EffectDefinition<Elements, Parameters>> {
     void _definition;
     void _options;
     throw new Error('VFXSystem runtime is not implemented yet.');

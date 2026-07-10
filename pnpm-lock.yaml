@@ -32,9 +32,6 @@ importers:
       typescript-eslint:
         specifier: 8.55.0
         version: 8.55.0(eslint@9.39.2)(typescript@5.9.3)
-      vite:
-        specifier: 7.3.1
-        version: 7.3.1(@types/node@24.10.13)
       vitest:
         specifier: 4.0.18
         version: 4.0.18(@types/node@24.10.13)
@@ -49,7 +46,7 @@ importers:
         version: 4.0.5
     devDependencies:
       '@tweakpane/core':
-        specifier: ^2.0.5
+        specifier: 2.0.5
         version: 2.0.5
       '@types/three':
         specifier: 0.185.0

@@ -155,6 +155,12 @@ function invalidTimelineTargetExample() {
   });
 }
 
+function invalidEffectSpawnExample(): void {
+  const fx = new VFXSystem(renderer, scene);
+  // @ts-expect-error Spawn requires a complete structurally typed effect definition.
+  fx.spawn({ kind: 'effect' } as const);
+}
+
 type HeatBindings = TslParticleBindings<{ heat: number }>;
 
 function customAttributeTslExample(): UpdateModule {
@@ -175,6 +181,7 @@ describe('PLAN.md north-star API', () => {
     expectTypeOf(northStarApiExample).returns.toMatchTypeOf<{ readonly kind: 'effect' }>();
     expectTypeOf(parameterizedEffectExample).returns.toMatchTypeOf<{ readonly kind: 'effect' }>();
     expectTypeOf(invalidTimelineTargetExample).returns.toMatchTypeOf<{ readonly kind: 'effect' }>();
+    expectTypeOf(invalidEffectSpawnExample).returns.toEqualTypeOf<void>();
   });
 
   it('type-checks the inline TSL escape hatch', () => {
@@ -232,5 +239,31 @@ describe('PLAN.md north-star API', () => {
         render: billboard({}),
       }),
     ).toThrow('compiler-reserved "$" prefix');
+  });
+
+  it('rejects parameter record keys that differ from their declared paths', () => {
+    const mismatchedParameters = {
+      'User.alias': defineParameter('User.actual', { default: 1, type: 'f32' }),
+    };
+    const emitter = defineEmitter({
+      capacity: 1,
+      spawn: burst({ count: 1 }),
+      render: billboard({}),
+    });
+
+    expect(() =>
+      defineEmitter({
+        capacity: 1,
+        parameters: mismatchedParameters,
+        spawn: burst({ count: 1 }),
+        render: billboard({}),
+      }),
+    ).toThrow('Parameter key "User.alias" must match its declared path "User.actual".');
+    expect(() =>
+      defineEffect({
+        elements: { emitter },
+        parameters: mismatchedParameters,
+      }),
+    ).toThrow('Parameter key "User.alias" must match its declared path "User.actual".');
   });
 });

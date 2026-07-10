@@ -55,7 +55,7 @@ const root = document.documentElement;
 const query = new URLSearchParams(window.location.search);
 const requestedBackend = readBackend();
 const headless = query.get('headless') === '1';
-const staticMode = query.get('static') === '1';
+const staticMode = headless || query.get('static') === '1';
 
 root.dataset.backendRequested = requestedBackend;
 root.dataset.depthFade = query.get('fade') === '0' ? 'off' : 'on';

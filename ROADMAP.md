@@ -61,7 +61,7 @@
 | Grid2D/3D流体(Niagara Fluids相当) | M12 | ⬜ |
 | Neighbor grid / boids / PBD | M12 | ⬜ |
 
-## M0 — 基盤とスパイク 🚧
+## M0 — 基盤とスパイク ✅(条件付きPASS)
 
 - [x] リポジトリ初期化:git init、pnpmモノレポ、TypeScript strict、vitest、ESLint/Prettier、CI雛形
 - [x] playground雛形(Vite + three.js WebGPURenderer + tweakpane)— TSLマテリアル、`?backend=webgl`切替、device.lost監視HUD付き
@@ -69,11 +69,11 @@
 - [x] スパイク1:TSLコンピュートで10万パーティクル(ストレージバッファ、instanced描画)— /spike-compute/ ページ+tools/spike-runner.mjs。ヘッドレス実証済み(数値の詳細はPLAN決定事項ログ)
 - [x] スパイク2:drawIndirect / dispatchIndirect の可否と生存数駆動描画 — 間接描画引数のGPU駆動+dispatchIndirect(X=ceil(alive/64))をreadback実証。**注**: drawIndexedIndirect実行自体のWindows実GPU目視はM0監査時に実施(ヘッドレスはpresent不可のため)
 - [x] スパイク3:WebGL2バックエンドでの同コードの動作範囲実測 — サポートマトリクス実測済み(コンピュート/readback=可、アトミクス/間接=不可)。詳細はPLAN決定事項ログ
-- [x] スパイク4:深度テクスチャアクセス(ソフトパーティクル)とTSLポストパイプラインの共存確認 — /spike-depth/ で両立実証(WebGL2ピクセル検証+目視、WebGPUはencode成功まで)。ポスト統合点はRenderPipeline
-- [x] パフォーマンス計測ハーネス(FPS/フレーム時間/JSヒープ/描画コール数+**GPU timestamp query**をplaygroundに常設、`vfx.perf-baseline` schema v1、spike-runnerで回収可)— SwiftShaderでもtimestamp-query利用可と実証(100k粒子 computeMs≈5ms)
+- [x] スパイク4:深度テクスチャアクセス(ソフトパーティクル)とTSLポストパイプラインの共存確認 — /spike-depth/ で両立実証(WebGL2ピクセル検証+目視、WebGPUもreadRenderTargetPixelsAsyncによるヘッドレスピクセル検証済み)。ポスト統合点はRenderPipeline
+- [x] パフォーマンス計測ハーネス(FPS/フレーム時間/JSヒープ/描画コール数+**GPU timestamp query**をplaygroundに常設、`nachi.perf-baseline` schema v1、spike-runnerで回収可)— SwiftShaderでもtimestamp-query利用可と実証(100k粒子 computeMs≈5ms)
 - [x] 検証ハーネス:Playwrightをリポジトリに導入し、WebGPUプローブ(`--adapter swiftshader|vulkan|default`)とスクリーンショット取得ユーティリティ(診断収集付き)を `tools/` に整備。ヘッドレスWebGPUは「コンピュート可・canvas提示不可」と実測し、スクリーンショット回帰はWebGL2バックエンドで行う方針をPLAN.mdに記録
 - [x] ライブラリ名の決定 — **nachi**(ユーザー選定、2026-07-10)。LICENSE(MIT, nachi contributors)・CLAUDE.md作成済み、`@nachi/core`/`@nachi/playground` へ改名・licenseフィールド追加済み
-- [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
+- [x] 🔍 **マイルストーン監査** — 2026-07-10実施。Codex(freshスレッド)+Claude(新規エージェント)の独立監査→統括裁定。判定: **条件付きPASS**(詳細はセッションログ)。条件: Windows実GPU目視3項目をM2の生存数駆動実装着手前までに完了
 
 ## M1 — コンパイラ&データモデル
 
@@ -227,3 +227,4 @@
 | 2026-07-10 | スパイク2完遂・3・4完了:WebGL2サポートマトリクス実測、dispatchIndirect実証、深度+ポスト共存実証(/spike-depth/)、前回持ち越し7件全解消→Claudeレビュー PASS(全数値を独立再現)→コミット。**次回委譲への持ち越し**: [SHOULD] PostProcessing→RenderPipeline改名、[NIT] depth-fade比較に部分可視アサーション/runnerのadapterInfo→webgpuAdapterInfo改名/dispatchプローブのガード外し/WebGL2アトミックプローブのエラーシグネチャ照合/WebGPU深度スパイクのreadRenderTargetPixelsAsyncピクセル検証化。**ユーザー対応待ち**: Windows実GPU目視(/spike-compute/ と /spike-depth/)はM0監査時に |
 | 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
+| 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |

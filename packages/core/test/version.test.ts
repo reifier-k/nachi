@@ -8,9 +8,7 @@ describe('core package version contract', () => {
     const manifest = JSON.parse(
       readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
     ) as { version: string };
-    const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$/.exec(
-      VERSION,
-    );
+    const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$/.exec(VERSION);
 
     expect(match, `${VERSION} must be a semantic version`).not.toBeNull();
     expect(VERSION).toBe(manifest.version);

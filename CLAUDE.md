@@ -29,7 +29,7 @@ node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
 ```
 
-`webgpu-probe` serves its own localhost page. `spike-runner` adds `headless=1` and reads `data-spike-result` plus the `vfx.perf-baseline` record in `data-perf-result`. Screenshot regression defaults to WebGL2 because headless WebGPU cannot present a canvas.
+`webgpu-probe` serves its own localhost page. `spike-runner` adds `headless=1` and reads `data-spike-result` plus the `nachi.perf-baseline` record in `data-perf-result`. Screenshot regression defaults to WebGL2 because headless WebGPU cannot present a canvas.
 
 ## Three-layer verification
 
