@@ -25,6 +25,10 @@ Tooling (run `pnpm dev` first unless noted):
 node tools/webgpu-probe.mjs [--adapter swiftshader|vulkan|default]
 node tools/spike-runner.mjs [http://127.0.0.1:5173/spike-compute/?backend=webgpu]
 node tools/spike-runner.mjs http://127.0.0.1:5173/spike-depth/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m1-kernel/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgpu\&scenario=lifecycle
+node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgpu\&scenario=time
+node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgl
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
 ```

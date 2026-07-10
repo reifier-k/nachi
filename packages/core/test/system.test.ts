@@ -562,6 +562,63 @@ describe('VFXSystem runtime scheduler', () => {
     );
   });
 
+  it.each([
+    ['NACHI_PARAMETER_UNKNOWN', { 'User.typo': 2 }],
+    ['NACHI_PARAMETER_TYPE_MISMATCH', { 'User.intensity': 'bad' }],
+  ] as const)(
+    'transitions to error for invalid spawn parameter overrides: %s',
+    (code, parameters) => {
+      const parameterDefinition = defineParameter('User.intensity', {
+        default: 1,
+        type: 'f32',
+      });
+      const emitter = defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        parameters: { 'User.intensity': parameterDefinition },
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      });
+      const effect = defineEffect({
+        elements: { particles: emitter },
+        parameters: { 'User.intensity': parameterDefinition },
+      });
+      const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(effect, {
+        parameters: parameters as never,
+      });
+
+      expect(instance.state).toBe('error');
+      expect(instance.diagnostics).toContainEqual(
+        expect.objectContaining({ code, phase: 'runtime' }),
+      );
+      expect(instance.getEmitter('particles')).toBeUndefined();
+    },
+  );
+
+  it('accepts type-valid immutable parameter overrides at spawn time', () => {
+    const parameterDefinition = defineParameter('User.intensity', {
+      default: 1,
+      type: 'f32',
+    });
+    const emitter = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      parameters: { 'User.intensity': parameterDefinition },
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({
+      elements: { particles: emitter },
+      parameters: { 'User.intensity': parameterDefinition },
+    });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(effect, {
+      parameters: { 'User.intensity': 2 },
+    });
+
+    expect(instance.state).toBe('active');
+    expect(instance.getEmitter('particles')?.kernels.uniforms['User.intensity']?.value).toBe(2);
+  });
+
   it('throws NACHI_INSTANCE_RELEASED from released-instance methods', () => {
     const parameterDefinition = defineParameter('User.intensity', {
       default: 1,
@@ -684,17 +741,25 @@ describe('VFXSystem runtime scheduler', () => {
   it('reads GPU overflow only with the periodic alive-count readback', async () => {
     const base = new FakeRuntimeRenderer();
     let readCount = 0;
+    let aliveOffset = 0;
+    let overflowOffset = 0;
     const renderer: VfxRuntimeRenderer = {
       kernelAdapter: base.kernelAdapter,
       readStorage: () => {
         readCount += 1;
-        return Promise.resolve(new Uint32Array([0, 1, 0, 1]).buffer);
+        const counters = new Uint32Array(Math.max(aliveOffset, overflowOffset) + 1);
+        counters[aliveOffset] = 1;
+        counters[overflowOffset] = 1;
+        return Promise.resolve(counters.buffer);
       },
       submitCompute: (kernel) => base.submitCompute(kernel),
       submitComputeIndirect: (kernel) => base.submitCompute(kernel),
     };
     const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 2 });
     const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const offsets = instance.getEmitter('particles')?.kernels.counterOffsets;
+    aliveOffset = offsets?.aliveCount ?? 0;
+    overflowOffset = offsets?.spawnOverflow ?? 0;
     await system.update(0);
 
     expect(readCount).toBe(1);
@@ -813,6 +878,49 @@ describe('VFXSystem runtime scheduler', () => {
     });
     const system = new VFXSystem(new FakeRuntimeRenderer());
     const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(100);
+    expect(instance.state).toBe('active');
+  });
+
+  it('treats an update-stage lifetime writer as conservatively unbounded', async () => {
+    const updateLifetime = tslModule(({ lifetime: value }) => ({ lifetime: value }), {
+      stage: 'update',
+    });
+    const emitter = defineEmitter({
+      capacity: 1,
+      init: [lifetime(1)],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+      update: [updateLifetime],
+    });
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await system.update(100);
+    expect(instance.state).toBe('active');
+  });
+
+  it('treats an event-stage lifetime writer as conservatively unbounded', async () => {
+    const eventLifetime: ModuleDefinition<'event', object> = {
+      access: { reads: [], writes: ['Particles.lifetime'] },
+      config: {},
+      kind: 'module',
+      stage: 'event',
+      type: 'test/event-lifetime',
+      version: 1,
+    };
+    const emitter = defineEmitter({
+      capacity: 1,
+      events: { onDeath: eventLifetime },
+      init: [lifetime(1)],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
     await system.update(100);
     expect(instance.state).toBe('active');
   });

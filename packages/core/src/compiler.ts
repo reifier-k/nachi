@@ -98,6 +98,13 @@ export interface CompiledUniformDescription {
 }
 
 export interface CompiledEmitterMeta {
+  readonly backendBudgets: {
+    readonly webgl2: {
+      readonly defaultSpawnVaryingLimit: 4;
+      readonly spawnVaryingCount: number;
+      readonly spawnVaryings: readonly string[];
+    };
+  };
   readonly capabilities: {
     readonly webgl2: {
       readonly aliveCount: 'cpu-readback';
@@ -110,6 +117,29 @@ export interface CompiledEmitterMeta {
       readonly indirectDraw: true;
     };
   };
+  readonly lifecycleStorage: {
+    readonly buffers: {
+      readonly indirectArguments: {
+        readonly fields: {
+          readonly drawIndirect: LifecycleStorageFieldMeta;
+          readonly spawnDispatch: LifecycleStorageFieldMeta;
+        };
+        readonly wordCount: number;
+      };
+      readonly state: {
+        readonly fields: {
+          readonly aliveCount: LifecycleStorageFieldMeta;
+          readonly aliveIndices: LifecycleStorageFieldMeta;
+          readonly freeCount: LifecycleStorageFieldMeta;
+          readonly freeList: LifecycleStorageFieldMeta;
+          readonly spawnOverflow: LifecycleStorageFieldMeta;
+          readonly spawnSuccess: LifecycleStorageFieldMeta;
+        };
+        readonly wordCount: number;
+      };
+    };
+    readonly wordCount: number;
+  };
   readonly moduleSlots: readonly {
     readonly label?: string;
     readonly path: string;
@@ -118,7 +148,17 @@ export interface CompiledEmitterMeta {
     readonly stageIndex: number;
     readonly type: string;
   }[];
+  readonly storageBuffers: readonly {
+    readonly count: 1;
+    readonly name: string;
+    readonly purposes: readonly string[];
+  }[];
   readonly storageBufferCount: number;
+}
+
+export interface LifecycleStorageFieldMeta {
+  readonly offsetWords: number;
+  readonly wordCount: number;
 }
 
 export type KernelNodeInput = KernelNode | boolean | number | readonly number[];
@@ -188,9 +228,10 @@ export interface KernelTslAdapter {
   readonly capabilities?: KernelAdapterCapabilities;
   readonly deviceLimits?: {
     readonly maxStorageBuffersPerShaderStage?: number;
+    readonly maxTransformFeedbackSeparateAttribs?: number;
   };
   readonly instanceIndex: KernelNode;
-  atomicAdd(target: KernelNode, value: KernelNodeInput): KernelNode;
+  atomicAdd(target: KernelNode, value: KernelNodeInput, returnValue?: boolean): KernelNode;
   atomicLoad(target: KernelNode): KernelNode;
   atomicStore(target: KernelNode, value: KernelNodeInput): void;
   branch(condition: KernelNode, whenTrue: () => void, whenFalse?: () => void): void;
@@ -212,22 +253,25 @@ export interface KernelTslAdapter {
 export interface BuiltEmitterKernels {
   readonly aliveCount: KernelStorageNode;
   readonly aliveIndices: KernelStorageNode;
+  readonly aliveIndicesOffset: number;
   readonly capabilityPath: 'webgl2-cpu-readback' | 'webgpu-atomic-indirect';
   readonly compact?: KernelComputeNode;
   readonly counterOffsets: {
-    readonly aliveCount: 1;
-    readonly freeCount: 0;
-    readonly spawnOverflow: 3;
-    readonly spawnSuccess: 2;
+    readonly aliveCount: number;
+    readonly freeCount: number;
+    readonly spawnOverflow: number;
+    readonly spawnSuccess: number;
   };
   /**
-   * Core updates words 1-4 only. Before first draw, the M3 renderer must prime word 0
-   * (`indexCount`) once on the CPU and then bind this resource to the geometry.
+   * Core updates words 1-4 relative to `drawIndirectOffsetBytes`. Before first draw, the M3
+   * renderer must prime relative word 0 (`indexCount`) once and bind this resource at that offset.
    */
   readonly drawIndirect?: KernelIndirectStorageNode;
+  readonly drawIndirectOffsetBytes?: number;
   readonly finalizeIndirect?: KernelComputeNode;
   readonly finalizeSpawn?: KernelComputeNode;
   readonly freeCount?: KernelStorageNode;
+  readonly freeListOffset: number;
   /** M1 all-slots compatibility kernel; never submit with the M2 lifecycle kernels. */
   readonly init: KernelComputeNode;
   /** Starts the M2 lifecycle path; mixing it with `init` leaves allocator counters inconsistent. */
@@ -377,6 +421,42 @@ const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
   'Emitter.spawnGeneration',
   'Emitter.transform',
 ]);
+
+type WriteOwnershipModule = {
+  readonly source?: 'author' | 'compiler';
+  readonly stage: CompiledModuleStage | 'event' | 'render';
+  readonly type: string;
+};
+
+const COMPILER_OWNED_WRITE_PATHS = [
+  {
+    allows: (module: WriteOwnershipModule) => module.source === 'compiler',
+    matches: (path: DataReference) => path === 'Particles.spawnGeneration',
+    owner: 'particle allocator',
+    path: 'Particles.spawnGeneration',
+  },
+  {
+    allows: (module: WriteOwnershipModule) =>
+      module.source === 'compiler' ||
+      (module.stage === 'spawn' &&
+        ['core/burst', 'core/rate', 'core/per-distance'].includes(module.type)),
+    matches: (path: DataReference) => path === 'Emitter.spawnCount',
+    owner: 'spawn allocator',
+    path: 'Emitter.spawnCount',
+  },
+  {
+    allows: (module: WriteOwnershipModule) => module.source === 'compiler',
+    matches: (path: DataReference) => path.startsWith('Emitter.allocation.'),
+    owner: 'spawn allocator',
+    path: 'Emitter.allocation.*',
+  },
+  {
+    allows: (module: WriteOwnershipModule) => module.stage === 'event',
+    matches: (path: DataReference) => path.startsWith('Emitter.events.'),
+    owner: 'event stage',
+    path: 'Emitter.events.*',
+  },
+] as const;
 
 function isKnownEmitterPath(reference: ParameterPath): boolean {
   return (
@@ -726,12 +806,25 @@ function validateStageWrites(
   modules: readonly {
     readonly access: ModuleAccess;
     readonly path: string;
+    readonly source?: 'author' | 'compiler';
     readonly stage: CompiledModuleStage | 'event' | 'render';
+    readonly type: string;
   }[],
 ): VfxDiagnostic[] {
   const diagnostics: VfxDiagnostic[] = [];
   for (const module of modules) {
     for (const [index, reference] of module.access.writes.entries()) {
+      const ownership = COMPILER_OWNED_WRITE_PATHS.find(({ matches }) => matches(reference));
+      if (ownership && !ownership.allows(module)) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_COMPILER_OWNED_WRITE',
+            `Only the ${ownership.owner} may write "${reference}" (protected path ${ownership.path}).`,
+            `${module.path}.access.writes[${index}]`,
+          ),
+        );
+        continue;
+      }
       const allowed =
         module.stage === 'spawn'
           ? reference === 'Emitter.spawnCount' || reference.startsWith('Emitter.allocation.')
@@ -772,7 +865,32 @@ function validateSpawnConfigs(modules: readonly CompiledSpawnModule[]): VfxDiagn
       }
     }
     if (module.type === 'core/burst') {
-      const config = module.config as { cycles?: unknown; interval?: unknown };
+      const config = module.config as { count?: unknown; cycles?: unknown; interval?: unknown };
+      const invalidCount = (value: unknown): boolean =>
+        typeof value !== 'number' || !Number.isFinite(value) || value < 0;
+      let countInvalid = false;
+      if (typeof config.count === 'object' && config.count !== null && 'kind' in config.count) {
+        if (config.count.kind === 'range') {
+          const range = config.count as { max?: unknown; min?: unknown };
+          countInvalid =
+            invalidCount(range.min) ||
+            invalidCount(range.max) ||
+            (range.min as number) > (range.max as number);
+        } else if (config.count.kind === 'parameter' && 'fallback' in config.count) {
+          countInvalid = invalidCount(config.count.fallback);
+        }
+      } else {
+        countInvalid = invalidCount(config.count);
+      }
+      if (countInvalid) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_BURST_COUNT_INVALID',
+            'Burst count must be a non-negative finite number or a valid range/parameter generator.',
+            `${module.path}.config.count`,
+          ),
+        );
+      }
       if (
         config.cycles !== undefined &&
         (!Number.isSafeInteger(config.cycles) || (config.cycles as number) <= 0)
@@ -1082,6 +1200,31 @@ function valueGeneratorKind(value: unknown): string | undefined {
     : undefined;
 }
 
+function lifecycleStorageLayout(capacity: number) {
+  const indirectFields = {
+    spawnDispatch: { offsetWords: 0, wordCount: 3 },
+    drawIndirect: { offsetWords: 3, wordCount: 5 },
+  } as const;
+  const indirectWordCount =
+    indirectFields.drawIndirect.offsetWords + indirectFields.drawIndirect.wordCount;
+  const stateFields = {
+    freeCount: { offsetWords: 0, wordCount: 1 },
+    aliveCount: { offsetWords: 1, wordCount: 1 },
+    spawnSuccess: { offsetWords: 2, wordCount: 1 },
+    spawnOverflow: { offsetWords: 3, wordCount: 1 },
+    freeList: { offsetWords: 4, wordCount: capacity },
+    aliveIndices: { offsetWords: 4 + capacity, wordCount: capacity },
+  } as const;
+  const stateWordCount = stateFields.aliveIndices.offsetWords + stateFields.aliveIndices.wordCount;
+  return {
+    buffers: {
+      indirectArguments: { fields: indirectFields, wordCount: indirectWordCount },
+      state: { fields: stateFields, wordCount: stateWordCount },
+    },
+    wordCount: indirectWordCount + stateWordCount,
+  } as const;
+}
+
 function createBuildKernels(
   program: Omit<CompiledEmitterProgram, 'buildKernels'>,
   registry: KernelModuleRegistry,
@@ -1089,7 +1232,8 @@ function createBuildKernels(
 ): (adapter: KernelTslAdapter) => BuiltEmitterKernels {
   return (adapter) => {
     const buildDiagnostics = [...program.diagnostics];
-    if (adapter.capabilities?.backend === 'webgl2') {
+    const backend = adapter.capabilities?.backend ?? 'webgpu';
+    if (backend === 'webgl2') {
       for (const module of program.spawn.modules) {
         if (module.type !== 'core/rate' && module.type !== 'core/per-distance') continue;
         buildDiagnostics.push({
@@ -1097,6 +1241,38 @@ function createBuildKernels(
           hint: 'Use core/burst on WebGL2 or select the WebGPU backend.',
           message: `${module.type} requires the WebGPU free-list path; WebGL2 supports burst spawning only.`,
           path: module.path,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      const varyingLimit =
+        adapter.deviceLimits?.maxTransformFeedbackSeparateAttribs ??
+        program.meta.backendBudgets.webgl2.defaultSpawnVaryingLimit;
+      if (program.meta.backendBudgets.webgl2.spawnVaryingCount > varyingLimit) {
+        buildDiagnostics.push({
+          code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+          hint: 'Use the WebGPU backend. WebGL2 lifecycle spawning will be revisited with a packed transform-feedback layout.',
+          message: `WebGL2 spawn/init requires ${program.meta.backendBudgets.webgl2.spawnVaryingCount} transform-feedback varyings (${program.meta.backendBudgets.webgl2.spawnVaryings.join(', ')}), but the backend limit is ${varyingLimit}.`,
+          path: 'meta.backendBudgets.webgl2.spawnVaryingCount',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+    } else {
+      const capabilities = adapter.capabilities;
+      const missing = capabilities
+        ? [
+            capabilities.atomics ? undefined : 'atomics',
+            capabilities.indirectDispatch ? undefined : 'indirectDispatch',
+            capabilities.indirectDraw ? undefined : 'indirectDraw',
+          ].filter((value): value is string => value !== undefined)
+        : [];
+      if (missing.length > 0) {
+        buildDiagnostics.push({
+          code: 'NACHI_BACKEND_CAPABILITY_MISSING',
+          hint: 'Select a WebGPU adapter exposing atomics, indirect dispatch, and indirect draw.',
+          message: `The WebGPU lifecycle path requires missing capability ${missing.join(', ')}; semantic fallback to WebGL2 is disabled.`,
+          path: 'meta.capabilities.webgpu',
           phase: 'compile',
           severity: 'error',
         });
@@ -1138,24 +1314,44 @@ function createBuildKernels(
     );
 
     const capacity = program.attributeSchema.capacity;
-    const gpuLifecycle =
-      adapter.capabilities?.atomics !== false &&
-      adapter.capabilities?.indirectDispatch !== false &&
-      adapter.capabilities?.indirectDraw !== false;
-    const freeList = adapter.instancedArray(capacity, 'uint').setName('NachiFreeList');
-    const aliveIndices = adapter.instancedArray(capacity, 'uint').setName('NachiAliveIndices');
-    const counterStorage = adapter.instancedArray(4, 'uint');
-    const counters = (gpuLifecycle ? counterStorage.toAtomic() : counterStorage).setName(
-      'NachiLifecycleCounters',
+    const gpuLifecycle = backend === 'webgpu';
+    const lifecycleLayout = lifecycleStorageLayout(capacity);
+    const indirectLayout = lifecycleLayout.buffers.indirectArguments;
+    const stateLayout = lifecycleLayout.buffers.state;
+    const lifecycleIndirectStorage = gpuLifecycle
+      ? adapter
+          .indirectArray(new Uint32Array(indirectLayout.wordCount))
+          .setName('NachiLifecycleIndirectArguments')
+      : undefined;
+    const lifecycleBase = adapter.instancedArray(stateLayout.wordCount, 'uint');
+    const lifecycleStorage = (gpuLifecycle ? lifecycleBase.toAtomic() : lifecycleBase).setName(
+      'NachiLifecycleState',
     );
     const counterOffsets = {
-      aliveCount: 1,
-      freeCount: 0,
-      spawnOverflow: 3,
-      spawnSuccess: 2,
+      aliveCount: stateLayout.fields.aliveCount.offsetWords,
+      freeCount: stateLayout.fields.freeCount.offsetWords,
+      spawnOverflow: stateLayout.fields.spawnOverflow.offsetWords,
+      spawnSuccess: stateLayout.fields.spawnSuccess.offsetWords,
     } as const;
     const counter = (offset: number): KernelNode =>
-      counters.element(adapter.uint(adapter.constant(offset, 'u32')));
+      lifecycleStorage.element(adapter.uint(adapter.constant(offset, 'u32')));
+    const lifecycleElement = (offset: number, index?: KernelNode): KernelNode => {
+      const base = adapter.uint(adapter.constant(offset, 'u32'));
+      return lifecycleStorage.element(index === undefined ? base : base.add(adapter.uint(index)));
+    };
+    const readLifecycle = (offset: number, index?: KernelNode): KernelNode => {
+      const element = lifecycleElement(offset, index);
+      return gpuLifecycle ? adapter.atomicLoad(element) : element;
+    };
+    const writeLifecycle = (offset: number, value: KernelNodeInput, index?: KernelNode): void => {
+      const element = lifecycleElement(offset, index);
+      if (gpuLifecycle) adapter.atomicStore(element, value);
+      else element.assign(value);
+    };
+    const writeIndirect = (offset: number, value: KernelNodeInput): void => {
+      if (!lifecycleIndirectStorage) return;
+      lifecycleIndirectStorage.element(adapter.uint(adapter.constant(offset, 'u32'))).assign(value);
+    };
 
     const attributeNode = (name: string, index = adapter.instanceIndex): KernelNode => {
       const storage = storages[name];
@@ -1297,19 +1493,16 @@ function createBuildKernels(
       .fn(() => {
         attributeNode('alive').assign(adapter.constant(false, 'bool'));
         attributeNode('spawnGeneration').assign(adapter.constant(0, 'u32'));
-        freeList.element(adapter.instanceIndex).assign(adapter.uint(adapter.instanceIndex));
+        writeLifecycle(
+          stateLayout.fields.freeList.offsetWords,
+          adapter.uint(adapter.instanceIndex),
+          adapter.instanceIndex,
+        );
         adapter.branch(adapter.instanceIndex.equal(adapter.uint(0)), () => {
-          if (gpuLifecycle) {
-            adapter.atomicStore(counter(counterOffsets.freeCount), adapter.uint(capacity));
-            adapter.atomicStore(counter(counterOffsets.aliveCount), adapter.uint(0));
-            adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
-            adapter.atomicStore(counter(counterOffsets.spawnOverflow), adapter.uint(0));
-          } else {
-            counter(counterOffsets.freeCount).assign(adapter.uint(capacity));
-            counter(counterOffsets.aliveCount).assign(adapter.uint(0));
-            counter(counterOffsets.spawnSuccess).assign(adapter.uint(0));
-            counter(counterOffsets.spawnOverflow).assign(adapter.uint(0));
-          }
+          writeLifecycle(counterOffsets.freeCount, adapter.uint(capacity));
+          writeLifecycle(counterOffsets.aliveCount, adapter.uint(0));
+          writeLifecycle(counterOffsets.spawnSuccess, adapter.uint(0));
+          writeLifecycle(counterOffsets.spawnOverflow, adapter.uint(0));
         });
       })
       .compute(capacity, [program.spawn.workgroupSize])
@@ -1328,8 +1521,16 @@ function createBuildKernels(
 
     const recycleParticle = (particleIndex: KernelNode): void => {
       if (gpuLifecycle) {
-        const freeSlot = adapter.atomicAdd(counter(counterOffsets.freeCount), adapter.uint(1));
-        freeList.element(freeSlot).assign(adapter.uint(particleIndex));
+        const freeSlot = adapter.atomicAdd(
+          counter(counterOffsets.freeCount),
+          adapter.uint(1),
+          true,
+        );
+        writeLifecycle(
+          stateLayout.fields.freeList.offsetWords,
+          adapter.uint(particleIndex),
+          freeSlot,
+        );
       }
     };
 
@@ -1343,7 +1544,9 @@ function createBuildKernels(
               attributeNode('age', particleIndex).greaterThanEqual(
                 attributeNode('lifetime', particleIndex),
               ),
-              () => attributeNode('alive', particleIndex).assign(adapter.constant(false, 'bool')),
+              () => {
+                attributeNode('alive', particleIndex).assign(adapter.constant(false, 'bool'));
+              },
               () => {
                 for (const module of updateModules) buildModule(module, particleIndex);
               },
@@ -1353,9 +1556,9 @@ function createBuildKernels(
           }
           // Any declared update module may kill by writing Particles.alive. Recycling remains a
           // compiler-owned epilogue so every scattered death appends its physical slot once.
-          adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(0)), () =>
-            recycleParticle(particleIndex),
-          );
+          adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(0)), () => {
+            recycleParticle(particleIndex);
+          });
         });
       })
       .compute(program.attributeSchema.capacity, [program.kernels.update.workgroupSize])
@@ -1371,7 +1574,10 @@ function createBuildKernels(
             invocation.lessThan(available),
             () => {
               const freeSlot = available.sub(adapter.uint(1)).sub(invocation);
-              const particleIndex = freeList.element(freeSlot);
+              const particleIndex = readLifecycle(
+                stateLayout.fields.freeList.offsetWords,
+                freeSlot,
+              );
               attributeNode('spawnGeneration', particleIndex).addAssign(adapter.uint(1));
               for (const module of initModules) buildModule(module, particleIndex);
               attributeNode('alive', particleIndex).assign(adapter.uint(1));
@@ -1406,25 +1612,20 @@ function createBuildKernels(
     let drawIndirect: KernelIndirectStorageNode | undefined;
 
     if (gpuLifecycle) {
-      spawnDispatch = adapter
-        .indirectArray(new Uint32Array([0, 1, 1]))
-        .setName('NachiSpawnDispatchArguments') as KernelIndirectStorageNode;
-      drawIndirect = adapter
-        .indirectArray(new Uint32Array([0, 0, 0, 0, 0]))
-        .setName('NachiDrawIndirectArguments') as KernelIndirectStorageNode;
+      spawnDispatch = lifecycleIndirectStorage as KernelIndirectStorageNode;
+      drawIndirect = lifecycleIndirectStorage as KernelIndirectStorageNode;
       prepareSpawn = adapter
         .fn(() => {
           adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
           const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
-          spawnDispatch!
-            .element(adapter.uint(0))
-            .assign(
-              requested
-                .add(adapter.uint(program.spawn.workgroupSize - 1))
-                .div(adapter.uint(program.spawn.workgroupSize)),
-            );
-          spawnDispatch!.element(adapter.uint(1)).assign(adapter.uint(1));
-          spawnDispatch!.element(adapter.uint(2)).assign(adapter.uint(1));
+          writeIndirect(
+            indirectLayout.fields.spawnDispatch.offsetWords,
+            requested
+              .add(adapter.uint(program.spawn.workgroupSize - 1))
+              .div(adapter.uint(program.spawn.workgroupSize)),
+          );
+          writeIndirect(indirectLayout.fields.spawnDispatch.offsetWords + 1, adapter.uint(1));
+          writeIndirect(indirectLayout.fields.spawnDispatch.offsetWords + 2, adapter.uint(1));
         })
         .compute(1, [1])
         .setName('NachiEmitterPrepareSpawn');
@@ -1447,8 +1648,13 @@ function createBuildKernels(
             const compactIndex = adapter.atomicAdd(
               counter(counterOffsets.aliveCount),
               adapter.uint(1),
+              true,
             );
-            aliveIndices.element(compactIndex).assign(adapter.uint(adapter.instanceIndex));
+            writeLifecycle(
+              stateLayout.fields.aliveIndices.offsetWords,
+              adapter.uint(adapter.instanceIndex),
+              compactIndex,
+            );
           });
         })
         .compute(capacity, [program.kernels.update.workgroupSize])
@@ -1456,25 +1662,33 @@ function createBuildKernels(
       finalizeIndirect = adapter
         .fn(() => {
           const count = adapter.atomicLoad(counter(counterOffsets.aliveCount));
-          drawIndirect!.element(adapter.uint(1)).assign(count);
-          drawIndirect!.element(adapter.uint(2)).assign(adapter.uint(0));
-          drawIndirect!.element(adapter.uint(3)).assign(adapter.uint(0));
-          drawIndirect!.element(adapter.uint(4)).assign(adapter.uint(0));
+          writeIndirect(indirectLayout.fields.drawIndirect.offsetWords + 1, count);
+          writeIndirect(indirectLayout.fields.drawIndirect.offsetWords + 2, adapter.uint(0));
+          writeIndirect(indirectLayout.fields.drawIndirect.offsetWords + 3, adapter.uint(0));
+          writeIndirect(indirectLayout.fields.drawIndirect.offsetWords + 4, adapter.uint(0));
         })
         .compute(1, [1])
         .setName('NachiEmitterFinalizeIndirect');
     }
 
     return {
-      aliveCount: counters,
-      aliveIndices,
+      aliveCount: lifecycleStorage,
+      aliveIndices: lifecycleStorage,
+      aliveIndicesOffset: stateLayout.fields.aliveIndices.offsetWords,
       capabilityPath: gpuLifecycle ? 'webgpu-atomic-indirect' : 'webgl2-cpu-readback',
       ...(compact === undefined ? {} : { compact }),
       counterOffsets,
       ...(drawIndirect === undefined ? {} : { drawIndirect }),
+      ...(drawIndirect === undefined
+        ? {}
+        : {
+            drawIndirectOffsetBytes:
+              indirectLayout.fields.drawIndirect.offsetWords * Uint32Array.BYTES_PER_ELEMENT,
+          }),
       ...(finalizeIndirect === undefined ? {} : { finalizeIndirect }),
       ...(finalizeSpawn === undefined ? {} : { finalizeSpawn }),
-      freeCount: counters,
+      freeCount: lifecycleStorage,
+      freeListOffset: stateLayout.fields.freeList.offsetWords,
       init,
       initialize,
       luts: lutTextures,
@@ -1482,7 +1696,7 @@ function createBuildKernels(
       ...(resetAliveCount === undefined ? {} : { resetAliveCount }),
       spawn,
       ...(spawnDispatch === undefined ? {} : { spawnDispatch }),
-      spawnOverflow: counters,
+      spawnOverflow: lifecycleStorage,
       storages,
       uniforms,
       update,
@@ -1573,6 +1787,7 @@ export function compileEmitter<
         access: module.access ?? { reads: [], writes: [] },
         path,
         stage: module.stage,
+        type: module.type,
       })),
     ]),
   );
@@ -1602,7 +1817,45 @@ export function compileEmitter<
     },
   } as const;
   const uniforms = uniformDescriptions(definition.parameters, options);
+  const webgl2SpawnVaryings = [
+    ...new Set([
+      ...initModules.flatMap(({ access }) =>
+        access.writes.filter((path) => path.startsWith('Particles.')),
+      ),
+      'Particles.alive',
+      'Particles.spawnGeneration',
+    ]),
+  ].sort();
+  const storageBuffers: CompiledEmitterMeta['storageBuffers'] = [
+    ...attributeSchema.storageArrays.map(({ attribute }) => ({
+      count: 1 as const,
+      name: `Particles.${attribute}`,
+      purposes: [`particle attribute ${attribute}`],
+    })),
+    {
+      count: 1,
+      name: 'NachiLifecycleIndirectArguments',
+      purposes: ['spawn dispatch indirect arguments', 'draw indirect arguments'],
+    },
+    {
+      count: 1,
+      name: 'NachiLifecycleState',
+      purposes: [
+        'free/alive/success/overflow counters',
+        'free-list indices',
+        'compacted alive indices',
+      ],
+    },
+  ];
+  const lifecycleLayout = lifecycleStorageLayout(definition.capacity);
   const meta: CompiledEmitterMeta = {
+    backendBudgets: {
+      webgl2: {
+        defaultSpawnVaryingLimit: 4,
+        spawnVaryingCount: webgl2SpawnVaryings.length,
+        spawnVaryings: webgl2SpawnVaryings,
+      },
+    },
     capabilities: {
       webgl2: {
         aliveCount: 'cpu-readback',
@@ -1615,6 +1868,10 @@ export function compileEmitter<
         indirectDraw: true,
       },
     },
+    lifecycleStorage: {
+      buffers: lifecycleLayout.buffers,
+      wordCount: lifecycleLayout.wordCount,
+    },
     moduleSlots: baked.modules.map((module) => {
       const base = {
         path: module.path,
@@ -1625,9 +1882,8 @@ export function compileEmitter<
       } as const;
       return module.label === undefined ? base : { ...base, label: module.label };
     }),
-    // The lifecycle kernel binds one free/alive index buffer and one packed atomic counter buffer
-    // in addition to the emitter-local SoA attributes.
-    storageBufferCount: attributeSchema.storageArrays.length + 2,
+    storageBuffers,
+    storageBufferCount: storageBuffers.length,
   };
   const description = {
     attributeSchema,

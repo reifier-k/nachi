@@ -14,6 +14,7 @@ import {
   range,
   sampleCurve,
   sizeOverLife,
+  tslModule,
   velocityCone,
 } from '@nachi/core';
 import type { KernelTslAdapter, ModuleDefinition } from '@nachi/core';
@@ -90,13 +91,6 @@ const computeRender: ModuleDefinition<'render', Record<string, never>> = {
 };
 
 const emitter = defineEmitter({
-  attributes: {
-    enabled: attribute('enabled', { default: true, type: 'bool' }),
-    frame: attribute('frame', {
-      default: [1, 0, 0, 0, 1, 0, 0, 0, 1],
-      type: 'mat3',
-    }),
-  },
   capacity: particleCount,
   init: [
     positionSphere({ radius: 0.2 }),
@@ -105,13 +99,40 @@ const emitter = defineEmitter({
   ],
   render: computeRender,
   spawn: burst({ count: particleCount }),
-  update: [gravity(GRAVITY), sizeOverLife(CURVE), colorOverLife(GRADIENT)],
+  update: [gravity(GRAVITY), colorOverLife(GRADIENT)],
 });
 const program = compileEmitter(emitter, {
   deltaTime: FIXED_DELTA_SECONDS,
   emitterSeed: 42,
   spawnGeneration: 0,
 });
+
+// Keep the mat3/bool storage proof in a separate emitter so the primary nine-check M1 smoke
+// remains within common per-stage storage-buffer limits after lifecycle state is included.
+const storageTypeProbeProgram = compileEmitter(
+  defineEmitter({
+    attributes: {
+      enabled: attribute('enabled', { default: true, type: 'bool' }),
+      frame: attribute('frame', {
+        default: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+        type: 'mat3',
+      }),
+    },
+    capacity: 1,
+    integration: 'none',
+    render: computeRender,
+    spawn: burst({ count: 1 }),
+    update: [
+      tslModule(
+        ({ normalizedAge }) => ({
+          normalizedAge: normalizedAge.add(1 / frames),
+        }),
+        { stage: 'update' },
+      ),
+      sizeOverLife(CURVE),
+    ],
+  }),
+);
 
 const userParameterEmitter = defineEmitter({
   capacity: 1,
@@ -134,35 +155,56 @@ async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelT
   const initial = {
     age: await readStorage(renderer, built.storages.age!, 'float'),
     color: await readStorage(renderer, built.storages.color!, 'float'),
-    enabled: await readStorage(renderer, built.storages.enabled!, 'uint'),
-    frame: await readStorage(renderer, built.storages.frame!, 'float'),
     lifetime: await readStorage(renderer, built.storages.lifetime!, 'float'),
     position: await readStorage(renderer, built.storages.position!, 'float'),
-    size: await readStorage(renderer, built.storages.size!, 'float'),
     velocity: await readStorage(renderer, built.storages.velocity!, 'float'),
   };
-  const sizeSampleFrames = new Set([1, Math.max(1, Math.round(frames / 2)), frames]);
   const colorSamples: Array<{ frame: number; value: number[] }> = [];
-  const sizeSamples: Array<{ frame: number; value: number }> = [];
   for (let frame = 0; frame < frames; frame += 1) {
     built.uniforms['System.time']!.value = (frame + 1) * FIXED_DELTA_SECONDS;
     await renderer.computeAsync(built.update as never);
     const completedFrame = frame + 1;
-    if (sizeSampleFrames.has(completedFrame)) {
+    if (
+      completedFrame === 1 ||
+      completedFrame === Math.max(1, Math.round(frames / 2)) ||
+      completedFrame === frames
+    ) {
       const color = await readStorage(renderer, built.storages.color!, 'float');
-      const size = await readStorage(renderer, built.storages.size!, 'float');
       colorSamples.push({ frame: completedFrame, value: [...color.slice(0, 4)] });
-      sizeSamples.push({ frame: completedFrame, value: size[0] ?? Number.NaN });
     }
   }
   const final = {
     age: await readStorage(renderer, built.storages.age!, 'float'),
     color: await readStorage(renderer, built.storages.color!, 'float'),
     position: await readStorage(renderer, built.storages.position!, 'float'),
-    size: await readStorage(renderer, built.storages.size!, 'float'),
     velocity: await readStorage(renderer, built.storages.velocity!, 'float'),
   };
-  return { colorSamples, final, initial, sizeSamples };
+  return { colorSamples, final, initial };
+}
+
+async function runStorageTypeProbe(
+  renderer: THREE.WebGPURenderer,
+  kernelAdapter: KernelTslAdapter,
+) {
+  const built = storageTypeProbeProgram.buildKernels(kernelAdapter);
+  await renderer.computeAsync(built.init as never);
+  const initialSize = await readStorage(renderer, built.storages.size!, 'float');
+  const sizeSampleFrames = new Set([1, Math.max(1, Math.round(frames / 2)), frames]);
+  const sizeSamples: Array<{ frame: number; value: number }> = [];
+  for (let frame = 0; frame < frames; frame += 1) {
+    await renderer.computeAsync(built.update as never);
+    const completedFrame = frame + 1;
+    if (sizeSampleFrames.has(completedFrame)) {
+      const size = await readStorage(renderer, built.storages.size!, 'float');
+      sizeSamples.push({ frame: completedFrame, value: size[0] ?? Number.NaN });
+    }
+  }
+  return {
+    enabled: await readStorage(renderer, built.storages.enabled!, 'uint'),
+    frame: await readStorage(renderer, built.storages.frame!, 'float'),
+    initialSize: initialSize[0] ?? Number.NaN,
+    sizeSamples,
+  };
 }
 
 async function runUserParameterProgram(
@@ -314,11 +356,12 @@ async function runSmoke(): Promise<void> {
   statusValue.textContent = 'Compiling and executing kernels…';
   const first = await runProgram(renderer, kernelAdapter);
   const second = await runProgram(renderer, kernelAdapter);
+  const storageTypeProbe = await runStorageTypeProbe(renderer, kernelAdapter);
   const userParameter = await runUserParameterProgram(renderer, kernelAdapter);
   const expectedAge = frames * FIXED_DELTA_SECONDS;
   const lifetimeValue = first.initial.lifetime[0] ?? 1;
-  const sizeLutSamples = first.sizeSamples.map(({ frame, value }) => {
-    const normalizedAge = Math.min((frame * FIXED_DELTA_SECONDS) / lifetimeValue, 1);
+  const sizeLutSamples = storageTypeProbe.sizeSamples.map(({ frame, value }) => {
+    const normalizedAge = frame / frames;
     const expected = sampleCurve(CURVE, normalizedAge);
     return { expected, frame, ok: Math.abs(value - expected) < 0.02, value };
   });
@@ -370,24 +413,22 @@ async function runSmoke(): Promise<void> {
     nearlyEqual(value, expectedPosition[index]!, 0.002),
   );
   const validation = {
-    defaultsOk:
-      (first.initial.age[0] ?? Number.NaN) === 0 && (first.initial.size[0] ?? Number.NaN) === 1,
+    defaultsOk: (first.initial.age[0] ?? Number.NaN) === 0 && storageTypeProbe.initialSize === 1,
     deterministic:
       equalArrays(first.final.position, second.final.position) &&
       equalArrays(first.final.velocity, second.final.velocity) &&
       equalArrays(first.final.age, second.final.age) &&
-      equalArrays(first.final.size, second.final.size) &&
       equalArrays(first.final.color, second.final.color),
     gradientLutOk: colorLutSamples.every(({ ok: sampleOk }) => sampleOk),
     gravityVelocityMatchesCpu,
     integratePositionMatchesCpu,
     lifetimeAdvanced: Math.abs((first.final.age[0] ?? Number.NaN) - expectedAge) < 0.0001,
     mat3BoolOk:
-      (first.initial.enabled[0] ?? 0) === 1 &&
-      (first.initial.frame[0] ?? 0) === 1 &&
+      (storageTypeProbe.enabled[0] ?? 0) === 1 &&
+      (storageTypeProbe.frame[0] ?? 0) === 1 &&
       // Storage-buffer mat3 columns are vec4-aligned: 9 logical values occupy stride 12.
-      (first.initial.frame[5] ?? 0) === 1 &&
-      (first.initial.frame[10] ?? 0) === 1,
+      (storageTypeProbe.frame[5] ?? 0) === 1 &&
+      (storageTypeProbe.frame[10] ?? 0) === 1,
     sizeLutOk: sizeLutSamples.every(({ ok: sampleOk }) => sampleOk),
     userParameterDefaultOk:
       userParameter.initial === 0 &&
@@ -399,7 +440,11 @@ async function runSmoke(): Promise<void> {
     activeBackend,
     colorLutSamples,
     computeOk: ok,
-    compileDiagnostics: [...program.diagnostics, ...userParameterProgram.diagnostics],
+    compileDiagnostics: [
+      ...program.diagnostics,
+      ...storageTypeProbeProgram.diagnostics,
+      ...userParameterProgram.diagnostics,
+    ],
     cpuIntegrationReference: {
       expectedPosition,
       expectedVelocity,

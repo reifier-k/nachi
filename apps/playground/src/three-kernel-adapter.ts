@@ -10,12 +10,12 @@ import type {
   VfxDeviceLossInfo,
   VfxRuntimeRenderer,
 } from '@nachi/core';
+import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
   atomicAdd,
-  atomicLoad,
   atomicStore,
   cos,
   float,
@@ -38,6 +38,7 @@ export interface ThreeKernelAdapterOptions {
   readonly backend?: 'webgl2' | 'webgpu';
   readonly linearFloat32Filtering?: boolean;
   readonly maxStorageBuffersPerShaderStage?: number;
+  readonly maxTransformFeedbackSeparateAttribs?: number;
 }
 
 function asNode(value: unknown): KernelNode {
@@ -119,6 +120,20 @@ const createInstancedArray = instancedArray as unknown as (
 ) => unknown;
 const createUniform = uniform as unknown as (value: unknown, type: string) => unknown;
 
+type StorageArray = Float32Array | Int32Array | Uint32Array;
+type StorageArrayConstructor = new (length: number) => StorageArray;
+
+function materializeInstancedArray(length: number, type: TslStorageType): KernelStorageNode {
+  const node = createInstancedArray(length, type) as KernelStorageNode;
+  const attribute = node.value as { array: StorageArray };
+  const physicalLength = length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[type];
+  if (attribute.array.length !== physicalLength) {
+    const ArrayConstructor = attribute.array.constructor as StorageArrayConstructor;
+    attribute.array = new ArrayConstructor(physicalLength);
+  }
+  return node;
+}
+
 export function createThreeKernelAdapter(
   options: ThreeKernelAdapterOptions = {},
 ): KernelTslAdapter {
@@ -130,20 +145,38 @@ export function createThreeKernelAdapter(
       indirectDraw: options.backend !== 'webgl2',
     },
     instanceIndex: asNode(instanceIndex),
-    atomicAdd: (target, value) => asNode(atomicAdd(target as never, value as never)),
-    atomicLoad: (target) => asNode(atomicLoad(target as never)),
+    atomicAdd: (target, value, returnValue = false) =>
+      returnValue
+        ? asNode(
+            new THREE.AtomicFunctionNode(
+              THREE.AtomicFunctionNode.ATOMIC_ADD,
+              target as never,
+              value as never,
+            ),
+          )
+        : asNode(atomicAdd(target as never, value as never)),
+    atomicLoad: (target) =>
+      asNode(
+        new THREE.AtomicFunctionNode(THREE.AtomicFunctionNode.ATOMIC_LOAD, target as never, null),
+      ),
     atomicStore: (target, value) => {
       atomicStore(target as never, value as never);
     },
     branch: (condition, whenTrue, whenFalse) => {
-      const branch = If(condition as never, whenTrue);
-      if (whenFalse) branch.Else(whenFalse);
+      const branch = If(condition as never, () => {
+        whenTrue();
+      });
+      if (whenFalse) {
+        branch.Else(() => {
+          whenFalse();
+        });
+      }
     },
     constant: constantNode,
     cos: (value) => asNode(cos(value as never)),
     dataTexture: (lut) => createDataTexture(lut, options.linearFloat32Filtering ?? false),
     fn: (callback) => Fn(callback)() as unknown as ReturnType<KernelTslAdapter['fn']>,
-    instancedArray: (length, type) => createInstancedArray(length, type) as KernelStorageNode,
+    instancedArray: materializeInstancedArray,
     indirectArray: (values) => {
       const attribute = new THREE.IndirectStorageBufferAttribute(values, 1);
       const node = storage(
@@ -163,14 +196,17 @@ export function createThreeKernelAdapter(
     vec3: (x, y, z) => asNode(vec3(x as never, y as never, z as never)),
     vec4: (x, y, z, w) => asNode(vec4(x as never, y as never, z as never, w as never)),
   };
-  return options.maxStorageBuffersPerShaderStage === undefined
-    ? base
-    : {
-        ...base,
-        deviceLimits: {
-          maxStorageBuffersPerShaderStage: options.maxStorageBuffersPerShaderStage,
-        },
-      };
+  const deviceLimits = {
+    ...(options.maxStorageBuffersPerShaderStage === undefined
+      ? {}
+      : { maxStorageBuffersPerShaderStage: options.maxStorageBuffersPerShaderStage }),
+    ...(options.maxTransformFeedbackSeparateAttribs === undefined
+      ? {}
+      : {
+          maxTransformFeedbackSeparateAttribs: options.maxTransformFeedbackSeparateAttribs,
+        }),
+  };
+  return Object.keys(deviceLimits).length === 0 ? base : { ...base, deviceLimits };
 }
 
 export function setThreeUniformValue(

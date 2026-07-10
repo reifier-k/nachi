@@ -22,6 +22,7 @@ import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';
 
 const FIXED_DELTA_SECONDS = 1 / 60;
+const PREWARM_FRAMES = 4;
 
 type RendererBackendLike = {
   device?: {
@@ -29,6 +30,7 @@ type RendererBackendLike = {
     limits?: { maxStorageBuffersPerShaderStage?: number };
     lost: Promise<{ message?: string; reason?: string }>;
   };
+  gl?: WebGL2RenderingContext;
   isWebGPUBackend?: boolean;
 };
 
@@ -42,14 +44,32 @@ const root = document.documentElement;
 const query = new URLSearchParams(window.location.search);
 const headless = query.get('headless') === '1';
 const requestedBackend = query.get('backend') === 'webgl' ? 'webgl' : 'webgpu';
+const requestedScenario = query.get('scenario') ?? 'all';
+if (!['all', 'lifecycle', 'time'].includes(requestedScenario)) {
+  throw new Error('scenario must be one of: all, lifecycle, time.');
+}
+const scenario = requestedScenario as 'all' | 'lifecycle' | 'time';
 const backendValue = requireElement<HTMLElement>('#backend-value');
 const statusValue = requireElement<HTMLElement>('#status-value');
 const sceneHost = requireElement<HTMLElement>('#scene');
 
 root.dataset.backendRequested = requestedBackend;
 root.dataset.headless = String(headless);
+root.dataset.scenario = scenario;
 root.dataset.rendererStatus = 'initializing';
 root.dataset.spikeStatus = 'initializing';
+
+const consoleMessages: string[] = [];
+const originalConsoleWarn = console.warn.bind(console);
+const originalConsoleError = console.error.bind(console);
+console.warn = (...values: unknown[]) => {
+  consoleMessages.push(`warning: ${values.map(message).join(' ')}`);
+  originalConsoleWarn(...values);
+};
+console.error = (...values: unknown[]) => {
+  consoleMessages.push(`error: ${values.map(message).join(' ')}`);
+  originalConsoleError(...values);
+};
 
 function requireElement<ElementType extends Element>(selector: string): ElementType {
   const element = document.querySelector<ElementType>(selector);
@@ -106,6 +126,39 @@ function smokeEffect(options: {
   });
 }
 
+function movingEffect(
+  options: {
+    readonly duration?: number;
+    readonly lifetimeSeconds?: number;
+    readonly loopCount?: number;
+    readonly prewarm?: number;
+    readonly randomSpeed?: boolean;
+  } = {},
+) {
+  return defineEffect({
+    elements: {
+      particles: defineEmitter({
+        capacity: 1,
+        init: [
+          velocityCone({
+            angle: 0,
+            direction: [1, 0, 0],
+            speed: options.randomSpeed ? range(1, 2) : 1,
+          }),
+          lifetime(options.lifetimeSeconds ?? 10),
+        ],
+        lifecycle: {
+          duration: options.duration ?? 1,
+          ...(options.loopCount === undefined ? {} : { loopCount: options.loopCount }),
+          ...(options.prewarm === undefined ? {} : { prewarm: options.prewarm }),
+        },
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    },
+  });
+}
+
 function emitter(instance: RuntimeInstance): VfxEmitterRuntimeView {
   const value = instance.getEmitter('particles');
   if (!value) throw new Error('M2 runtime emitter is missing.');
@@ -125,7 +178,7 @@ async function uintStorage(
 async function floatStorage(
   renderer: THREE.WebGPURenderer,
   instance: RuntimeInstance,
-  name: 'velocity',
+  name: 'position' | 'velocity',
 ): Promise<Float32Array> {
   const storage = emitter(instance).kernels.storages[name];
   if (!storage) throw new Error(`M2 runtime emitter storage "${name}" is missing.`);
@@ -147,8 +200,10 @@ async function indirectInstanceCount(
 ): Promise<number> {
   const indirect = emitter(instance).kernels.drawIndirect;
   if (!indirect) throw new Error('M2 draw-indirect arguments are missing.');
+  const offset = emitter(instance).kernels.drawIndirectOffsetBytes;
+  if (offset === undefined) throw new Error('M2 draw-indirect offset is missing.');
   const data = await renderer.getArrayBufferAsync(indirect.indirectResource as never);
-  return new Uint32Array(data)[1] ?? 0;
+  return new Uint32Array(data)[offset / Uint32Array.BYTES_PER_ELEMENT + 1] ?? 0;
 }
 
 function equalArrays(left: ArrayLike<number>, right: ArrayLike<number>): boolean {
@@ -157,59 +212,18 @@ function equalArrays(left: ArrayLike<number>, right: ArrayLike<number>): boolean
   );
 }
 
-async function runSmoke(): Promise<void> {
-  if (requestedBackend === 'webgl') {
-    const error =
-      'NACHI_M2_RUNTIME_WEBGPU_ONLY: GPU free-list smoke coverage requires WebGPU; WebGL2 uses the compiler-declared CPU alive-count fallback.';
-    backendValue.textContent = 'WebGL2 (fallback documented)';
-    root.dataset.backend = 'WebGL2';
-    root.dataset.rendererStatus = 'unsupported';
-    root.dataset.spikeError = error;
-    root.dataset.spikeResult = JSON.stringify({ error, ok: false, requestedBackend });
-    root.dataset.spikeStatus = 'error';
-    root.dataset.sceneReady = 'true';
-    statusValue.textContent = error;
-    return;
-  }
+function close(left: number, right: number, tolerance = 0.0002): boolean {
+  return Math.abs(left - right) <= tolerance;
+}
 
-  const renderer = await createPlaygroundRenderer({
-    antialias: false,
-    forceWebGL: false,
-    trackTimestamp: true,
-  });
-  if (!headless) {
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    sceneHost.append(renderer.domElement);
-  }
-  await renderer.init();
-  const backend = renderer.backend as RendererBackendLike;
-  if (!backend.isWebGPUBackend) throw new Error('M2 runtime smoke requires WebGPU.');
-  backendValue.textContent = 'WebGPU';
-  root.dataset.backend = 'WebGPU';
-  root.dataset.rendererStatus = 'ready';
-
-  const storageBufferLimit = backend.device?.limits?.maxStorageBuffersPerShaderStage;
-  const kernelAdapter = createThreeKernelAdapter({
-    backend: 'webgpu',
-    linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
-    ...(storageBufferLimit === undefined
-      ? {}
-      : { maxStorageBuffersPerShaderStage: storageBufferLimit }),
-  });
-  const runtimeRenderer = createThreeRuntimeRenderer(renderer, kernelAdapter, backend.device?.lost);
-  const performanceMonitor = createPerformanceMonitor(renderer, {
-    gpuScopes: ['compute'],
-    mode: headless ? 'headless' : 'visual',
-    page: 'm2-runtime',
-  });
+async function runLifecycleScenario(
+  renderer: THREE.WebGPURenderer,
+  runtimeRenderer: ReturnType<typeof createThreeRuntimeRenderer>,
+) {
   const systemOptions = {
     aliveCountReadbackInterval: 1,
     fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
   } as const;
-
-  root.dataset.spikeStatus = 'running';
-  statusValue.textContent = 'Running M2 allocation, spawn, recycle, and indirect-draw scenarios…';
-
   // 1. Rate: 30/s for one second must produce exactly 30 particles with fixed timesteps.
   const rateSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
   const rateInstance = rateSystem.spawn(
@@ -299,9 +313,7 @@ async function runSmoke(): Promise<void> {
       secondGeneration[0] === 2 &&
       !equalArrays(firstVelocity, secondVelocity),
   };
-  const ok = Object.values(validation).every(Boolean);
-  const result = {
-    backend: 'WebGPU',
+  return {
     counts: {
       actualAlive,
       distanceAlive,
@@ -309,14 +321,210 @@ async function runSmoke(): Promise<void> {
       overflowAlive,
       rateAlive,
     },
-    ok,
     recycle: {
       firstGeneration: firstGeneration[0],
       firstVelocity: [...firstVelocity.slice(0, 3)],
       secondGeneration: secondGeneration[0],
       secondVelocity: [...secondVelocity.slice(0, 3)],
     },
+    validation,
+  };
+}
+
+async function runTimeScenario(
+  renderer: THREE.WebGPURenderer,
+  runtimeRenderer: ReturnType<typeof createThreeRuntimeRenderer>,
+) {
+  const movementSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { maxSubSteps: 8, stepSeconds: FIXED_DELTA_SECONDS },
+  });
+  const movementDefinition = movingEffect();
+  const normal = movementSystem.spawn(movementDefinition, { seed: 7 });
+  const paused = movementSystem.spawn(movementDefinition, { seed: 7, timeScale: 0 });
+  const fast = movementSystem.spawn(movementDefinition, { seed: 7, timeScale: 2 });
+  await movementSystem.update(0);
+  const normalInitial = await floatStorage(renderer, normal, 'position');
+  const pausedInitial = await floatStorage(renderer, paused, 'position');
+  const fastInitial = await floatStorage(renderer, fast, 'position');
+  await movementSystem.update(FIXED_DELTA_SECONDS);
+  const normalFinal = await floatStorage(renderer, normal, 'position');
+  const pausedFinal = await floatStorage(renderer, paused, 'position');
+  const fastFinal = await floatStorage(renderer, fast, 'position');
+  const normalAdvance = (normalFinal[0] ?? Number.NaN) - (normalInitial[0] ?? Number.NaN);
+  const fastAdvance = (fastFinal[0] ?? Number.NaN) - (fastInitial[0] ?? Number.NaN);
+
+  const loopSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
+  });
+  const looped = loopSystem.spawn(
+    movingEffect({
+      duration: FIXED_DELTA_SECONDS,
+      lifetimeSeconds: FIXED_DELTA_SECONDS,
+      loopCount: 2,
+      randomSpeed: true,
+    }),
+    { seed: 19 },
+  );
+  await loopSystem.update(0);
+  const firstGenerationVelocity = await floatStorage(renderer, looped, 'velocity');
+  await loopSystem.update(FIXED_DELTA_SECONDS);
+  const secondGenerationVelocity = await floatStorage(renderer, looped, 'velocity');
+
+  const warmSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
+  });
+  const coldSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { stepSeconds: FIXED_DELTA_SECONDS },
+  });
+  const warmed = warmSystem.spawn(movingEffect({ prewarm: PREWARM_FRAMES * FIXED_DELTA_SECONDS }), {
+    seed: 23,
+  });
+  const cold = coldSystem.spawn(movingEffect(), { seed: 23 });
+  await warmSystem.update(0);
+  await coldSystem.update(0);
+  for (let frame = 0; frame < PREWARM_FRAMES; frame += 1) {
+    await coldSystem.update(FIXED_DELTA_SECONDS);
+  }
+  const warmedPosition = await floatStorage(renderer, warmed, 'position');
+  const coldPosition = await floatStorage(renderer, cold, 'position');
+
+  const validation = {
+    compileCacheOk: movementSystem.compilationCount === 1,
+    durationLoopGenerationOk:
+      looped.getEmitter('particles')?.spawnGeneration === 1 &&
+      !equalArrays(firstGenerationVelocity, secondGenerationVelocity),
+    prewarmDeterministic: equalArrays(warmedPosition, coldPosition),
+    timeAdvanced: normalAdvance > 0,
+    timeScalePaused: equalArrays(pausedInitial, pausedFinal),
+    timeScaleTwice: close(fastAdvance, normalAdvance * 2),
+  };
+  return {
+    compileCounts: {
+      cold: coldSystem.compilationCount,
+      loop: loopSystem.compilationCount,
+      movement: movementSystem.compilationCount,
+      warm: warmSystem.compilationCount,
+    },
+    loop: {
+      firstGenerationVelocity: [...firstGenerationVelocity.slice(0, 3)],
+      secondGenerationVelocity: [...secondGenerationVelocity.slice(0, 3)],
+      spawnGeneration: looped.getEmitter('particles')?.spawnGeneration,
+    },
+    movement: {
+      fastAdvance,
+      normalAdvance,
+      pausedUnchanged: equalArrays(pausedInitial, pausedFinal),
+    },
+    prewarm: {
+      cold: [...coldPosition.slice(0, 3)],
+      frames: PREWARM_FRAMES,
+      warmed: [...warmedPosition.slice(0, 3)],
+    },
+    validation,
+  };
+}
+
+async function runSmoke(): Promise<void> {
+  const renderer = await createPlaygroundRenderer({
+    antialias: false,
+    forceWebGL: requestedBackend === 'webgl',
+    trackTimestamp: true,
+  });
+  if (!headless) {
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    sceneHost.append(renderer.domElement);
+  }
+  await renderer.init();
+  const backend = renderer.backend as RendererBackendLike;
+  const activeBackend = backend.isWebGPUBackend ? 'WebGPU' : 'WebGL2';
+  const expectedBackend = requestedBackend === 'webgpu' ? 'WebGPU' : 'WebGL2';
+  if (activeBackend !== expectedBackend) {
+    throw new Error(`Backend mismatch: requested ${expectedBackend}, active ${activeBackend}.`);
+  }
+  backendValue.textContent = activeBackend;
+  root.dataset.backend = activeBackend;
+  root.dataset.rendererStatus = 'ready';
+  root.dataset.spikeStatus = 'running';
+
+  const storageBufferLimit = backend.device?.limits?.maxStorageBuffersPerShaderStage;
+  const transformFeedbackLimit = backend.gl?.getParameter(
+    backend.gl.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS,
+  ) as number | undefined;
+  const kernelAdapter = createThreeKernelAdapter({
+    backend: backend.isWebGPUBackend ? 'webgpu' : 'webgl2',
+    linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
+    ...(storageBufferLimit === undefined
+      ? {}
+      : { maxStorageBuffersPerShaderStage: storageBufferLimit }),
+    ...(transformFeedbackLimit === undefined
+      ? {}
+      : { maxTransformFeedbackSeparateAttribs: transformFeedbackLimit }),
+  });
+  const runtimeRenderer = createThreeRuntimeRenderer(renderer, kernelAdapter, backend.device?.lost);
+  const performanceMonitor = createPerformanceMonitor(renderer, {
+    gpuScopes: ['compute'],
+    mode: headless ? 'headless' : 'visual',
+    page: 'm2-runtime',
+  });
+
+  if (!backend.isWebGPUBackend) {
+    statusValue.textContent = 'Verifying the WebGL2 lifecycle varying-budget diagnostic…';
+    const diagnosticSystem = new VFXSystem(runtimeRenderer);
+    const diagnosed = diagnosticSystem.spawn(
+      smokeEffect({ capacity: 8, lifetimeSeconds: 1, spawn: burst({ count: 1 }) }),
+    );
+    const diagnostic = diagnosed.diagnostics.find(
+      ({ code }) => code === 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+    );
+    const ok = diagnosed.state === 'error' && diagnostic !== undefined;
+    const result = {
+      activeBackend,
+      diagnostic,
+      ok,
+      requestedBackend,
+      scenario: 'webgl2-diagnostic',
+      transformFeedbackLimit: transformFeedbackLimit ?? 4,
+    };
+    performanceMonitor.publish();
+    root.dataset.spikeResult = JSON.stringify(result);
+    root.dataset.spikeStatus = ok ? 'complete' : 'error';
+    root.dataset.sceneReady = 'true';
+    statusValue.textContent = ok
+      ? 'WebGL2 lifecycle diagnostic confirmed'
+      : 'WebGL2 lifecycle diagnostic did not fire';
+    return;
+  }
+
+  statusValue.textContent = `Running M2 ${scenario} scenario(s)…`;
+
+  const lifecycle =
+    scenario === 'all' || scenario === 'lifecycle'
+      ? await runLifecycleScenario(renderer, runtimeRenderer)
+      : undefined;
+  const time =
+    scenario === 'all' || scenario === 'time'
+      ? await runTimeScenario(renderer, runtimeRenderer)
+      : undefined;
+  const scenarioValidations: Record<string, boolean>[] = [];
+  if (lifecycle) scenarioValidations.push(lifecycle.validation);
+  if (time) scenarioValidations.push(time.validation);
+  const validation = {
+    consoleClean: consoleMessages.length === 0,
+    scenariosPassed: scenarioValidations.every((values) => Object.values(values).every(Boolean)),
+  };
+  const ok = Object.values(validation).every(Boolean);
+  const result = {
+    activeBackend,
+    consoleMessages,
+    lifecycle,
+    ok,
     requestedBackend,
+    scenario,
+    time,
     validation,
   };
   await performanceMonitor.resolveGpuTimestamps();

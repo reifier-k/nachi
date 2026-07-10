@@ -585,6 +585,22 @@ describe('emitter kernel compiler', () => {
     expect(program.attributeSchema.byName.position?.default).toEqual([0, 0, 0]);
     expect(program.attributeSchema.byName.velocity?.default).toEqual([0, 0, 0]);
     expect(program.meta.storageBufferCount).toBe(6);
+    expect(program.meta.storageBuffers.slice(-2)).toEqual([
+      {
+        count: 1,
+        name: 'NachiLifecycleIndirectArguments',
+        purposes: ['spawn dispatch indirect arguments', 'draw indirect arguments'],
+      },
+      {
+        count: 1,
+        name: 'NachiLifecycleState',
+        purposes: [
+          'free/alive/success/overflow counters',
+          'free-list indices',
+          'compacted alive indices',
+        ],
+      },
+    ]);
   });
 
   it('counts schema storage buffers and diagnoses a device stage-limit overflow', () => {
@@ -628,6 +644,138 @@ describe('emitter kernel compiler', () => {
         deviceLimits: { maxStorageBuffersPerShaderStage: 13 },
       }),
     ).not.toThrow();
+  });
+
+  it('keeps five minimum attributes plus two lifecycle buffers within the WebGPU limit', () => {
+    const initializeMinimum = tslModule(
+      ({ position, velocity, lifetime }) => ({ lifetime, position, velocity }),
+      { stage: 'init' },
+    );
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 8,
+        init: [initializeMinimum],
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.attributeSchema.storageArrays.map(({ attribute }) => attribute)).toEqual([
+      'position',
+      'velocity',
+      'lifetime',
+      'alive',
+      'spawnGeneration',
+    ]);
+    expect(program.meta.storageBufferCount).toBe(7);
+    expect(program.meta.storageBuffers).toHaveLength(7);
+    expect(() =>
+      program.buildKernels({
+        ...fakeAdapter(),
+        deviceLimits: { maxStorageBuffersPerShaderStage: 8 },
+      }),
+    ).not.toThrow();
+  });
+
+  it('keeps the playground M1 and M2 smoke emitters within their measured budgets', () => {
+    const m1 = compileEmitter(
+      defineEmitter({
+        capacity: 64,
+        init: [
+          positionSphere({ radius: 0.2 }),
+          velocityCone({ angle: 20, direction: [0, 1, 0], speed: range(2, 3) }),
+          lifetime(2),
+        ],
+        render: computeRender,
+        spawn: burst({ count: 64 }),
+        update: [gravity(-9.8), colorOverLife(gradient('#ffffff', '#000000'))],
+      }),
+    );
+    const m2Lifecycle = compileEmitter(
+      defineEmitter({
+        capacity: 64,
+        init: [lifetime(10)],
+        integration: 'none',
+        render: computeRender,
+        spawn: rate({ rate: 30 }),
+      }),
+    );
+    const m2Time = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [velocityCone({ angle: 0, direction: [1, 0, 0], speed: 1 }), lifetime(10)],
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(m1.meta.storageBufferCount).toBe(10);
+    expect(m2Lifecycle.meta.storageBufferCount).toBe(7);
+    expect(m2Time.meta.storageBufferCount).toBe(9);
+  });
+
+  it('materializes separate lifecycle state and indirect-argument buffers', () => {
+    let indirectArrays = 0;
+    let instancedArrays = 0;
+    const adapter = fakeAdapter();
+    const built = compileEmitter(baseEmitter()).buildKernels({
+      ...adapter,
+      indirectArray: () => {
+        indirectArrays += 1;
+        return Object.assign(new FakeStorage(), { indirectResource: {} });
+      },
+      instancedArray: () => {
+        instancedArrays += 1;
+        return new FakeStorage();
+      },
+    });
+
+    expect(indirectArrays).toBe(1);
+    expect(instancedArrays).toBe(5);
+    expect(built.aliveCount).toBe(built.aliveIndices);
+    expect(built.aliveCount).toBe(built.freeCount);
+    expect(built.drawIndirect).toBe(built.spawnDispatch);
+    expect(built.drawIndirect).not.toBe(built.aliveCount);
+    expect(built.freeListOffset).toBeLessThan(built.aliveIndicesOffset);
+    expect(built.drawIndirectOffsetBytes).toBe(3 * Uint32Array.BYTES_PER_ELEMENT);
+  });
+
+  it('describes both lifecycle allocation sizes exactly in metadata', () => {
+    const program = compileEmitter(baseEmitter());
+    let materializedIndirectWords = 0;
+    const materializedInstancedWords: number[] = [];
+    program.buildKernels({
+      ...fakeAdapter(),
+      indirectArray: (values) => {
+        materializedIndirectWords = values.length;
+        return Object.assign(new FakeStorage(), { indirectResource: {} });
+      },
+      instancedArray: (length) => {
+        materializedInstancedWords.push(length);
+        return new FakeStorage();
+      },
+    });
+    const { indirectArguments, state } = program.meta.lifecycleStorage.buffers;
+    const indirectMetadataWords = Object.values(indirectArguments.fields).reduce(
+      (sum, field) => sum + field.wordCount,
+      0,
+    );
+    const stateMetadataWords = Object.values(state.fields).reduce(
+      (sum, field) => sum + field.wordCount,
+      0,
+    );
+    const metadataWords = indirectMetadataWords + stateMetadataWords;
+
+    expect(indirectMetadataWords).toBe(8);
+    expect(stateMetadataWords).toBe(20);
+    expect(metadataWords).toBe(28);
+    expect(indirectArguments.wordCount).toBe(indirectMetadataWords);
+    expect(state.wordCount).toBe(stateMetadataWords);
+    expect(program.meta.lifecycleStorage.wordCount).toBe(metadataWords);
+    expect(materializedIndirectWords).toBe(indirectMetadataWords);
+    expect(materializedInstancedWords.at(-1)).toBe(stateMetadataWords);
+    expect(metadataWords * Uint32Array.BYTES_PER_ELEMENT).toBe(112);
   });
 
   it('compiles burst, rate, and per-distance through the unified registry', () => {
@@ -684,6 +832,63 @@ describe('emitter kernel compiler', () => {
     expect(built.capabilityPath).toBe('webgl2-cpu-readback');
     expect(built.drawIndirect).toBeUndefined();
     expect(built.spawnDispatch).toBeUndefined();
+  });
+
+  it('rejects WebGL2 burst lifecycle kernels that exceed the transform-feedback budget', () => {
+    const program = compileEmitter(baseEmitter({ init: [lifetime(1)], integration: 'none' }));
+    expect(program.meta.backendBudgets.webgl2).toMatchObject({
+      defaultSpawnVaryingLimit: 4,
+      spawnVaryingCount: 5,
+    });
+
+    let caught: unknown;
+    try {
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+        deviceLimits: { maxTransformFeedbackSeparateAttribs: 4 },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(VfxDiagnosticError);
+    expect(caught instanceof VfxDiagnosticError ? caught.diagnostics : []).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+        path: 'meta.backendBudgets.webgl2.spawnVaryingCount',
+      }),
+    );
+  });
+
+  it('rejects missing WebGPU lifecycle capabilities instead of silently falling back', () => {
+    let caught: unknown;
+    try {
+      compileEmitter(baseEmitter()).buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgpu',
+          indirectDispatch: true,
+          indirectDraw: false,
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(VfxDiagnosticError);
+    expect(caught instanceof VfxDiagnosticError ? caught.diagnostics : []).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BACKEND_CAPABILITY_MISSING',
+        path: 'meta.capabilities.webgpu',
+      }),
+    );
   });
 
   it.each([
@@ -763,6 +968,53 @@ describe('emitter kernel compiler', () => {
     );
   });
 
+  it.each([
+    [
+      'particle spawn generation from init',
+      'init',
+      'Particles.spawnGeneration',
+      'init[0].access.writes[0]',
+    ],
+    [
+      'spawn count from a custom spawn module',
+      'spawn',
+      'Emitter.spawnCount',
+      'spawn[0].access.writes[0]',
+    ],
+    [
+      'allocation metadata from a custom spawn module',
+      'spawn',
+      'Emitter.allocation.slot',
+      'spawn[0].access.writes[0]',
+    ],
+    [
+      'event queue state from update',
+      'update',
+      'Emitter.events.onDeath',
+      'update[0].access.writes[0]',
+    ],
+  ] as const)('protects compiler-owned write: %s', (_name, stage, reference, path) => {
+    const module: ModuleDefinition<typeof stage, object> = {
+      access: { reads: [], writes: [reference] },
+      config: {},
+      kind: 'module',
+      stage,
+      type: `test/owned-${stage}`,
+      version: 1,
+    };
+    const definition =
+      stage === 'spawn'
+        ? { ...baseEmitter(), spawn: module }
+        : stage === 'init'
+          ? { ...baseEmitter(), init: [module] }
+          : { ...baseEmitter(), update: [module] };
+    const program = compileEmitter(definition as ReturnType<typeof baseEmitter>);
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_COMPILER_OWNED_WRITE', path }),
+    );
+  });
+
   it('diagnoses invalid rate spawn values', () => {
     const program = compileEmitter({ ...baseEmitter(), spawn: rate({ rate: -1 }) });
     expect(program.diagnostics).toContainEqual(
@@ -783,6 +1035,19 @@ describe('emitter kernel compiler', () => {
       expect.objectContaining({ code: 'NACHI_BURST_CYCLES_INVALID' }),
     );
   });
+
+  it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])(
+    'diagnoses invalid burst count %s',
+    (count) => {
+      const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count }) });
+      expect(program.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: 'NACHI_BURST_COUNT_INVALID',
+          path: 'spawn[0].config.count',
+        }),
+      );
+    },
+  );
 
   it('requires an interval for multi-cycle bursts', () => {
     const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count: 1, cycles: 2 }) });

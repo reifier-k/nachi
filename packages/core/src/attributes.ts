@@ -33,6 +33,18 @@ const ATTRIBUTE_LAYOUTS: Readonly<Record<AttributeType, AttributeLayout>> = {
   vec4: { components: 4, storageType: 'vec4' },
 };
 
+/** GPU memory length in 4-byte elements, matching three.js getMemoryLengthFromType. */
+export const TSL_STORAGE_TYPE_PHYSICAL_LENGTHS: Readonly<Record<TslStorageType, number>> = {
+  float: 1,
+  int: 1,
+  mat3: 12,
+  mat4: 16,
+  uint: 1,
+  vec2: 2,
+  vec3: 3,
+  vec4: 4,
+};
+
 export function resolveTslStorageType(type: AttributeType): TslStorageType {
   return ATTRIBUTE_LAYOUTS[type].storageType;
 }

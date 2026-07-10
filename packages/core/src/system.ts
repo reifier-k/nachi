@@ -8,6 +8,7 @@ import {
   type KernelUniformNode,
 } from './compiler.js';
 import { VfxDiagnosticError } from './diagnostics.js';
+import { collectEmitterModules } from './emitter-modules.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
 import type {
   AttributeType,
@@ -400,14 +401,28 @@ function splitDuration(duration: number, stepSeconds: number): number[] {
   return steps;
 }
 
-function maximumLifetime(program: CompiledEmitterProgram): number {
+function maximumLifetime(program: CompiledEmitterProgram, definition: EmitterDefinition): number {
   let maximum = 0;
-  const writers = program.kernels.init.modules.filter(
-    (module) => module.source === 'author' && module.access.writes.includes('Particles.lifetime'),
+  const writers = [program.kernels.init, program.kernels.update]
+    .flatMap(({ modules }) => modules)
+    .filter(
+      (module) => module.source === 'author' && module.access.writes.includes('Particles.lifetime'),
+    );
+  const nonKernelWriter = collectEmitterModules(definition).some(
+    ({ module }) =>
+      module.stage !== 'init' &&
+      module.stage !== 'update' &&
+      module.access?.writes.includes('Particles.lifetime') === true,
   );
   // An undeclared lifetime means an emitter may remain alive indefinitely. Likewise, an
   // arbitrary lifetime writer cannot be bounded safely from core/lifetime's known config.
-  if (writers.length === 0 || writers.some(({ type }) => type !== 'core/lifetime')) return Infinity;
+  if (
+    writers.length === 0 ||
+    nonKernelWriter ||
+    writers.some(({ type }) => type !== 'core/lifetime')
+  ) {
+    return Infinity;
+  }
   for (const module of writers) {
     const input = (module.config as { value?: unknown }).value;
     if (typeof input === 'number' && Number.isFinite(input)) {
@@ -513,6 +528,42 @@ function isParameterValue(type: AttributeType, value: unknown): boolean {
     return Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647;
   if (type === 'u32') return Number.isInteger(value) && value >= 0 && value <= 4_294_967_295;
   return true;
+}
+
+function validateRuntimeParameter(
+  definitions: ParameterSchema,
+  path: string,
+  value: unknown,
+  requireMutable: boolean,
+): VfxDiagnostic | undefined {
+  const definition = definitions[path as ParameterPath];
+  if (!definition) {
+    return runtimeDiagnostic('NACHI_PARAMETER_UNKNOWN', `Unknown runtime parameter "${path}".`);
+  }
+  if (requireMutable && definition.mutable !== true) {
+    return runtimeDiagnostic(
+      'NACHI_PARAMETER_IMMUTABLE',
+      `Runtime parameter "${path}" is immutable.`,
+    );
+  }
+  if (!isParameterValue(definition.type, value)) {
+    return runtimeDiagnostic(
+      'NACHI_PARAMETER_TYPE_MISMATCH',
+      `Runtime parameter "${path}" does not match ${definition.type}.`,
+    );
+  }
+  return undefined;
+}
+
+function validateSpawnParameterOverrides(
+  definitions: ParameterSchema,
+  overrides: Readonly<Record<string, unknown>> | undefined,
+): VfxDiagnostic[] {
+  if (!overrides) return [];
+  return Object.entries(overrides).flatMap(([path, value]) => {
+    const parameterDiagnostic = validateRuntimeParameter(definitions, path, value, false);
+    return parameterDiagnostic ? [parameterDiagnostic] : [];
+  });
 }
 
 type SpawnAccumulator = { burstCycles: number; remainder: number };
@@ -919,31 +970,13 @@ export class VfxEffectInstance<
     value: DefinitionParameterValue<Definition, Path>,
   ): void {
     this.#assertNotReleased();
-    const definition = this.#parameterDefinitions[path as ParameterPath];
-    if (!definition) {
-      throw new VfxDiagnosticError([
-        runtimeDiagnostic(
-          'NACHI_PARAMETER_UNKNOWN',
-          `Unknown runtime parameter "${String(path)}".`,
-        ),
-      ]);
-    }
-    if (definition.mutable !== true) {
-      throw new VfxDiagnosticError([
-        runtimeDiagnostic(
-          'NACHI_PARAMETER_IMMUTABLE',
-          `Runtime parameter "${String(path)}" is immutable.`,
-        ),
-      ]);
-    }
-    if (!isParameterValue(definition.type, value)) {
-      throw new VfxDiagnosticError([
-        runtimeDiagnostic(
-          'NACHI_PARAMETER_TYPE_MISMATCH',
-          `Runtime parameter "${String(path)}" does not match ${definition.type}.`,
-        ),
-      ]);
-    }
+    const parameterDiagnostic = validateRuntimeParameter(
+      this.#parameterDefinitions,
+      String(path),
+      value,
+      true,
+    );
+    if (parameterDiagnostic) throw new VfxDiagnosticError([parameterDiagnostic]);
     for (const emitter of this.#emitters.values()) {
       emitter.setParameter(path as ParameterPath, value);
     }
@@ -1119,6 +1152,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     }
 
     try {
+      const parameterDiagnostics = validateSpawnParameterOverrides(
+        parameterDefinitions,
+        options.parameters as Readonly<Record<string, unknown>> | undefined,
+      );
+      if (parameterDiagnostics.length > 0) throw new VfxDiagnosticError(parameterDiagnostics);
       const runtimeRenderer = asRuntimeRenderer(this.renderer);
       if (!runtimeRenderer) {
         throw new Error('VFXSystem renderer must provide kernelAdapter and submitCompute().');
@@ -1199,7 +1237,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       })
       .map((entry) => ({
         ...entry,
-        maxLifetime: maximumLifetime(entry.program),
+        maxLifetime: maximumLifetime(entry.program, entry.definition),
       }));
     const compiled = { emitters };
     this.#compiledEffects.set(definition, compiled);
