@@ -1,7 +1,11 @@
 import { resolveAttributeSchema, resolveTslStorageType } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
-import { collectEmitterModules } from './emitter-modules.js';
+import {
+  collectEmitterModuleLabelDiagnostics,
+  collectEmitterModules,
+  collectParameterDeclarationDiagnostics,
+} from './emitter-modules.js';
 import type {
   AttributeSchema,
   AttributeType,
@@ -235,7 +239,7 @@ const INTEGRATE_ACCESS: ModuleAccess = {
 };
 
 const AGE_ACCESS: ModuleAccess = {
-  reads: ['Emitter.deltaTime', 'Particles.lifetime'],
+  reads: ['Emitter.deltaTime', 'Particles.age', 'Particles.lifetime'],
   writes: ['Particles.age', 'Particles.normalizedAge'],
 };
 
@@ -249,6 +253,16 @@ const AGE_MODULE: UpdateModule = {
   version: 1,
 };
 
+const INTEGRATE_MODULE: UpdateModule = {
+  access: INTEGRATE_ACCESS,
+  config: {},
+  kind: 'module',
+  label: '$integrate',
+  stage: 'update',
+  type: 'core/integrate',
+  version: 1,
+};
+
 const SYSTEM_PATHS = new Set<ParameterPath>(['System.deltaTime', 'System.time']);
 const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.age',
@@ -258,6 +272,14 @@ const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.loopIndex',
   'Emitter.seed',
   'Emitter.spawnCount',
+  'Emitter.spawnGeneration',
+  'Emitter.transform',
+]);
+const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
+  'System.deltaTime',
+  'System.time',
+  'Emitter.deltaTime',
+  'Emitter.seed',
   'Emitter.spawnGeneration',
   'Emitter.transform',
 ]);
@@ -470,15 +492,18 @@ function normalizeModules(
   const init = normalize(definition.init ?? [], 'init') as InitModule[];
   const update = normalize(definition.update ?? [], 'update') as UpdateModule[];
   if (definition.integration !== 'none') {
-    update.push({
-      access: INTEGRATE_ACCESS,
-      config: {},
-      kind: 'module',
-      label: '$integrate',
-      stage: 'update',
-      type: 'core/integrate',
-      version: 1,
-    });
+    for (const [index, module] of update.entries()) {
+      if (module.access?.writes.includes('Particles.position')) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_INTEGRATION_DOUBLE_APPLY',
+            'An author update module writes Particles.position while compiler integration is enabled; select integration: "none" to provide a custom integrator.',
+            `update[${index}].access.writes`,
+          ),
+        );
+      }
+    }
+    update.push(INTEGRATE_MODULE);
   }
   return { diagnostics, factories, init, update };
 }
@@ -584,13 +609,86 @@ function validateReferences(
   return diagnostics;
 }
 
+function validateValueGenerators(
+  modules: readonly Pick<CompiledKernelModule, 'config' | 'path'>[],
+  parameters: ParameterSchema | undefined,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  const declaredParameters = new Set(Object.keys(parameters ?? {}));
+
+  for (const module of modules) {
+    const visited = new WeakSet<object>();
+    const visit = (value: unknown, path: string): void => {
+      if (typeof value !== 'object' || value === null || visited.has(value)) return;
+      visited.add(value);
+      const kind = 'kind' in value ? value.kind : undefined;
+
+      if (kind === 'curve' && 'keys' in value && Array.isArray(value.keys)) {
+        if (value.keys.length < 2) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_CURVE_POINT_COUNT_INVALID',
+              `Curve generators require at least two keys; received ${value.keys.length}.`,
+              `${path}.keys`,
+            ),
+          );
+        }
+        for (const [index, key] of value.keys.entries()) {
+          if (typeof key !== 'object' || key === null || !('interpolation' in key)) continue;
+          const interpolation = key.interpolation;
+          if (interpolation !== undefined && interpolation !== 'linear') {
+            diagnostics.push(
+              diagnostic(
+                'NACHI_CURVE_INTERPOLATION_UNSUPPORTED',
+                `Curve interpolation "${String(interpolation)}" is not supported; use "linear".`,
+                `${path}.keys[${index}].interpolation`,
+              ),
+            );
+          }
+        }
+      } else if (kind === 'gradient' && 'stops' in value && Array.isArray(value.stops)) {
+        if (value.stops.length < 2) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_GRADIENT_STOP_COUNT_INVALID',
+              `Gradient generators require at least two stops; received ${value.stops.length}.`,
+              `${path}.stops`,
+            ),
+          );
+        }
+      } else if (kind === 'parameter' && 'path' in value && typeof value.path === 'string') {
+        const generatorPath = value.path as ParameterPath;
+        const supported =
+          MATERIALIZED_PARAMETER_PATHS.has(generatorPath) ||
+          (generatorPath.startsWith('User.') && declaredParameters.has(generatorPath));
+        if (!supported && !generatorPath.startsWith('User.')) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_PARAMETER_GENERATOR_UNSUPPORTED_TARGET',
+              `parameter() target "${generatorPath}" is not materialized as an M1 kernel uniform.`,
+              `${path}.path`,
+            ),
+          );
+        }
+      }
+
+      for (const [key, nested] of Object.entries(value)) visit(nested, `${path}.${key}`);
+    };
+    visit(module.config, `${module.path}.config`);
+  }
+
+  return diagnostics;
+}
+
 function unusedAttributeWarnings(
   schema: ResolvedAttributeSchema,
   modules: readonly Pick<ModuleDefinition, 'access'>[],
 ): VfxDiagnostic[] {
   const used = new Set(
     modules
-      .flatMap(({ access }) => (access ? [...access.reads, ...access.writes] : []))
+      .flatMap(({ access }) =>
+        access ? [...access.reads, ...(access.optionalReads ?? []), ...access.writes] : [],
+      )
       .filter((path) => path.startsWith('Particles.')),
   );
   return schema.attributes
@@ -656,8 +754,14 @@ function normalizeColor(input: ColorInput): Vec4 {
 }
 
 export function sampleCurve(curve: CurveGenerator<number>, time: number): number {
+  if (curve.keys.length < 2) throw new Error('Curve requires at least two keys.');
+  const unsupported = curve.keys.find(
+    ({ interpolation }) => interpolation !== undefined && interpolation !== 'linear',
+  )?.interpolation;
+  if (unsupported !== undefined) {
+    throw new Error(`Curve interpolation "${unsupported}" is not supported.`);
+  }
   const keys = [...curve.keys].sort((left, right) => left.time - right.time);
-  if (keys.length === 0) throw new Error('Curve requires at least one key.');
   if (time <= (keys[0]?.time ?? 0)) return keys[0]?.value ?? 0;
   const last = keys.at(-1);
   if (last && time >= last.time) return last.value;
@@ -684,8 +788,8 @@ export function bakeCurveLut(
 }
 
 function sampleGradient(gradient: GradientGenerator, time: number): Vec4 {
+  if (gradient.stops.length < 2) throw new Error('Gradient requires at least two stops.');
   const stops = [...gradient.stops].sort((left, right) => left.position - right.position);
-  if (stops.length === 0) throw new Error('Gradient requires at least one stop.');
   const first = stops[0];
   if (first && time <= first.position) return normalizeColor(first.color);
   const last = stops.at(-1);
@@ -726,13 +830,24 @@ function bakeModuleLuts(
   const normalized = modules.map((module) => {
     try {
       if (module.type === 'core/size-over-life') {
+        const curve = (module.config as { value: CurveGenerator<number> }).value;
+        if (
+          curve.keys.length < 2 ||
+          curve.keys.some(
+            ({ interpolation }) => interpolation !== undefined && interpolation !== 'linear',
+          )
+        ) {
+          return module;
+        }
         const id = `${module.path}:curve`;
-        luts.push(bakeCurveLut((module.config as { value: CurveGenerator<number> }).value, id));
+        luts.push(bakeCurveLut(curve, id));
         return { ...module, lutId: id };
       }
       if (module.type === 'core/color-over-life') {
+        const gradient = (module.config as { value: GradientGenerator }).value;
+        if (gradient.stops.length < 2) return module;
         const id = `${module.path}:gradient`;
-        luts.push(bakeGradientLut((module.config as { value: GradientGenerator }).value, id));
+        luts.push(bakeGradientLut(gradient, id));
         return { ...module, lutId: id };
       }
     } catch (error) {
@@ -809,6 +924,13 @@ function createBuildKernels(
     };
     const constant = (value: unknown, type: AttributeType): KernelNode =>
       adapter.constant(value, type);
+    const randomNode = (module: CompiledKernelModule, sampleOffset: number): KernelNode =>
+      pcgRandomFloatNode<KernelNode, KernelNode>(
+        adapter.uint(adapter.instanceIndex),
+        adapter.uint(uniformNode('Emitter.seed')),
+        resolveRandomSampleSlot(module.slot, sampleOffset),
+        adapter.uint(uniformNode('Emitter.spawnGeneration')),
+      );
 
     const buildValue = (
       input: unknown,
@@ -823,12 +945,33 @@ function createBuildKernels(
       }
       if (kind === 'range') {
         const range = input as RangeGenerator<number | readonly number[]>;
-        const random = pcgRandomFloatNode<KernelNode, KernelNode>(
-          adapter.uint(adapter.instanceIndex),
-          adapter.uint(uniformNode('Emitter.seed')),
-          resolveRandomSampleSlot(module.slot, sampleOffset),
-          adapter.uint(uniformNode('Emitter.spawnGeneration')),
-        );
+        const componentCount =
+          type === 'vec2'
+            ? 2
+            : type === 'vec3'
+              ? 3
+              : type === 'vec4' || type === 'color' || type === 'quat'
+                ? 4
+                : undefined;
+        const rangeMinimum = range.min;
+        const rangeMaximum = range.max;
+        if (
+          componentCount !== undefined &&
+          Array.isArray(rangeMinimum) &&
+          Array.isArray(rangeMaximum)
+        ) {
+          const components = Array.from({ length: componentCount }, (_, index) => {
+            const minimum = constant(rangeMinimum[index], 'f32');
+            const maximum = constant(rangeMaximum[index], 'f32');
+            return minimum.add(maximum.sub(minimum).mul(randomNode(module, sampleOffset + index)));
+          });
+          if (componentCount === 2) return adapter.vec2(components[0]!, components[1]!);
+          if (componentCount === 3) {
+            return adapter.vec3(components[0]!, components[1]!, components[2]!);
+          }
+          return adapter.vec4(components[0]!, components[1]!, components[2]!, components[3]!);
+        }
+        const random = randomNode(module, sampleOffset);
         const minimum = constant(range.min, type);
         const maximum = constant(range.max, type);
         return minimum.add(maximum.sub(minimum).mul(random));
@@ -840,13 +983,7 @@ function createBuildKernels(
       adapter,
       module,
       attribute: attributeNode,
-      random: (sampleOffset = 0) =>
-        pcgRandomFloatNode<KernelNode, KernelNode>(
-          adapter.uint(adapter.instanceIndex),
-          adapter.uint(uniformNode('Emitter.seed')),
-          resolveRandomSampleSlot(module.slot, sampleOffset),
-          adapter.uint(uniformNode('Emitter.spawnGeneration')),
-        ),
+      random: (sampleOffset = 0) => randomNode(module, sampleOffset),
       sampleLut: (id, coordinate) => {
         const texture = lutTextures[id];
         const lut = program.luts.find((candidate) => candidate.id === id);
@@ -921,10 +1058,10 @@ export function compileEmitter<
 ): CompiledEmitterProgram {
   const diagnostics: VfxDiagnostic[] = [];
   const registry = options.registry ?? createCoreKernelModuleRegistry();
-  const normalized = normalizeModules(
-    definition as EmitterDefinition<AttributeSchema, ParameterSchema>,
-    options,
-  );
+  const untypedDefinition = definition as EmitterDefinition<AttributeSchema, ParameterSchema>;
+  diagnostics.push(...collectEmitterModuleLabelDiagnostics(untypedDefinition));
+  diagnostics.push(...collectParameterDeclarationDiagnostics(untypedDefinition.parameters));
+  const normalized = normalizeModules(untypedDefinition, options);
   diagnostics.push(...normalized.diagnostics);
 
   const authorDefinition = {
@@ -958,14 +1095,20 @@ export function compileEmitter<
     ...normalized.update.map((module, index) =>
       moduleDescriptor(
         module,
-        module.label === '$integrate' ? 'update[$integrate]' : `update[${index}]`,
+        module === INTEGRATE_MODULE ? 'update[$integrate]' : `update[${index}]`,
         index + updateStageOffset,
-        module.label === '$integrate' ? 'compiler' : 'author',
+        module === INTEGRATE_MODULE ? 'compiler' : 'author',
       ),
     ),
   ];
   for (const module of initialModules) diagnostics.push(...validateModule(module, registry));
   diagnostics.push(...validateReferences(initialModules, definition.parameters));
+  const nonKernelModules = collectEmitterModules(normalizedDefinition)
+    .filter(({ module }) => module.stage !== 'init' && module.stage !== 'update')
+    .map(({ module, path }) => ({ config: module.config, path }));
+  diagnostics.push(
+    ...validateValueGenerators([...initialModules, ...nonKernelModules], definition.parameters),
+  );
 
   const baked = bakeModuleLuts(initialModules, diagnostics);
   diagnostics.push(

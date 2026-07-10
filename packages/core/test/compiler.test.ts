@@ -19,14 +19,19 @@ import {
   gravity,
   KernelModuleRegistry,
   lifetime,
+  parameter,
+  pcgRandomFloat,
   positionSphere,
   range,
+  resolveRandomSampleSlot,
   sizeOverLife,
   tslModule,
   velocityCone,
 } from '../src/index.js';
 import type {
   CompiledKernelModule,
+  CurveGenerator,
+  GradientGenerator,
   KernelComputeBuilder,
   KernelComputeNode,
   KernelNode,
@@ -147,6 +152,17 @@ class RejectParticleOffsetNode extends FakeNode {
   }
 }
 
+class CaptureBitXorNode extends FakeNode {
+  constructor(readonly numericBitXors: number[]) {
+    super();
+  }
+
+  override bitXor(value?: KernelNodeInput): KernelNode {
+    if (typeof value === 'number') this.numericBitXors.push(value);
+    return this;
+  }
+}
+
 class FakeCompute implements KernelComputeBuilder, KernelComputeNode {
   compute(): KernelComputeNode {
     return this;
@@ -193,6 +209,11 @@ class AccessTraceNode extends FakeNode {
     this.#read();
     return new FakeNode();
   }
+  override add(value?: KernelNodeInput): KernelNode {
+    this.#read();
+    markAccessRead(value);
+    return this;
+  }
   override addAssign(value?: KernelNodeInput): KernelNode {
     this.#read();
     this.#write();
@@ -203,6 +224,11 @@ class AccessTraceNode extends FakeNode {
     this.#write();
     markAccessRead(value);
     return new FakeNode();
+  }
+  override div(value?: KernelNodeInput): KernelNode {
+    this.#read();
+    markAccessRead(value);
+    return this;
   }
   override mul(value?: KernelNodeInput): KernelNode {
     this.#read();
@@ -338,6 +364,37 @@ describe('emitter kernel compiler', () => {
     expect(program.kernels.update.modules.map(({ type }) => type)).toEqual(['core/gravity']);
   });
 
+  it('diagnoses an author position writer when compiler integration is enabled', () => {
+    const customIntegrator = tslModule(({ position }) => ({ position }));
+    const program = compileEmitter(baseEmitter({ update: [customIntegrator] }));
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_INTEGRATION_DOUBLE_APPLY',
+        path: 'update[0].access.writes',
+        severity: 'error',
+      }),
+    );
+    expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
+  });
+
+  it('revalidates reserved and duplicate labels when compileEmitter is called directly', () => {
+    const direct = {
+      ...baseEmitter({ integration: 'none' }),
+      update: [
+        { ...gravity(-9.8), label: '$integrate' },
+        { ...drag(0.1), label: 'duplicate' },
+        { ...gravity(-1), label: 'duplicate' },
+      ],
+    };
+    const program = compileEmitter(direct);
+
+    expect(program.diagnostics.map(({ code }) => code)).toEqual([
+      'NACHI_MODULE_RESERVED_LABEL',
+      'NACHI_MODULE_DUPLICATE_LABEL',
+    ]);
+  });
+
   it('emits a stable kernel-description snapshot', () => {
     const program = compileEmitter(
       baseEmitter({
@@ -405,7 +462,7 @@ describe('emitter kernel compiler', () => {
     `);
     expect(program.kernels.update.modules[0]).toMatchObject({
       access: {
-        reads: ['Emitter.deltaTime', 'Particles.lifetime'],
+        reads: ['Emitter.deltaTime', 'Particles.age', 'Particles.lifetime'],
         writes: ['Particles.age', 'Particles.normalizedAge'],
       },
       label: '$age',
@@ -424,6 +481,55 @@ describe('emitter kernel compiler', () => {
     expect(firstSlot).toBe(movedSlot);
     expect(first.meta.moduleSlots.find(({ type }) => type === 'core/drag')).toBeUndefined();
     expect(moved.meta.moduleSlots.find(({ type }) => type === 'core/drag')?.stageIndex).toBe(0);
+  });
+
+  it('gives equal init/update indexes distinct deterministic range values', () => {
+    const program = compileEmitter(
+      baseEmitter({
+        init: [lifetime(range(1, 2))],
+        integration: 'none',
+        update: [gravity(range(1, 2))],
+      }),
+    );
+    const lifetimeSlot = program.meta.moduleSlots.find(
+      ({ type }) => type === 'core/lifetime',
+    )?.slot;
+    const gravitySlot = program.meta.moduleSlots.find(({ type }) => type === 'core/gravity')?.slot;
+
+    expect(lifetimeSlot).toBeDefined();
+    expect(gravitySlot).toBeDefined();
+    expect(lifetimeSlot).not.toBe(gravitySlot);
+    expect(pcgRandomFloat(0, 42, resolveRandomSampleSlot(lifetimeSlot!, 0), 0)).not.toBe(
+      pcgRandomFloat(0, 42, resolveRandomSampleSlot(gravitySlot!, 0), 0),
+    );
+  });
+
+  it('samples every vector range component from an independent stream', () => {
+    const emitter = defineEmitter({
+      attributes: {
+        direction: attribute('direction', {
+          default: range([0, 0, 0] as const, [1, 1, 1] as const),
+          type: 'vec3',
+        }),
+      },
+      capacity: 1,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const program = compileEmitter(emitter);
+    const numericBitXors: number[] = [];
+    const capture = () => new CaptureBitXorNode(numericBitXors);
+
+    expect(() =>
+      program.buildKernels({
+        ...fakeAdapter(),
+        instanceIndex: capture(),
+        uint: capture,
+      }),
+    ).not.toThrow();
+    expect(numericBitXors).toHaveLength(3);
+    expect(new Set(numericBitXors).size).toBe(3);
   });
 
   it('derives deterministic random uniform reads from nested range generators', () => {
@@ -608,6 +714,42 @@ describe('emitter kernel compiler', () => {
     expect(linearGray.data[0]).toBeCloseTo(0.5, 6);
   });
 
+  it('diagnoses underspecified curves/gradients and unsupported interpolation', () => {
+    const oneKeyCurve = {
+      keys: [{ time: 0, value: 1 }],
+      kind: 'curve',
+    } as CurveGenerator<number>;
+    const constantCurve = {
+      keys: [
+        { interpolation: 'constant', time: 0, value: 0 },
+        { time: 1, value: 1 },
+      ],
+      kind: 'curve',
+    } as CurveGenerator<number>;
+    const oneStopGradient = {
+      kind: 'gradient',
+      stops: [{ color: '#fff', position: 0 }],
+    } as GradientGenerator;
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [
+          sizeOverLife(oneKeyCurve),
+          sizeOverLife(constantCurve),
+          colorOverLife(oneStopGradient),
+        ],
+      }),
+    );
+
+    expect(program.diagnostics.map(({ code }) => code)).toEqual([
+      'NACHI_CURVE_POINT_COUNT_INVALID',
+      'NACHI_CURVE_INTERPOLATION_UNSUPPORTED',
+      'NACHI_GRADIENT_STOP_COUNT_INVALID',
+    ]);
+    expect(() => bakeCurveLut(constantCurve)).toThrow('not supported');
+    expect(() => bakeGradientLut(oneStopGradient)).toThrow('at least two stops');
+  });
+
   it('derives missing tslModule access from Proxy gets and returned keys', () => {
     type HeatBindings = TslParticleBindings<{ heat: number }>;
     const custom = tslModule<HeatBindings>((bindings) => {
@@ -734,6 +876,27 @@ describe('emitter kernel compiler', () => {
     );
   });
 
+  it('diagnoses parameter generators that target particle or unwired emitter paths', () => {
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [gravity(parameter('Particles.mass', 1)), gravity(parameter('Emitter.age', 1))],
+      }),
+    );
+
+    expect(program.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'NACHI_PARAMETER_GENERATOR_UNSUPPORTED_TARGET',
+        path: 'update[0].config.value.path',
+      }),
+      expect.objectContaining({
+        code: 'NACHI_PARAMETER_GENERATOR_UNSUPPORTED_TARGET',
+        path: 'update[1].config.value.path',
+      }),
+    ]);
+    expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
+  });
+
   it('keeps warnings non-blocking during kernel materialization', () => {
     const emitter = defineEmitter({
       attributes: { unused: attribute('unused', { default: 3, type: 'f32' }) },
@@ -783,6 +946,28 @@ describe('emitter kernel compiler', () => {
     expect(program.diagnostics.map(({ code }) => code)).not.toContain('NACHI_ATTRIBUTE_UNUSED');
   });
 
+  it('counts optionalReads when checking unused custom attributes', () => {
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      access: { optionalReads: ['Particles.optionalHeat'], reads: [], writes: [] },
+      config: {},
+      kind: 'module',
+      stage: 'render',
+      type: 'test/optional-custom-reader',
+      version: 1,
+    };
+    const emitter = defineEmitter({
+      attributes: { optionalHeat: attribute('optionalHeat', { default: 0, type: 'f32' }) },
+      capacity: 1,
+      integration: 'none',
+      render,
+      spawn: burst({ count: 1 }),
+    });
+
+    expect(compileEmitter(emitter).diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_ATTRIBUTE_UNUSED',
+    );
+  });
+
   it('materializes the full north-star init/update set through the adapter boundary', () => {
     const emitter = defineEmitter({
       capacity: 4,
@@ -809,6 +994,10 @@ describe('emitter kernel compiler', () => {
   it('keeps core implementation manifests aligned with authoring helpers', () => {
     const access = coreModuleImplementationAccess();
     const expected: Readonly<Record<string, ModuleAccess | undefined>> = {
+      'core/age': {
+        reads: ['Emitter.deltaTime', 'Particles.age', 'Particles.lifetime'],
+        writes: ['Particles.age', 'Particles.normalizedAge'],
+      },
       'core/color-over-life': colorOverLife(gradient('#000', '#fff')).access,
       'core/curl-noise': curlNoise({ frequency: 1, strength: 1 }).access,
       'core/drag': drag(1).access,
@@ -840,6 +1029,7 @@ describe('emitter kernel compiler', () => {
 
   it('matches traced core implementation reads and writes to every registered manifest', () => {
     const cases: ReadonlyArray<readonly [string, object, string?]> = [
+      ['core/age', {}],
       ['core/position-sphere', { radius: 1, surfaceOnly: false }],
       ['core/velocity-cone', { angle: 30, direction: [0, 1, 0], speed: 2 }],
       ['core/lifetime', { value: 2 }],

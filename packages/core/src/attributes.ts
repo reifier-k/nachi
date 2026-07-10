@@ -83,6 +83,68 @@ function readParticleAttribute(reference: string): string | undefined {
   return reference.startsWith('Particles.') ? reference.slice('Particles.'.length) : undefined;
 }
 
+function isNumericArray(value: unknown, length: number): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length === length &&
+    value.every((component) => typeof component === 'number' && Number.isFinite(component))
+  );
+}
+
+function isDirectAttributeValue(type: AttributeType, value: unknown): boolean {
+  switch (type) {
+    case 'bool':
+      return typeof value === 'boolean';
+    case 'f32':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'i32':
+      return (
+        typeof value === 'number' &&
+        Number.isInteger(value) &&
+        value >= -2_147_483_648 &&
+        value <= 2_147_483_647
+      );
+    case 'u32':
+      return (
+        typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 4_294_967_295
+      );
+    case 'vec2':
+      return isNumericArray(value, 2);
+    case 'vec3':
+      return isNumericArray(value, 3);
+    case 'color':
+    case 'quat':
+    case 'vec4':
+      return isNumericArray(value, 4);
+    case 'mat3':
+      return isNumericArray(value, 9);
+    case 'mat4':
+      return isNumericArray(value, 16);
+  }
+}
+
+function isAttributeDefaultCompatible(type: AttributeType, value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || !('kind' in value)) {
+    return isDirectAttributeValue(type, value);
+  }
+  if (value.kind === 'range' && 'min' in value && 'max' in value) {
+    return isDirectAttributeValue(type, value.min) && isDirectAttributeValue(type, value.max);
+  }
+  if (value.kind === 'curve' && 'keys' in value && Array.isArray(value.keys)) {
+    return value.keys.every(
+      (key) =>
+        typeof key === 'object' &&
+        key !== null &&
+        'value' in key &&
+        isDirectAttributeValue(type, key.value),
+    );
+  }
+  if (value.kind === 'parameter') {
+    return !('fallback' in value) || isDirectAttributeValue(type, value.fallback);
+  }
+  return false;
+}
+
 export function resolveAttributeSchema<
   const Attributes extends AttributeSchema,
   const Parameters extends ParameterSchema = EmptyParameterSchema,
@@ -90,6 +152,16 @@ export function resolveAttributeSchema<
   const diagnostics: VfxDiagnostic[] = [];
   const customAttributes = new Map<string, AttributeDefinition>();
   const declaredNames = new Set<string>();
+
+  if (!Number.isSafeInteger(config.capacity) || config.capacity <= 0) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_CAPACITY_INVALID',
+        `Emitter capacity must be a positive safe integer; received ${String(config.capacity)}.`,
+        'capacity',
+      ),
+    );
+  }
 
   for (const [key, definition] of Object.entries(config.attributes ?? {})) {
     if (key !== definition.name) {
@@ -129,6 +201,16 @@ export function resolveAttributeSchema<
           'NACHI_ATTRIBUTE_UNKNOWN_TYPE',
           `Attribute "${definition.name}" uses unknown logical type "${String(definition.type)}".`,
           `attributes.${key}.type`,
+        ),
+      );
+      continue;
+    }
+    if (!isAttributeDefaultCompatible(definition.type, definition.default)) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_ATTRIBUTE_DEFAULT_TYPE_MISMATCH',
+          `Attribute "${definition.name}" default does not match logical type "${definition.type}".`,
+          `attributes.${key}.default`,
         ),
       );
       continue;

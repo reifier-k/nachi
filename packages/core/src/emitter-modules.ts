@@ -4,6 +4,7 @@ import type {
   ModuleDefinition,
   ModuleStage,
   ParameterSchema,
+  VfxDiagnostic,
 } from './types.js';
 
 export type LocatedEmitterModule = {
@@ -43,4 +44,86 @@ export function collectEmitterModules(
   }
   appendModules(modules, stageCounts, 'render', config.render);
   return modules;
+}
+
+function compileDiagnostic(code: string, message: string, path: string): VfxDiagnostic {
+  return { code, message, path, phase: 'compile', severity: 'error' };
+}
+
+export function collectEmitterModuleLabelDiagnostics(
+  config: EmitterConfig<AttributeSchema, ParameterSchema>,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  const labelsByStage = new Map<ModuleStage, Map<string, string>>();
+
+  for (const { module, path } of collectEmitterModules(config)) {
+    const { label } = module;
+    if (label === undefined) continue;
+    if (label.length === 0) {
+      diagnostics.push(
+        compileDiagnostic(
+          'NACHI_MODULE_LABEL_EMPTY',
+          'Module labels must be non-empty when provided.',
+          `${path}.label`,
+        ),
+      );
+      continue;
+    }
+    if (label.startsWith('$')) {
+      diagnostics.push(
+        compileDiagnostic(
+          'NACHI_MODULE_RESERVED_LABEL',
+          `Module label "${label}" uses the compiler-reserved "$" prefix.`,
+          `${path}.label`,
+        ),
+      );
+    }
+
+    let stageLabels = labelsByStage.get(module.stage);
+    if (stageLabels === undefined) {
+      stageLabels = new Map();
+      labelsByStage.set(module.stage, stageLabels);
+    }
+    const previousPath = stageLabels.get(label);
+    if (previousPath === undefined) {
+      stageLabels.set(label, path);
+    } else {
+      diagnostics.push(
+        compileDiagnostic(
+          'NACHI_MODULE_DUPLICATE_LABEL',
+          `Module label "${label}" is duplicated in the ${module.stage} stage (first declared at ${previousPath}).`,
+          `${path}.label`,
+        ),
+      );
+    }
+  }
+
+  return diagnostics;
+}
+
+export function collectParameterDeclarationDiagnostics(
+  parameters: ParameterSchema | undefined,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const [key, definition] of Object.entries(parameters ?? {})) {
+    if (key !== definition.path) {
+      diagnostics.push(
+        compileDiagnostic(
+          'NACHI_PARAMETER_KEY_MISMATCH',
+          `Parameter key "${key}" must match its declared path "${definition.path}".`,
+          `parameters.${key}.path`,
+        ),
+      );
+    }
+    if (!key.startsWith('User.') || !definition.path.startsWith('User.')) {
+      diagnostics.push(
+        compileDiagnostic(
+          'NACHI_PARAMETER_NAMESPACE_INVALID',
+          `Parameter declaration "${key}" must use the User.* namespace.`,
+          `parameters.${key}`,
+        ),
+      );
+    }
+  }
+  return diagnostics;
 }

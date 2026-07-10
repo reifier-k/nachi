@@ -3,13 +3,13 @@ import {
   burst,
   colorOverLife,
   compileEmitter,
-  curlNoise,
   curve,
   defineEmitter,
-  drag,
+  defineParameter,
   gradient,
   gravity,
   lifetime,
+  parameter,
   positionSphere,
   range,
   sampleCurve,
@@ -51,6 +51,12 @@ const DEFAULT_PARTICLE_COUNT = 64;
 const DEFAULT_FRAMES = 24;
 const FIXED_DELTA_SECONDS = 1 / 60;
 const CURVE = curve([0, 0], [0.1, 1], [1, 0]);
+const GRADIENT_COLORS = ['#ffd27d', '#ff5a00', '#000000'] as const;
+const GRADIENT = gradient(...GRADIENT_COLORS);
+const GRADIENT_LUT_WIDTH = 256;
+const GRAVITY = -9.8;
+const USER_GRAVITY_DEFAULT = -10;
+const USER_GRAVITY_FALLBACK = 123;
 
 type BackendName = 'WebGL2' | 'WebGPU';
 type RendererBackendLike = {
@@ -221,19 +227,28 @@ const emitter = defineEmitter({
   ],
   render: computeRender,
   spawn: burst({ count: particleCount }),
-  update: [
-    gravity(-9.8),
-    drag(0.05),
-    curlNoise({ frequency: 0.5, strength: 0.1 }),
-    sizeOverLife(CURVE),
-    colorOverLife(gradient('#ffd27d', '#ff5a00', '#000000')),
-  ],
+  update: [gravity(GRAVITY), sizeOverLife(CURVE), colorOverLife(GRADIENT)],
 });
 const program = compileEmitter(emitter, {
   deltaTime: FIXED_DELTA_SECONDS,
   emitterSeed: 42,
   spawnGeneration: 0,
 });
+
+const userParameterEmitter = defineEmitter({
+  capacity: 1,
+  integration: 'none',
+  parameters: {
+    'User.gravity': defineParameter('User.gravity', {
+      default: USER_GRAVITY_DEFAULT,
+      type: 'f32',
+    }),
+  },
+  render: computeRender,
+  spawn: burst({ count: 1 }),
+  update: [gravity(parameter('User.gravity', USER_GRAVITY_FALLBACK))],
+});
+const userParameterProgram = compileEmitter(userParameterEmitter, { deltaTime: 1 });
 
 async function readStorage(
   renderer: THREE.WebGPURenderer,
@@ -249,6 +264,7 @@ async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelT
   await renderer.computeAsync(built.init as never);
   const initial = {
     age: await readStorage(renderer, built.storages.age!, 'float'),
+    color: await readStorage(renderer, built.storages.color!, 'float'),
     enabled: await readStorage(renderer, built.storages.enabled!, 'uint'),
     frame: await readStorage(renderer, built.storages.frame!, 'float'),
     lifetime: await readStorage(renderer, built.storages.lifetime!, 'float'),
@@ -257,23 +273,43 @@ async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelT
     velocity: await readStorage(renderer, built.storages.velocity!, 'float'),
   };
   const sizeSampleFrames = new Set([1, Math.max(1, Math.round(frames / 2)), frames]);
+  const colorSamples: Array<{ frame: number; value: number[] }> = [];
   const sizeSamples: Array<{ frame: number; value: number }> = [];
   for (let frame = 0; frame < frames; frame += 1) {
     built.uniforms['System.time']!.value = (frame + 1) * FIXED_DELTA_SECONDS;
     await renderer.computeAsync(built.update as never);
     const completedFrame = frame + 1;
     if (sizeSampleFrames.has(completedFrame)) {
+      const color = await readStorage(renderer, built.storages.color!, 'float');
       const size = await readStorage(renderer, built.storages.size!, 'float');
+      colorSamples.push({ frame: completedFrame, value: [...color.slice(0, 4)] });
       sizeSamples.push({ frame: completedFrame, value: size[0] ?? Number.NaN });
     }
   }
   const final = {
     age: await readStorage(renderer, built.storages.age!, 'float'),
+    color: await readStorage(renderer, built.storages.color!, 'float'),
     position: await readStorage(renderer, built.storages.position!, 'float'),
     size: await readStorage(renderer, built.storages.size!, 'float'),
     velocity: await readStorage(renderer, built.storages.velocity!, 'float'),
   };
-  return { final, initial, sizeSamples };
+  return { colorSamples, final, initial, sizeSamples };
+}
+
+async function runUserParameterProgram(
+  renderer: THREE.WebGPURenderer,
+  kernelAdapter: KernelTslAdapter,
+) {
+  const built = userParameterProgram.buildKernels(kernelAdapter);
+  await renderer.computeAsync(built.init as never);
+  const initial = await readStorage(renderer, built.storages.velocity!, 'float');
+  await renderer.computeAsync(built.update as never);
+  const afterDefault = await readStorage(renderer, built.storages.velocity!, 'float');
+  return {
+    afterDefault: afterDefault[1] ?? Number.NaN,
+    initial: initial[1] ?? Number.NaN,
+    uniformDefault: Number(built.uniforms['User.gravity']?.value),
+  };
 }
 
 function equalArrays(left: ArrayLike<number>, right: ArrayLike<number>): boolean {
@@ -282,10 +318,85 @@ function equalArrays(left: ArrayLike<number>, right: ArrayLike<number>): boolean
   );
 }
 
+function nearlyEqual(left: number, right: number, tolerance = 0.0002): boolean {
+  return Math.abs(left - right) <= tolerance;
+}
+
+function linearRgba(hexColor: string): number[] {
+  const hex = hexColor.slice(1);
+  const toLinear = (value: number) => {
+    const channel = value / 255;
+    return channel < 0.04045
+      ? channel * 0.0773993808
+      : Math.pow(channel * 0.9478672986 + 0.0521327014, 2.4);
+  };
+  return [
+    toLinear(Number.parseInt(hex.slice(0, 2), 16)),
+    toLinear(Number.parseInt(hex.slice(2, 4), 16)),
+    toLinear(Number.parseInt(hex.slice(4, 6), 16)),
+    1,
+  ];
+}
+
+function buildGradientReferenceLut(colors: readonly string[], width: number): Float32Array {
+  const rgba = colors.map(linearRgba);
+  const data = new Float32Array(width * 4);
+  for (let index = 0; index < width; index += 1) {
+    const scaled = (index / (width - 1)) * (rgba.length - 1);
+    const leftIndex = Math.min(Math.floor(scaled), rgba.length - 1);
+    const rightIndex = Math.min(leftIndex + 1, rgba.length - 1);
+    const alpha = scaled - leftIndex;
+    for (let channel = 0; channel < 4; channel += 1) {
+      const left = rgba[leftIndex]?.[channel] ?? Number.NaN;
+      const right = rgba[rightIndex]?.[channel] ?? Number.NaN;
+      data[index * 4 + channel] = left + (right - left) * alpha;
+    }
+  }
+  return data;
+}
+
+function sampleRgbaLut(
+  data: Float32Array,
+  width: number,
+  coordinate: number,
+  linear: boolean,
+): number[] {
+  const texel = Math.min(Math.max(coordinate, 0), 1) * (width - 1);
+  const read = (index: number, channel: number) => data[index * 4 + channel] ?? Number.NaN;
+  if (!linear) {
+    const index = Math.min(Math.round(texel), width - 1);
+    return [0, 1, 2, 3].map((channel) => read(index, channel));
+  }
+  const left = Math.floor(texel);
+  const right = Math.min(left + 1, width - 1);
+  const alpha = texel - left;
+  return [0, 1, 2, 3].map(
+    (channel) => read(left, channel) + (read(right, channel) - read(left, channel)) * alpha,
+  );
+}
+
 async function runSmoke(): Promise<void> {
+  if (requestedBackend === 'webgl') {
+    const error =
+      'NACHI_M1_KERNEL_WEBGPU_ONLY: The M1 kernel smoke is WebGPU-only; WebGL2 transform-feedback limits are intentionally gated.';
+    backendValue.textContent = 'WebGL2 (unsupported)';
+    root.dataset.backend = 'WebGL2';
+    root.dataset.rendererStatus = 'unsupported';
+    root.dataset.spikeError = error;
+    root.dataset.spikeResult = JSON.stringify({
+      computeOk: false,
+      error,
+      ok: false,
+      requestedBackend,
+    });
+    root.dataset.spikeStatus = 'error';
+    root.dataset.sceneReady = 'true';
+    statusValue.textContent = error;
+    return;
+  }
   const renderer = await createPlaygroundRenderer({
     antialias: false,
-    forceWebGL: requestedBackend === 'webgl',
+    forceWebGL: false,
     trackTimestamp: true,
   });
   if (!headless) {
@@ -339,6 +450,7 @@ async function runSmoke(): Promise<void> {
   statusValue.textContent = 'Compiling and executing kernels…';
   const first = await runProgram(renderer, kernelAdapter);
   const second = await runProgram(renderer, kernelAdapter);
+  const userParameter = await runUserParameterProgram(renderer, kernelAdapter);
   const expectedAge = frames * FIXED_DELTA_SECONDS;
   const lifetimeValue = first.initial.lifetime[0] ?? 1;
   const sizeLutSamples = first.sizeSamples.map(({ frame, value }) => {
@@ -346,6 +458,53 @@ async function runSmoke(): Promise<void> {
     const expected = sampleCurve(CURVE, normalizedAge);
     return { expected, frame, ok: Math.abs(value - expected) < 0.02, value };
   });
+  const gradientLut = buildGradientReferenceLut(GRADIENT_COLORS, GRADIENT_LUT_WIDTH);
+  const colorLutSamples = first.colorSamples.map(({ frame, value }) => {
+    const normalizedAge = Math.min((frame * FIXED_DELTA_SECONDS) / lifetimeValue, 1);
+    const expected = sampleRgbaLut(
+      gradientLut,
+      GRADIENT_LUT_WIDTH,
+      normalizedAge,
+      linearFloat32Filtering,
+    );
+    return {
+      expected,
+      frame,
+      ok: value.every((channel, index) => nearlyEqual(channel, expected[index]!, 0.002)),
+      value,
+    };
+  });
+  const initialVelocity = [
+    first.initial.velocity[0] ?? Number.NaN,
+    first.initial.velocity[1] ?? Number.NaN,
+    first.initial.velocity[2] ?? Number.NaN,
+  ];
+  const initialPosition = [
+    first.initial.position[0] ?? Number.NaN,
+    first.initial.position[1] ?? Number.NaN,
+    first.initial.position[2] ?? Number.NaN,
+  ];
+  const elapsed = frames * FIXED_DELTA_SECONDS;
+  const expectedVelocity = [
+    initialVelocity[0]!,
+    initialVelocity[1]! + GRAVITY * elapsed,
+    initialVelocity[2]!,
+  ];
+  const expectedPosition = [
+    initialPosition[0]! + initialVelocity[0]! * elapsed,
+    initialPosition[1]! +
+      initialVelocity[1]! * elapsed +
+      GRAVITY * FIXED_DELTA_SECONDS ** 2 * ((frames * (frames + 1)) / 2),
+    initialPosition[2]! + initialVelocity[2]! * elapsed,
+  ];
+  const finalVelocity = [...first.final.velocity.slice(0, 3)];
+  const finalPosition = [...first.final.position.slice(0, 3)];
+  const gravityVelocityMatchesCpu = finalVelocity.every((value, index) =>
+    nearlyEqual(value, expectedVelocity[index]!, 0.002),
+  );
+  const integratePositionMatchesCpu = finalPosition.every((value, index) =>
+    nearlyEqual(value, expectedPosition[index]!, 0.002),
+  );
   const validation = {
     defaultsOk:
       (first.initial.age[0] ?? Number.NaN) === 0 && (first.initial.size[0] ?? Number.NaN) === 1,
@@ -353,11 +512,11 @@ async function runSmoke(): Promise<void> {
       equalArrays(first.final.position, second.final.position) &&
       equalArrays(first.final.velocity, second.final.velocity) &&
       equalArrays(first.final.age, second.final.age) &&
-      equalArrays(first.final.size, second.final.size),
-    gravityVelocityChanged:
-      (first.final.velocity[1] ?? Number.NaN) < (first.initial.velocity[1] ?? Number.NaN),
-    integratePositionAdvanced:
-      (first.final.position[1] ?? Number.NaN) !== (first.initial.position[1] ?? Number.NaN),
+      equalArrays(first.final.size, second.final.size) &&
+      equalArrays(first.final.color, second.final.color),
+    gradientLutOk: colorLutSamples.every(({ ok: sampleOk }) => sampleOk),
+    gravityVelocityMatchesCpu,
+    integratePositionMatchesCpu,
     lifetimeAdvanced: Math.abs((first.final.age[0] ?? Number.NaN) - expectedAge) < 0.0001,
     mat3BoolOk:
       (first.initial.enabled[0] ?? 0) === 1 &&
@@ -366,18 +525,30 @@ async function runSmoke(): Promise<void> {
       (first.initial.frame[5] ?? 0) === 1 &&
       (first.initial.frame[10] ?? 0) === 1,
     sizeLutOk: sizeLutSamples.every(({ ok: sampleOk }) => sampleOk),
+    userParameterDefaultOk:
+      userParameter.initial === 0 &&
+      userParameter.uniformDefault === USER_GRAVITY_DEFAULT &&
+      nearlyEqual(userParameter.afterDefault, USER_GRAVITY_DEFAULT),
   };
   const ok = Object.values(validation).every(Boolean);
   const result = {
     activeBackend,
+    colorLutSamples,
     computeOk: ok,
-    compileDiagnostics: program.diagnostics,
+    compileDiagnostics: [...program.diagnostics, ...userParameterProgram.diagnostics],
+    cpuIntegrationReference: {
+      expectedPosition,
+      expectedVelocity,
+      finalPosition,
+      finalVelocity,
+    },
     frames,
     mode: headless ? 'headless' : 'visual',
     ok,
     particleCount,
     requestedBackend,
     sizeLutSamples,
+    userParameter,
     validation,
   };
   await performanceMonitor.resolveGpuTimestamps();

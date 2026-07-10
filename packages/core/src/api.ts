@@ -1,6 +1,9 @@
 import { resolveAttributeSchema } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
-import { collectEmitterModules } from './emitter-modules.js';
+import {
+  collectEmitterModuleLabelDiagnostics,
+  collectParameterDeclarationDiagnostics,
+} from './emitter-modules.js';
 import type {
   AttributeDefinition,
   AttributeSchema,
@@ -57,7 +60,6 @@ import type {
   Vec3,
   Vec4,
   VelocityConeOptions,
-  VfxDiagnostic,
 } from './types.js';
 
 function createModule<Stage extends ModuleStage, Config extends object>(
@@ -128,64 +130,9 @@ function addEventQueueWrite(module: EventModule, eventName: string): EventModule
   };
 }
 
-function compileDiagnostic(code: string, message: string, path: string): VfxDiagnostic {
-  return { code, message, path, phase: 'compile', severity: 'error' };
-}
-
-function collectModuleLabelDiagnostics(
-  config: EmitterConfig<AttributeSchema, ParameterSchema>,
-): VfxDiagnostic[] {
-  const diagnostics: VfxDiagnostic[] = [];
-  const labelsByStage = new Map<ModuleStage, Map<string, string>>();
-
-  for (const { module, path } of collectEmitterModules(config)) {
-    const { label } = module;
-    if (label === undefined) continue;
-    if (label.length === 0) {
-      diagnostics.push(
-        compileDiagnostic(
-          'NACHI_MODULE_LABEL_EMPTY',
-          'Module labels must be non-empty when provided.',
-          `${path}.label`,
-        ),
-      );
-      continue;
-    }
-    if (label.startsWith('$')) {
-      diagnostics.push(
-        compileDiagnostic(
-          'NACHI_MODULE_RESERVED_LABEL',
-          `Module label "${label}" uses the compiler-reserved "$" prefix.`,
-          `${path}.label`,
-        ),
-      );
-    }
-
-    let stageLabels = labelsByStage.get(module.stage);
-    if (stageLabels === undefined) {
-      stageLabels = new Map();
-      labelsByStage.set(module.stage, stageLabels);
-    }
-    const previousPath = stageLabels.get(label);
-    if (previousPath === undefined) {
-      stageLabels.set(label, path);
-    } else {
-      diagnostics.push(
-        compileDiagnostic(
-          'NACHI_MODULE_DUPLICATE_LABEL',
-          `Module label "${label}" is duplicated in the ${module.stage} stage (first declared at ${previousPath}).`,
-          `${path}.label`,
-        ),
-      );
-    }
-  }
-
-  return diagnostics;
-}
-
 export function range<T extends number | Vec2 | Vec3 | Vec4>(min: T, max: T): RangeGenerator<T> {
   // The stage compiler resolves this with pcgRandomFloatNode(particleIndex, emitterSeed,
-  // moduleSlot, spawnGeneration). moduleSlot is label-derived or the normalized stage index.
+  // moduleSlot, spawnGeneration). moduleSlot combines the stage with a label or stage index.
   return { distribution: 'uniform', kind: 'range', max, min };
 }
 
@@ -237,22 +184,6 @@ export function attribute<const Name extends string, const Type extends Attribut
   return { kind: 'attribute', name, ...options };
 }
 
-function collectParameterPathDiagnostics(parameters: ParameterSchema | undefined): VfxDiagnostic[] {
-  const diagnostics: VfxDiagnostic[] = [];
-  for (const [key, definition] of Object.entries(parameters ?? {})) {
-    if (key !== definition.path) {
-      diagnostics.push(
-        compileDiagnostic(
-          'NACHI_PARAMETER_KEY_MISMATCH',
-          `Parameter key "${key}" must match its declared path "${definition.path}".`,
-          `parameters.${key}.path`,
-        ),
-      );
-    }
-  }
-  return diagnostics;
-}
-
 export function defineEmitter<
   const Attributes extends AttributeSchema = AttributeSchema,
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
@@ -270,8 +201,8 @@ export function defineEmitter<
   const normalizedConfig = events === undefined ? config : { ...config, events };
   const diagnostics = [
     ...resolveAttributeSchema<Attributes, Parameters>(normalizedConfig).diagnostics,
-    ...collectModuleLabelDiagnostics(normalizedConfig),
-    ...collectParameterPathDiagnostics(normalizedConfig.parameters),
+    ...collectEmitterModuleLabelDiagnostics(normalizedConfig),
+    ...collectParameterDeclarationDiagnostics(normalizedConfig.parameters),
   ];
   if (diagnostics.some(({ severity }) => severity === 'error')) {
     throw new VfxDiagnosticError(diagnostics);
@@ -491,7 +422,7 @@ export function defineEffect<
   const Elements extends EffectElements,
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
 >(config: EffectConfig<Elements, Parameters>): EffectDefinition<Elements, Parameters> {
-  const diagnostics = collectParameterPathDiagnostics(config.parameters);
+  const diagnostics = collectParameterDeclarationDiagnostics(config.parameters);
   if (diagnostics.some(({ severity }) => severity === 'error')) {
     throw new VfxDiagnosticError(diagnostics);
   }

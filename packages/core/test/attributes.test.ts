@@ -59,6 +59,53 @@ describe('resolved attribute schema', () => {
     });
   });
 
+  it.each([0, -5, 1.5, Number.NaN])('diagnoses invalid emitter capacity %s', (capacity) => {
+    const result = resolveAttributeSchema({
+      capacity,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'NACHI_CAPACITY_INVALID',
+        path: 'capacity',
+        phase: 'compile',
+        severity: 'error',
+      }),
+    ]);
+  });
+
+  it('diagnoses attribute defaults with the wrong logical type or component count', () => {
+    const invalid = (name: string, type: string, defaultValue: unknown) =>
+      ({ default: defaultValue, kind: 'attribute', name, type }) as unknown as AttributeDefinition;
+    const result = resolveAttributeSchema({
+      attributes: {
+        badBool: invalid('badBool', 'bool', 0),
+        badFloat: invalid('badFloat', 'f32', [0]),
+        badMat3: invalid(
+          'badMat3',
+          'mat3',
+          Array.from({ length: 8 }, () => 0),
+        ),
+        badVec3: invalid('badVec3', 'vec3', [0, 0]),
+      },
+      capacity: 1,
+      render: testModule('render'),
+      spawn: testModule('spawn'),
+    });
+
+    expect(result.diagnostics.map(({ code }) => code)).toEqual(
+      Array.from({ length: 4 }, () => 'NACHI_ATTRIBUTE_DEFAULT_TYPE_MISMATCH'),
+    );
+    expect(result.diagnostics.map(({ path }) => path)).toEqual([
+      'attributes.badBool.default',
+      'attributes.badFloat.default',
+      'attributes.badMat3.default',
+      'attributes.badVec3.default',
+    ]);
+  });
+
   it('maps all eleven logical types to TSL instanced-array storage types', () => {
     const result = resolveAttributeSchema({
       attributes: {
@@ -298,5 +345,23 @@ describe('resolved attribute schema', () => {
         spawn: testModule('spawn', undefined, 'shared'),
       }),
     ).not.toThrow();
+  });
+
+  it('rejects parameter declarations outside the User namespace', () => {
+    let caught: unknown;
+    try {
+      defineEmitter({
+        capacity: 1,
+        parameters: {
+          'System.time': defineParameter('System.time', { default: 0, type: 'f32' }),
+        },
+        render: testModule('render'),
+        spawn: testModule('spawn'),
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(diagnosticCodes(caught)).toEqual(['NACHI_PARAMETER_NAMESPACE_INVALID']);
   });
 });

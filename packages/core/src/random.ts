@@ -41,12 +41,15 @@ export function hashModuleLabel(label: string): number {
 }
 
 export function resolveModuleSlot(
-  module: Pick<ModuleDefinition, 'label'>,
+  module: Pick<ModuleDefinition, 'label' | 'stage'>,
   normalizedStageIndex: number,
 ): number {
-  return module.label === undefined || module.label.length === 0
-    ? normalizedStageIndex >>> 0
-    : hashModuleLabel(module.label);
+  const stageSalt = hashModuleLabel(module.stage);
+  const identity =
+    module.label === undefined || module.label.length === 0
+      ? normalizedStageIndex >>> 0
+      : hashModuleLabel(module.label);
+  return (stageSalt ^ identity) >>> 0;
 }
 
 export function resolveRandomSampleSlot(moduleSlot: number, sampleOffset = 0): number {
@@ -61,7 +64,8 @@ export function pcgHashUint32(input: number): number {
     (Math.imul(input >>> 0, PCG_RANDOM_CONSTANTS.stateMultiplier) +
       PCG_RANDOM_CONSTANTS.stateIncrement) >>>
     0;
-  const dynamicShift = (state >>> PCG_RANDOM_CONSTANTS.stateShift) + 4;
+  const dynamicShift =
+    (state >>> PCG_RANDOM_CONSTANTS.stateShift) + PCG_RANDOM_CONSTANTS.stateShiftOffset;
   const word = Math.imul(
     ((state >>> dynamicShift) ^ state) >>> 0,
     PCG_RANDOM_CONSTANTS.outputMultiplier,

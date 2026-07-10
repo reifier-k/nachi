@@ -190,15 +190,28 @@ describe('deterministic PCG random', () => {
   });
 
   it('prefers a stable non-empty module label over the normalized stage index', () => {
-    const module = { label: 'stable-smoke' };
+    const module = { label: 'stable-smoke', stage: 'update' } as const;
     expect(resolveModuleSlot(module, 0)).toBe(resolveModuleSlot(module, 99));
-    expect(resolveModuleSlot(module, 0)).toBe(hashModuleLabel('stable-smoke'));
+    expect(resolveModuleSlot(module, 0)).toBe(
+      (hashModuleLabel('stable-smoke') ^ hashModuleLabel('update')) >>> 0,
+    );
   });
 
   it('uses the normalized stage index for an unlabeled module', () => {
-    expect(resolveModuleSlot({}, 0)).toBe(0);
-    expect(resolveModuleSlot({}, 7)).toBe(7);
-    expect(resolveModuleSlot({ label: '' }, 9)).toBe(9);
+    expect(resolveModuleSlot({ stage: 'init' }, 0)).toBe(hashModuleLabel('init'));
+    expect(resolveModuleSlot({ stage: 'init' }, 7)).toBe((hashModuleLabel('init') ^ 7) >>> 0);
+    expect(resolveModuleSlot({ label: '', stage: 'init' }, 9)).toBe(
+      (hashModuleLabel('init') ^ 9) >>> 0,
+    );
+  });
+
+  it('separates equal module identities across stages', () => {
+    expect(resolveModuleSlot({ stage: 'init' }, 1)).not.toBe(
+      resolveModuleSlot({ stage: 'update' }, 1),
+    );
+    expect(resolveModuleSlot({ label: 'shared', stage: 'init' }, 1)).not.toBe(
+      resolveModuleSlot({ label: 'shared', stage: 'update' }, 1),
+    );
   });
 
   it('hashes module labels deterministically and distinguishes label text', () => {
