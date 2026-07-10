@@ -686,6 +686,36 @@ describe('emitter kernel compiler', () => {
     expect(built.spawnDispatch).toBeUndefined();
   });
 
+  it.each([
+    ['rate', rate({ rate: 1 })],
+    ['per-distance', perDistance({ rate: 1 })],
+  ])('rejects %s spawning on WebGL2 during kernel materialization', (_name, spawn) => {
+    const program = compileEmitter({ ...baseEmitter(), spawn });
+    let caught: unknown;
+    try {
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(VfxDiagnosticError);
+    expect(caught instanceof VfxDiagnosticError ? caught.diagnostics : []).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+        path: 'spawn[0]',
+        phase: 'compile',
+      }),
+    );
+  });
+
   it('rejects a spawn module that writes particle state', () => {
     const illegal = {
       ...burst({ count: 1 }),
@@ -1008,6 +1038,7 @@ describe('emitter kernel compiler', () => {
         'Emitter.seed',
         'Emitter.spawnGeneration',
         'Emitter.spawnCount',
+        'Emitter.allocation.freeCount',
         'Emitter.events.pending',
         'Emitter.events.onDeath',
         'Emitter.eventPayload.position',

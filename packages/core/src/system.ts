@@ -535,7 +535,9 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #exactAliveCount: number | undefined;
   #exactAliveSequence: number | undefined;
   #initialized = false;
+  #lastOverflowCount = 0;
   #pendingDistance = 0;
+  #pendingGpuSpawnRequested = 0;
   #spawnGeneration = 0;
   #transform: readonly number[];
 
@@ -627,6 +629,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         this.#emitterAge = 0;
         this.#drainRemaining = 0;
         this.#emissionCompletedSequence = undefined;
+        this.#pendingDistance = 0;
         this.#resetSpawnAccumulators();
         this.#setFrameUniforms(0, context, command.loopIndex);
         setUniform(
@@ -765,6 +768,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     // lower free-list availability; this clamp also makes malformed/extreme requests safe.
     const dispatchCount = Math.min(requestedCount, this.definition.capacity);
     const cpuOverflow = Math.max(0, requestedCount - dispatchCount);
+    if (cpuOverflow > 0) this.#reportOverflow(requestedCount, cpuOverflow);
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.spawnCount', dispatchCount);
     if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
       const { finalizeSpawn, prepareSpawn, spawnDispatch } = this.kernels;
@@ -782,25 +786,16 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         spawnDispatch.indirectResource,
       );
       await this.#renderer.submitCompute(finalizeSpawn);
-      if (this.#renderer.readStorage) {
-        const counters = new Uint32Array(
-          await this.#renderer.readStorage(this.kernels.spawnOverflow),
-        );
-        const overflow = (counters[this.kernels.counterOffsets.spawnOverflow] ?? 0) + cpuOverflow;
-        if (overflow > 0) this.#reportOverflow(requestedCount, overflow);
-      } else if (cpuOverflow > 0) {
-        this.#reportOverflow(requestedCount, cpuOverflow);
-      }
+      this.#pendingGpuSpawnRequested += dispatchCount;
     } else {
       await this.#renderer.submitCompute(this.kernels.spawn);
-      if (cpuOverflow > 0) this.#reportOverflow(requestedCount, cpuOverflow);
     }
   }
 
   #reportOverflow(requestedCount: number, overflow: number): void {
     this.#onDiagnostic({
       code: 'NACHI_SPAWN_CAPACITY_EXCEEDED',
-      message: `Spawn request ${requestedCount} exceeded available capacity; ${overflow} particle(s) were safely dropped.`,
+      message: `Spawn requests totaling ${requestedCount} exceeded available capacity; ${overflow} particle(s) were safely dropped.`,
       phase: 'runtime',
       severity: 'warning',
     });
@@ -824,6 +819,13 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         const counters = new Uint32Array(await this.#renderer.readStorage(this.kernels.aliveCount));
         this.#exactAliveCount = counters[this.kernels.counterOffsets.aliveCount] ?? 0;
         this.#exactAliveSequence = this.#compactSequence;
+        const overflowCount = counters[this.kernels.counterOffsets.spawnOverflow] ?? 0;
+        const overflow = (overflowCount - this.#lastOverflowCount) >>> 0;
+        this.#lastOverflowCount = overflowCount;
+        if (overflow > 0) {
+          this.#reportOverflow(this.#pendingGpuSpawnRequested, overflow);
+        }
+        this.#pendingGpuSpawnRequested = 0;
       }
     } else if (this.#renderer.readStorage) {
       const alive = this.kernels.storages.alive;

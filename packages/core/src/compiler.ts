@@ -220,11 +220,17 @@ export interface BuiltEmitterKernels {
     readonly spawnOverflow: 3;
     readonly spawnSuccess: 2;
   };
+  /**
+   * Core updates words 1-4 only. Before first draw, the M3 renderer must prime word 0
+   * (`indexCount`) once on the CPU and then bind this resource to the geometry.
+   */
   readonly drawIndirect?: KernelIndirectStorageNode;
   readonly finalizeIndirect?: KernelComputeNode;
   readonly finalizeSpawn?: KernelComputeNode;
   readonly freeCount?: KernelStorageNode;
+  /** M1 all-slots compatibility kernel; never submit with the M2 lifecycle kernels. */
   readonly init: KernelComputeNode;
+  /** Starts the M2 lifecycle path; mixing it with `init` leaves allocator counters inconsistent. */
   readonly initialize: KernelComputeNode;
   readonly luts: Readonly<Record<string, unknown>>;
   readonly prepareSpawn?: KernelComputeNode;
@@ -375,6 +381,7 @@ const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
 function isKnownEmitterPath(reference: ParameterPath): boolean {
   return (
     EMITTER_PATHS.has(reference) ||
+    /^Emitter\.allocation\..+/.test(reference) ||
     /^Emitter\.events\..+/.test(reference) ||
     /^Emitter\.eventPayload\..+/.test(reference)
   );
@@ -1082,6 +1089,19 @@ function createBuildKernels(
 ): (adapter: KernelTslAdapter) => BuiltEmitterKernels {
   return (adapter) => {
     const buildDiagnostics = [...program.diagnostics];
+    if (adapter.capabilities?.backend === 'webgl2') {
+      for (const module of program.spawn.modules) {
+        if (module.type !== 'core/rate' && module.type !== 'core/per-distance') continue;
+        buildDiagnostics.push({
+          code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
+          hint: 'Use core/burst on WebGL2 or select the WebGPU backend.',
+          message: `${module.type} requires the WebGPU free-list path; WebGL2 supports burst spawning only.`,
+          path: module.path,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+    }
     const storageBufferLimit = adapter.deviceLimits?.maxStorageBuffersPerShaderStage;
     if (
       storageBufferLimit !== undefined &&
@@ -1295,7 +1315,9 @@ function createBuildKernels(
       .compute(capacity, [program.spawn.workgroupSize])
       .setName('NachiEmitterInitialize');
 
-    // Compatibility kernel retained for M1 consumers that intentionally initialize every slot.
+    // M1 compatibility only: this all-slots init kernel MUST NOT be mixed with the M2 lifecycle
+    // path (initialize -> spawn -> update -> compact). It marks every slot alive without updating
+    // free/alive counters, so submitting both paths can make allocator counters inconsistent.
     const init = adapter
       .fn(() => {
         for (const module of initModules) buildModule(module, adapter.instanceIndex);
@@ -1393,7 +1415,6 @@ function createBuildKernels(
       prepareSpawn = adapter
         .fn(() => {
           adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
-          adapter.atomicStore(counter(counterOffsets.spawnOverflow), adapter.uint(0));
           const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
           spawnDispatch!
             .element(adapter.uint(0))

@@ -663,6 +663,103 @@ describe('VFXSystem runtime scheduler', () => {
     );
   });
 
+  it('discards distance accumulated before delayed activation', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 16,
+      integration: 'none',
+      lifecycle: { duration: 1, startDelay: 1 },
+      render: computeRender,
+      spawn: perDistance({ rate: 2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    instance.setTransform([5, 0, 0]);
+    await system.update(1);
+    await system.update(0.1);
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+  });
+
+  it('reads GPU overflow only with the periodic alive-count readback', async () => {
+    const base = new FakeRuntimeRenderer();
+    let readCount = 0;
+    const renderer: VfxRuntimeRenderer = {
+      kernelAdapter: base.kernelAdapter,
+      readStorage: () => {
+        readCount += 1;
+        return Promise.resolve(new Uint32Array([0, 1, 0, 1]).buffer);
+      },
+      submitCompute: (kernel) => base.submitCompute(kernel),
+      submitComputeIndirect: (kernel) => base.submitCompute(kernel),
+    };
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 2 });
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    await system.update(0);
+
+    expect(readCount).toBe(1);
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_SPAWN_CAPACITY_EXCEEDED' }),
+    );
+  });
+
+  it('reports CPU-side spawn clamping immediately without readback', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const emitter = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 2 }),
+    });
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_SPAWN_CAPACITY_EXCEEDED' }),
+    );
+  });
+
+  it('aggregates WebGL2 burst alive flags on the CPU and updates instance count', async () => {
+    const base = new FakeRuntimeRenderer();
+    const readbacks = [new Uint32Array([0, 0, 0]), new Uint32Array([1, 0, 1])];
+    const instanceCounts: number[] = [];
+    let readIndex = 0;
+    const renderer: VfxRuntimeRenderer = {
+      kernelAdapter: {
+        ...base.kernelAdapter,
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+      },
+      readStorage: () => {
+        const values = readbacks[Math.min(readIndex, readbacks.length - 1)]!;
+        readIndex += 1;
+        return Promise.resolve(values.buffer);
+      },
+      setInstanceCount: (_kernels, count) => instanceCounts.push(count),
+      submitCompute: (kernel) => base.submitCompute(kernel),
+    };
+    const emitter = defineEmitter({
+      capacity: 3,
+      integration: 'none',
+      lifecycle: { duration: 1 },
+      render: computeRender,
+      spawn: burst({ count: 2 }),
+    });
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+
+    expect(instance.state).toBe('active');
+    expect(readIndex).toBe(2);
+    expect(instanceCounts).toEqual([0, 2]);
+    expect(instance.getEmitter('particles')?.aliveCount).toBe(2);
+  });
+
   it('schedules additional burst cycles when interval boundaries are crossed', async () => {
     const renderer = new FakeRuntimeRenderer();
     const system = new VFXSystem(renderer);
