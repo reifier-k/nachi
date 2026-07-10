@@ -21,6 +21,7 @@ import {
   gravity,
   KernelModuleRegistry,
   lifetime,
+  meshRenderer,
   parameter,
   perDistance,
   pcgRandomFloat,
@@ -808,6 +809,7 @@ describe('emitter kernel compiler', () => {
           interpolate: true,
           motionVectors: motion,
           progressAttribute: 'normalizedAge',
+          rowOrder: 'top-left',
           rows: 2,
         },
         map: atlas,
@@ -840,7 +842,118 @@ describe('emitter kernel compiler', () => {
         severity: 'warning',
       }),
     );
-    expect(program.draws[0]?.fragment.flipbook).not.toHaveProperty('motionVectors');
+    const draw = program.draws[0];
+    if (!draw || draw.kind !== 'billboard') throw new Error('Expected a billboard draw.');
+    expect(draw.fragment.flipbook).not.toHaveProperty('motionVectors');
+  });
+
+  it('warns when motion vectors are combined with discrete flipbook playback', () => {
+    const atlas = { assetType: 'texture', kind: 'asset-ref', uri: 'atlas' } as const;
+    const motion = { assetType: 'texture', kind: 'asset-ref', uri: 'motion' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [lifetime(1)],
+        render: billboard({
+          map: flipbook(atlas, { cols: 2, interpolate: false, motionVectors: motion, rows: 2 }),
+        }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_FLIPBOOK_MOTION_VECTORS_IGNORED',
+        severity: 'warning',
+      }),
+    );
+    const draw = program.draws[0];
+    if (!draw || draw.kind !== 'billboard') throw new Error('Expected a billboard draw.');
+    expect(draw.fragment.flipbook).not.toHaveProperty('motionVectors');
+  });
+
+  it('compiles configurable soft distance and diagnoses invalid values', () => {
+    const valid = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ soft: { fadeDistance: 0.08 } }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const validDraw = valid.draws[0];
+    if (!validDraw || validDraw.kind !== 'billboard') throw new Error('Expected billboard.');
+    expect(validDraw.fragment.soft).toEqual({ fadeDistance: 0.08 });
+
+    const invalid = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ soft: { fadeDistance: 0 } }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(invalid.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_BILLBOARD_SOFT_DISTANCE_INVALID' }),
+    );
+  });
+
+  it('compiles mesh particle draws with packed attributes and alive-index indirection', () => {
+    const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'debris' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 16,
+        init: [velocityCone({ angle: 20, direction: [0, 1, 0], speed: 2 })],
+        render: meshRenderer({
+          alignment: { mode: 'velocity' },
+          blending: 'alpha',
+          geometry,
+        }),
+        spawn: burst({ count: 4 }),
+      }),
+    );
+
+    expect(program.diagnostics).toEqual([]);
+    expect(program.draws[0]).toMatchObject({
+      fragment: { blending: 'alpha' },
+      geometry: { resource: geometry, topology: 'triangle-list' },
+      indirect: { instanceCount: 'alive-count', physicalIndex: 'alive-indices' },
+      kind: 'mesh',
+      vertex: {
+        alignment: { mode: 'velocity' },
+        attributes: expect.arrayContaining(['position', 'scale', 'color', 'velocity']),
+      },
+    });
+    expect(program.meta.backendBudgets.webgpu.vertexStorageBufferCount).toBeLessThanOrEqual(8);
+  });
+
+  it('compiles mesh orientation modes and diagnoses an invalid custom axis', () => {
+    const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'debris' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: [
+          meshRenderer({ alignment: { mode: 'none' }, geometry }),
+          meshRenderer({ alignment: { mode: 'quaternion' }, geometry }),
+          meshRenderer({ alignment: { axis: [1, 0, 0], mode: 'custom-axis' }, geometry }),
+        ],
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.draws.map((draw) => draw.kind)).toEqual(['mesh', 'mesh', 'mesh']);
+    expect(program.diagnostics).toEqual([]);
+
+    const invalid = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: meshRenderer({
+          alignment: { axis: [0, 0, 0], mode: 'custom-axis' },
+          geometry,
+        }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(invalid.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_MESH_AXIS_INVALID' }),
+    );
   });
 
   it('diagnoses invalid flipbook grids and cutout vertex counts', () => {

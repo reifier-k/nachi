@@ -1,7 +1,9 @@
 import type {
   BakedLut,
   BuiltEmitterKernels,
+  CompiledDrawIndirectDescription,
   CompiledEmitterProgram,
+  GeometryRef,
   KernelNode,
   KernelIndirectStorageNode,
   KernelStorageNode,
@@ -38,6 +40,8 @@ import {
   mix,
   mod,
   mx_atan2,
+  positionGeometry,
+  rotate,
   sin,
   screenUV,
   storage,
@@ -63,12 +67,23 @@ export interface ThreeSpriteMaterializationOptions {
   readonly resolveTexture?: ThreeTextureResolver;
 }
 
+export interface ThreeMeshMaterializationOptions {
+  readonly resolveGeometry: ThreeGeometryResolver;
+}
+
 export type ThreeTextureResolver = (reference: TextureRef) => THREE.Texture | undefined;
+export type ThreeGeometryResolver = (reference: GeometryRef) => THREE.BufferGeometry | undefined;
 
 export function createThreeTextureResolver(
   textures: ReadonlyMap<string, THREE.Texture>,
 ): ThreeTextureResolver {
   return (reference) => textures.get(reference.uri);
+}
+
+export function createThreeGeometryResolver(
+  geometries: ReadonlyMap<string, THREE.BufferGeometry>,
+): ThreeGeometryResolver {
+  return (reference) => geometries.get(reference.uri);
 }
 
 function asNode(value: unknown): KernelNode {
@@ -81,6 +96,10 @@ function nodeLength(value: KernelNode): KernelNode {
 
 function nodeXY(value: KernelNode): KernelNode {
   return (value as KernelNode & { readonly xy: KernelNode }).xy;
+}
+
+function nodeCross(left: KernelNode, right: KernelNode): KernelNode {
+  return (left as KernelNode & { cross(value: KernelNode): KernelNode }).cross(right);
 }
 
 function vectorValues(value: unknown, length: number): number[] {
@@ -316,7 +335,8 @@ export function createThreeSpriteGeometry(vertexCount: 4 | 5 | 6 | 7 | 8): THREE
       [0.5, 0.5],
       [-0.5, 0.5],
     ] as const;
-    const angle = -Math.PI / 2 + (index / vertexCount) * Math.PI * 2;
+    const phase = vertexCount === 8 ? Math.PI / vertexCount : 0;
+    const angle = -Math.PI / 2 + phase + (index / vertexCount) * Math.PI * 2;
     const cosine = Math.cos(angle);
     const sine = Math.sin(angle);
     const radius = 0.5 / Math.max(Math.abs(cosine), Math.abs(sine));
@@ -337,25 +357,14 @@ export function createThreeSpriteGeometry(vertexCount: 4 | 5 | 6 | 7 | 8): THREE
   return geometry;
 }
 
-/** Materializes one compiler draw description without exposing physical packing to author code. */
-export function materializeThreeSpriteDraw(
+function createThreeParticleVertexBindings(
   program: CompiledEmitterProgram,
   kernels: BuiltEmitterKernels,
-  drawIndex = 0,
-  options: ThreeSpriteMaterializationOptions = {},
-): THREE.InstancedMesh<THREE.BufferGeometry, THREE.SpriteNodeMaterial> {
-  const draw = program.draws[drawIndex];
-  if (!draw) throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
-  if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
-    throw new Error('Compiled sprite rendering requires the WebGPU indirect-draw lifecycle path.');
-  }
-  if (draw.indirect.drawArgumentsOffsetBytes !== kernels.drawIndirectOffsetBytes) {
-    throw new Error('Compiled draw and lifecycle indirect offsets disagree.');
-  }
-
+  indirect: CompiledDrawIndirectDescription,
+) {
   const vertexStorages = program.attributeSchema.storageArrays.map((description) => {
     const computeStorage = kernels.storages[description.name];
-    if (!computeStorage) throw new Error(`Sprite storage "${description.name}" is missing.`);
+    if (!computeStorage) throw new Error(`Particle storage "${description.name}" is missing.`);
     return (
       storage(computeStorage.value as never, description.type, description.length) as unknown as {
         toReadOnly(): KernelStorageNode;
@@ -369,19 +378,24 @@ export function materializeThreeSpriteDraw(
       program.meta.lifecycleStorage.buffers.state.wordCount,
     ) as unknown as { toReadOnly(): KernelStorageNode }
   ).toReadOnly();
-
   const logicalAttribute = (name: string, physicalIndex: KernelNode): KernelNode => {
     const attribute = program.attributeSchema.byName[name];
-    if (!attribute) throw new Error(`Sprite attribute "${name}" is missing.`);
-    const storage = program.attributeSchema.storageArrays[attribute.physical.bufferIndex];
-    const storageNode = storage === undefined ? undefined : vertexStorages[storage.index];
-    if (!storage || !storageNode) throw new Error(`Sprite storage for "${name}" is missing.`);
-    const address = storage.packed ? resolvePackedAttributeAddress(attribute, storage) : undefined;
-    const index = storage.packed
+    if (!attribute) throw new Error(`Particle attribute "${name}" is missing.`);
+    const storageDescription =
+      program.attributeSchema.storageArrays[attribute.physical.bufferIndex];
+    const storageNode =
+      storageDescription === undefined ? undefined : vertexStorages[storageDescription.index];
+    if (!storageDescription || !storageNode) {
+      throw new Error(`Particle storage for "${name}" is missing.`);
+    }
+    const address = storageDescription.packed
+      ? resolvePackedAttributeAddress(attribute, storageDescription)
+      : undefined;
+    const index = storageDescription.packed
       ? physicalIndex.mul(asNode(uint(address!.particleStride))).add(asNode(uint(address!.group)))
       : physicalIndex;
     const element = storageNode.element(index);
-    if (!storage.packed) return element;
+    if (!storageDescription.packed) return element;
     const lanes = [element.x, element.y, element.z, element.w].slice(
       address!.offset,
       address!.offset + attribute.components,
@@ -391,13 +405,37 @@ export function materializeThreeSpriteDraw(
     if (attribute.components === 3) {
       return asNode(vec3(lanes[0] as never, lanes[1] as never, lanes[2] as never));
     }
-    throw new Error(`Packed sprite attribute "${name}" has unsupported width.`);
+    throw new Error(`Packed particle attribute "${name}" has unsupported width.`);
   };
-
   const aliveIndex = asNode(uint(instanceIndex)).add(
-    asNode(uint(draw.indirect.aliveIndicesOffsetWords)),
+    asNode(uint(indirect.aliveIndicesOffsetWords)),
   );
-  const compactedIndex = lifecycleRead.element(aliveIndex);
+  return { compactedIndex: lifecycleRead.element(aliveIndex), logicalAttribute };
+}
+
+/** Materializes one compiler draw description without exposing physical packing to author code. */
+export function materializeThreeSpriteDraw(
+  program: CompiledEmitterProgram,
+  kernels: BuiltEmitterKernels,
+  drawIndex = 0,
+  options: ThreeSpriteMaterializationOptions = {},
+): THREE.InstancedMesh<THREE.BufferGeometry, THREE.SpriteNodeMaterial> {
+  const draw = program.draws[drawIndex];
+  if (!draw || draw.kind !== 'billboard') {
+    throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
+  }
+  if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
+    throw new Error('Compiled sprite rendering requires the WebGPU indirect-draw lifecycle path.');
+  }
+  if (draw.indirect.drawArgumentsOffsetBytes !== kernels.drawIndirectOffsetBytes) {
+    throw new Error('Compiled draw and lifecycle indirect offsets disagree.');
+  }
+
+  const { compactedIndex, logicalAttribute } = createThreeParticleVertexBindings(
+    program,
+    kernels,
+    draw.indirect,
+  );
   const particlePosition = logicalAttribute('position', compactedIndex);
   const particleSize = logicalAttribute('size', compactedIndex);
   const particleColor = logicalAttribute('color', compactedIndex);
@@ -449,18 +487,20 @@ export function materializeThreeSpriteDraw(
       const frameBlend = flipbook.interpolate
         ? asNode(fract(framePosition as never))
         : asNode(float(0));
-      const atlasUv = (frame: KernelNode, sourceUv: KernelNode): KernelNode => {
+      const atlasUv = (frame: KernelNode, sourceUv: KernelNode, flipY: boolean): KernelNode => {
         const column = asNode(mod(frame as never, flipbook.cols));
-        const row = asNode(floor(frame.div(flipbook.cols) as never));
+        const topDownRow = asNode(floor(frame.div(flipbook.cols) as never));
+        const row = flipY ? asNode(float(flipbook.rows - 1)).sub(topDownRow) : topDownRow;
+        const cellUv = sourceUv.clamp(0.001, 0.999);
         return asNode(
           vec2(
-            sourceUv.x.add(column).div(flipbook.cols) as never,
-            sourceUv.y.add(row).div(flipbook.rows) as never,
+            cellUv.x.add(column).div(flipbook.cols) as never,
+            cellUv.y.add(row).div(flipbook.rows) as never,
           ),
         );
       };
-      let firstUv = atlasUv(firstFrame, localUv);
-      let secondUv = atlasUv(secondFrame, localUv);
+      let firstUv = atlasUv(firstFrame, localUv, map.flipY);
+      let secondUv = atlasUv(secondFrame, localUv, map.flipY);
       if (flipbook.interpolate && flipbook.motionVectors) {
         const motionTexture = options.resolveTexture?.(flipbook.motionVectors);
         if (!motionTexture) {
@@ -468,16 +508,19 @@ export function materializeThreeSpriteDraw(
             `No texture resolver supplied for flipbook motion vectors "${flipbook.motionVectors.uri}".`,
           );
         }
-        const firstMotion = nodeXY(asNode(texture(motionTexture, firstUv as never)))
+        const firstMotionUv = atlasUv(firstFrame, localUv, motionTexture.flipY);
+        const secondMotionUv = atlasUv(secondFrame, localUv, motionTexture.flipY);
+        const firstMotion = nodeXY(asNode(texture(motionTexture, firstMotionUv as never)))
           .mul(2)
           .sub(1);
-        const secondMotion = nodeXY(asNode(texture(motionTexture, secondUv as never)))
+        const secondMotion = nodeXY(asNode(texture(motionTexture, secondMotionUv as never)))
           .mul(2)
           .sub(1);
-        firstUv = atlasUv(firstFrame, localUv.sub(firstMotion.mul(frameBlend)));
+        firstUv = atlasUv(firstFrame, localUv.sub(firstMotion.mul(frameBlend)), map.flipY);
         secondUv = atlasUv(
           secondFrame,
           localUv.add(secondMotion.mul(asNode(float(1)).sub(frameBlend))),
+          map.flipY,
         );
       }
       const firstSample = asNode(texture(map, firstUv as never));
@@ -514,6 +557,122 @@ export function materializeThreeSpriteDraw(
   const indirectWords = indirect.array as Uint32Array;
   const indexCountWord = draw.indirect.drawArgumentsOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
   indirectWords[indexCountWord] = draw.geometry.indexCount;
+  indirect.needsUpdate = true;
+  geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
+
+  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
+  const identity = new THREE.Matrix4();
+  for (let index = 0; index < program.attributeSchema.capacity; index += 1) {
+    mesh.setMatrixAt(index, identity);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+function indexedGeometry(source: THREE.BufferGeometry): THREE.BufferGeometry {
+  const geometry = source.clone();
+  if (geometry.getIndex()) return geometry;
+  const vertexCount = geometry.getAttribute('position')?.count ?? 0;
+  if (vertexCount === 0) throw new Error('Mesh renderer geometry has no position vertices.');
+  geometry.setIndex(Array.from({ length: vertexCount }, (_, index) => index));
+  return geometry;
+}
+
+export function directionEulerAngles(
+  direction: readonly [number, number, number],
+): readonly [number, 0, number] {
+  const [x, y, z] = direction;
+  return [Math.atan2(z, y), 0, Math.atan2(-x, Math.hypot(y, z))];
+}
+
+function directionEuler(direction: KernelNode): KernelNode {
+  const yzLength = asNode(direction.y.mul(direction.y).add(direction.z.mul(direction.z)).sqrt());
+  return asNode(
+    vec3(
+      mx_atan2(direction.z as never, direction.y as never) as never,
+      0,
+      mx_atan2(direction.x.mul(-1) as never, yzLength as never) as never,
+    ),
+  );
+}
+
+function rotateByQuaternion(position: KernelNode, quaternion: KernelNode): KernelNode {
+  const twiceCross = nodeCross(quaternion.xyz, position).mul(2);
+  return position.add(twiceCross.mul(quaternion.w)).add(nodeCross(quaternion.xyz, twiceCross));
+}
+
+/** Materializes a compiled mesh renderer through the same packed/alive-index path as sprites. */
+export function materializeThreeMeshDraw(
+  program: CompiledEmitterProgram,
+  kernels: BuiltEmitterKernels,
+  drawIndex = 0,
+  options: ThreeMeshMaterializationOptions,
+): THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial> {
+  const draw = program.draws[drawIndex];
+  if (!draw || draw.kind !== 'mesh') {
+    throw new Error(`Compiled mesh draw ${drawIndex} is missing.`);
+  }
+  if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
+    throw new Error('Compiled mesh rendering requires the WebGPU indirect-draw lifecycle path.');
+  }
+  if (draw.indirect.drawArgumentsOffsetBytes !== kernels.drawIndirectOffsetBytes) {
+    throw new Error('Compiled mesh draw and lifecycle indirect offsets disagree.');
+  }
+  const resolvedGeometry = options.resolveGeometry(draw.geometry.resource);
+  if (!resolvedGeometry) {
+    throw new Error(
+      `No geometry resolver supplied for mesh resource "${draw.geometry.resource.uri}".`,
+    );
+  }
+  const geometry = indexedGeometry(resolvedGeometry);
+  const indexCount = geometry.getIndex()?.count ?? 0;
+  if (indexCount === 0) throw new Error('Mesh renderer geometry has no drawable indices.');
+  const { compactedIndex, logicalAttribute } = createThreeParticleVertexBindings(
+    program,
+    kernels,
+    draw.indirect,
+  );
+  const particlePosition = logicalAttribute('position', compactedIndex);
+  const particleScale = logicalAttribute('scale', compactedIndex);
+  const particleColor = logicalAttribute('color', compactedIndex);
+  let localPosition = asNode(positionGeometry).mul(particleScale);
+  if (draw.vertex.alignment.mode === 'velocity') {
+    localPosition = asNode(
+      rotate(
+        localPosition as never,
+        directionEuler(logicalAttribute('velocity', compactedIndex)) as never,
+      ),
+    );
+  } else if (draw.vertex.alignment.mode === 'custom-axis') {
+    localPosition = asNode(
+      rotate(
+        localPosition as never,
+        directionEuler(asNode(vec3(...draw.vertex.alignment.axis))) as never,
+      ),
+    );
+  } else if (draw.vertex.alignment.mode === 'quaternion') {
+    localPosition = rotateByQuaternion(localPosition, logicalAttribute('rotation', compactedIndex));
+  }
+  const blend = spriteBlending(draw.fragment.blending);
+  const fragmentColor = asNode(varying(particleColor as never));
+  const transparent =
+    draw.fragment.blending === 'alpha' || draw.fragment.blending === 'premultiplied';
+  const material = new THREE.MeshBasicNodeMaterial({
+    blending: blend.blending,
+    depthTest: true,
+    depthWrite: true,
+    premultipliedAlpha: blend.premultipliedAlpha,
+    transparent,
+  });
+  material.positionNode = localPosition.add(particlePosition) as never;
+  material.colorNode = fragmentColor.rgb as never;
+  material.opacityNode = fragmentColor.a as never;
+
+  const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
+  const indirectWords = indirect.array as Uint32Array;
+  const indexCountWord = draw.indirect.drawArgumentsOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
+  indirectWords[indexCountWord] = indexCount;
   indirect.needsUpdate = true;
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
 

@@ -1,11 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { billboard, burst, compileEmitter, defineEmitter, flipbook, lifetime } from '@nachi/core';
+import {
+  billboard,
+  burst,
+  compileEmitter,
+  defineEmitter,
+  flipbook,
+  lifetime,
+  meshRenderer,
+} from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import {
   createThreeKernelAdapter,
+  createThreeGeometryResolver,
   createThreeSpriteGeometry,
   createThreeTextureResolver,
+  directionEulerAngles,
+  materializeThreeMeshDraw,
   materializeThreeSpriteDraw,
 } from './three-kernel-adapter.js';
 
@@ -64,6 +75,15 @@ describe('three kernel adapter', () => {
     expect(Array.from(uvs.array).every((value) => value >= 0 && value <= 1)).toBe(true);
   });
 
+  it('offsets the octagonal cutout phase away from cardinal vertices', () => {
+    const geometry = createThreeSpriteGeometry(8);
+    const positions = geometry.getAttribute('position');
+
+    expect(positions.getX(0)).not.toBeCloseTo(0);
+    expect(positions.getY(0)).toBeCloseTo(-0.5);
+    expect(geometry.getIndex()?.count).toBe(18);
+  });
+
   it('materializes flipbook, motion-vector, and soft-particle nodes through TextureRef resolution', () => {
     const atlasRef = { assetType: 'texture', kind: 'asset-ref', uri: 'atlas' } as const;
     const motionRef = { assetType: 'texture', kind: 'asset-ref', uri: 'motion' } as const;
@@ -94,5 +114,73 @@ describe('three kernel adapter', () => {
     expect(mesh.geometry.getAttribute('position').count).toBe(6);
     expect(mesh.geometry.getIndex()?.count).toBe(12);
     expect(mesh.material.opacityNode).not.toBeNull();
+  });
+
+  it('materializes non-indexed geometry as an indirect mesh particle draw', () => {
+    const geometryRef = { assetType: 'geometry', kind: 'asset-ref', uri: 'debris' } as const;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0.25, 0, -0.1, -0.1, 0, 0.1, -0.1, 0], 3),
+    );
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 3,
+        render: meshRenderer({ alignment: { mode: 'quaternion' }, geometry: geometryRef }),
+        spawn: burst({ count: 2 }),
+      }),
+    );
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    const mesh = materializeThreeMeshDraw(program, kernels, 0, {
+      resolveGeometry: createThreeGeometryResolver(new Map([['debris', geometry]])),
+    });
+
+    expect(geometry.getIndex()).toBeNull();
+    expect(mesh.geometry.getIndex()?.count).toBe(3);
+    expect(mesh.material.positionNode).not.toBeNull();
+    expect(mesh.material.colorNode).not.toBeNull();
+    expect(mesh.material.transparent).toBe(true);
+  });
+
+  it('maps mesh +Y to velocity and custom-axis directions without reflection', () => {
+    const directions = [
+      [0, 0, 1],
+      [1, 0, 0],
+      [0, 0, -1],
+      [-1, 0, 0],
+      [0, 1, 0],
+      [0.3, 0.8, 0.5],
+    ] as const;
+
+    for (const direction of directions) {
+      const expected = new THREE.Vector3(...direction).normalize();
+      const euler = directionEulerAngles(direction);
+      const actual = new THREE.Vector3(0, 1, 0)
+        .applyEuler(new THREE.Euler(...euler, 'XYZ'))
+        .normalize();
+      for (let component = 0; component < 3; component += 1) {
+        expect(actual.getComponent(component)).toBeCloseTo(expected.getComponent(component), 6);
+      }
+    }
+  });
+
+  it('uses the opaque render-list path for non-alpha mesh blending', () => {
+    const geometryRef = { assetType: 'geometry', kind: 'asset-ref', uri: 'debris' } as const;
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: meshRenderer({ blending: 'additive', geometry: geometryRef }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const mesh = materializeThreeMeshDraw(
+      program,
+      program.buildKernels(createThreeKernelAdapter()),
+      0,
+      { resolveGeometry: createThreeGeometryResolver(new Map([['debris', geometry]])) },
+    );
+
+    expect(mesh.material.transparent).toBe(false);
   });
 });

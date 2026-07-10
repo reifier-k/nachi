@@ -359,11 +359,15 @@ export interface AssetRef<AssetType extends string = string> {
 }
 
 export type TextureRef = AssetRef<'texture'>;
+export type GeometryRef = AssetRef<'geometry'>;
 
+/** Playback reads Particles.normalizedAge; without a lifetime writer it remains on frame 0. */
 export interface FlipbookDefinition {
   readonly kind: 'flipbook';
   readonly texture: TextureRef;
+  /** Atlas columns. Frames advance left-to-right, then top-to-bottom. */
   readonly cols: number;
+  /** Atlas rows. Frame 0 is the top-left cell, including for flipY textures. */
   readonly rows: number;
   /** Defaults to true. False selects discrete frames without adjacent-frame blending. */
   readonly interpolate?: boolean;
@@ -380,7 +384,21 @@ export interface BillboardOptions {
   readonly blending?: BlendingMode;
   readonly cutout?: { readonly vertices: 4 | 5 | 6 | 7 | 8 };
   readonly map?: FlipbookDefinition | TextureRef;
-  readonly soft?: boolean;
+  /**
+   * Enables scene-depth intersection fading. fadeDistance is measured in Three.js linearized
+   * normalized camera-depth units; true uses the spike-calibrated default of 0.035.
+   */
+  readonly soft?: boolean | { readonly fadeDistance: number };
+}
+
+export interface MeshRendererOptions {
+  readonly alignment?:
+    | { readonly mode: 'custom-axis'; readonly axis: Vec3 }
+    | { readonly mode: 'none' }
+    | { readonly mode: 'quaternion' }
+    | { readonly mode: 'velocity' };
+  readonly blending?: BlendingMode;
+  readonly geometry: GeometryRef;
 }
 
 export interface EmitToOptions {

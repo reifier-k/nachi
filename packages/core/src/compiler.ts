@@ -22,8 +22,10 @@ import type {
   EmitterDefinition,
   EmitterLifecycle,
   EmptyParameterSchema,
+  GeometryRef,
   GradientGenerator,
   InitModule,
+  MeshRendererOptions,
   ModuleAccess,
   ModuleDefinition,
   ParameterGenerator,
@@ -47,6 +49,8 @@ import type {
 
 export const DEFAULT_LUT_RESOLUTION = 256;
 export const DEFAULT_WORKGROUP_SIZE = 64;
+/** Calibrated by spike-depth for a visible but localized intersection transition. */
+export const DEFAULT_SOFT_PARTICLE_FADE_DISTANCE = 0.035;
 
 export type CompiledKernelStage = 'init' | 'update';
 export type CompiledModuleStage = CompiledKernelStage | 'spawn';
@@ -403,7 +407,7 @@ export interface CompiledEmitterProgram {
   readonly attributeSchema: ResolvedAttributeSchema;
   readonly buildKernels: (adapter: KernelTslAdapter) => BuiltEmitterKernels;
   readonly diagnostics: readonly VfxDiagnostic[];
-  readonly draws: readonly CompiledSpriteDrawDescription[];
+  readonly draws: readonly CompiledDrawDescription[];
   readonly kernels: {
     readonly init: CompiledKernelDescription;
     readonly update: CompiledKernelDescription;
@@ -414,6 +418,21 @@ export interface CompiledEmitterProgram {
   readonly uniforms: readonly CompiledUniformDescription[];
 }
 
+export type CompiledDrawDescription = CompiledMeshDrawDescription | CompiledSpriteDrawDescription;
+
+export interface CompiledDrawIndirectDescription {
+  readonly aliveIndicesOffsetWords: number;
+  readonly drawArgumentsOffsetBytes: number;
+  readonly instanceCount: 'alive-count';
+  readonly physicalIndex: 'alive-indices';
+}
+
+export interface CompiledDrawVertexDescription {
+  readonly attributes: readonly string[];
+  readonly storageBufferCount: number;
+  readonly storageBuffers: readonly string[];
+}
+
 export interface CompiledSpriteDrawDescription {
   readonly fragment: {
     readonly blending: BlendingMode;
@@ -422,6 +441,7 @@ export interface CompiledSpriteDrawDescription {
       readonly interpolate: boolean;
       readonly motionVectors?: TextureRef;
       readonly progressAttribute: 'normalizedAge';
+      readonly rowOrder: 'top-left';
       readonly rows: number;
     };
     readonly map?: TextureRef;
@@ -433,19 +453,22 @@ export interface CompiledSpriteDrawDescription {
     readonly topology: 'triangle-list';
     readonly vertexCount: 4 | 5 | 6 | 7 | 8;
   };
-  readonly indirect: {
-    readonly aliveIndicesOffsetWords: number;
-    readonly drawArgumentsOffsetBytes: number;
-    readonly instanceCount: 'alive-count';
-    readonly physicalIndex: 'alive-indices';
-  };
+  readonly indirect: CompiledDrawIndirectDescription;
   readonly kind: 'billboard';
   readonly path: string;
-  readonly vertex: {
+  readonly vertex: CompiledDrawVertexDescription & {
     readonly alignment: NonNullable<BillboardOptions['alignment']>;
-    readonly attributes: readonly string[];
-    readonly storageBufferCount: number;
-    readonly storageBuffers: readonly string[];
+  };
+}
+
+export interface CompiledMeshDrawDescription {
+  readonly fragment: { readonly blending: BlendingMode };
+  readonly geometry: { readonly resource: GeometryRef; readonly topology: 'triangle-list' };
+  readonly indirect: CompiledDrawIndirectDescription;
+  readonly kind: 'mesh';
+  readonly path: string;
+  readonly vertex: CompiledDrawVertexDescription & {
+    readonly alignment: NonNullable<MeshRendererOptions['alignment']>;
   };
 }
 
@@ -1400,13 +1423,41 @@ function compileSpriteDraws(
         ),
       );
     }
-    if (flipbook?.motionVectors === true) {
+    if (flipbook?.motionVectors === true && flipbook.interpolate !== false) {
       diagnostics.push(
         diagnostic(
           'NACHI_FLIPBOOK_MOTION_VECTOR_FALLBACK',
           'Flipbook motion-vector blending was requested without a motion-vector TextureRef; using plain frame interpolation.',
           `${path}.config.map.motionVectors`,
           'warning',
+        ),
+      );
+    }
+    if (flipbook?.motionVectors && flipbook.interpolate === false) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_FLIPBOOK_MOTION_VECTORS_IGNORED',
+          'Flipbook motion vectors require frame interpolation and are ignored when interpolate is false.',
+          `${path}.config.map.motionVectors`,
+          'warning',
+        ),
+      );
+    }
+    const softFadeDistance =
+      options.soft === true
+        ? DEFAULT_SOFT_PARTICLE_FADE_DISTANCE
+        : typeof options.soft === 'object'
+          ? options.soft.fadeDistance
+          : undefined;
+    if (
+      softFadeDistance !== undefined &&
+      (!Number.isFinite(softFadeDistance) || softFadeDistance <= 0)
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_BILLBOARD_SOFT_DISTANCE_INVALID',
+          'Billboard soft fadeDistance must be a positive finite number.',
+          `${path}.config.soft.fadeDistance`,
         ),
       );
     }
@@ -1452,7 +1503,9 @@ function compileSpriteDraws(
         ? options.map
         : undefined;
     const motionVectors =
-      flipbook && typeof flipbook.motionVectors === 'object' ? flipbook.motionVectors : undefined;
+      flipbook && flipbook.interpolate !== false && typeof flipbook.motionVectors === 'object'
+        ? flipbook.motionVectors
+        : undefined;
     const geometryVertexCount = cutoutVertices as 4 | 5 | 6 | 7 | 8;
     draws.push({
       fragment: {
@@ -1465,11 +1518,12 @@ function compileSpriteDraws(
                 interpolate: flipbook.interpolate ?? true,
                 ...(motionVectors === undefined ? {} : { motionVectors }),
                 progressAttribute: 'normalizedAge' as const,
+                rowOrder: 'top-left' as const,
                 rows: flipbook.rows,
               },
             }),
         ...(map === undefined ? {} : { map }),
-        ...(options.soft === true ? { soft: { fadeDistance: 0.035 } } : {}),
+        ...(softFadeDistance === undefined ? {} : { soft: { fadeDistance: softFadeDistance } }),
       },
       geometry: {
         indexCount: (geometryVertexCount - 2) * 3,
@@ -1486,6 +1540,104 @@ function compileSpriteDraws(
         physicalIndex: 'alive-indices',
       },
       kind: 'billboard',
+      path,
+      vertex: {
+        alignment,
+        attributes,
+        storageBufferCount: vertexStorageBuffers.length,
+        storageBuffers: vertexStorageBuffers,
+      },
+    });
+  }
+  return draws;
+}
+
+function compileMeshDraws(
+  definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
+  schema: ResolvedAttributeSchema,
+  lifecycleLayout: ReturnType<typeof lifecycleStorageLayout>,
+  diagnostics: VfxDiagnostic[],
+): CompiledMeshDrawDescription[] {
+  const renderModules = collectEmitterModules(definition).filter(
+    ({ module }) => module.stage === 'render',
+  );
+  const draws: CompiledMeshDrawDescription[] = [];
+  for (const { module, path } of renderModules) {
+    if (module.type !== 'core/mesh-renderer') continue;
+    const options = module.config as MeshRendererOptions;
+    const alignment = options.alignment ?? { mode: 'none' as const };
+    if (
+      alignment.mode === 'custom-axis' &&
+      (alignment.axis.length !== 3 ||
+        alignment.axis.some((component) => !Number.isFinite(component)) ||
+        alignment.axis.every((component) => component === 0))
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_MESH_AXIS_INVALID',
+          'Mesh renderer custom alignment axis must be a finite, non-zero vec3.',
+          `${path}.config.alignment.axis`,
+        ),
+      );
+    }
+    if (
+      options.geometry.kind !== 'asset-ref' ||
+      options.geometry.assetType !== 'geometry' ||
+      options.geometry.uri.length === 0
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_MESH_GEOMETRY_INVALID',
+          'Mesh renderer geometry must be a non-empty GeometryRef.',
+          `${path}.config.geometry`,
+        ),
+      );
+    }
+    const attributes = [
+      'position',
+      'scale',
+      'color',
+      ...(alignment.mode === 'velocity' ? ['velocity'] : []),
+      ...(alignment.mode === 'quaternion' ? ['rotation'] : []),
+    ];
+    if (attributes.some((name) => schema.byName[name] === undefined)) continue;
+    const attributeBuffers = [
+      ...new Set(
+        attributes.map((name) => {
+          const attribute = schema.byName[name];
+          const storage =
+            attribute === undefined
+              ? undefined
+              : schema.storageArrays[attribute.physical.bufferIndex];
+          if (!attribute || !storage) {
+            throw new Error(`Mesh renderer attribute "${name}" has no physical storage.`);
+          }
+          return `Particles.${storage.name}`;
+        }),
+      ),
+    ];
+    const vertexStorageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+    if (vertexStorageBuffers.length > 8) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_STORAGE_BUFFER_LIMIT',
+          `Mesh renderer vertex stage requires ${vertexStorageBuffers.length} storage buffers (${vertexStorageBuffers.join(', ')}), exceeding the default limit of 8.`,
+          `${path}.vertex.storageBufferCount`,
+        ),
+      );
+    }
+    draws.push({
+      fragment: { blending: options.blending ?? 'alpha' },
+      geometry: { resource: options.geometry, topology: 'triangle-list' },
+      indirect: {
+        aliveIndicesOffsetWords: lifecycleLayout.buffers.state.fields.aliveIndices.offsetWords,
+        drawArgumentsOffsetBytes:
+          lifecycleLayout.buffers.indirectArguments.fields.drawIndirect.offsetWords *
+          Uint32Array.BYTES_PER_ELEMENT,
+        instanceCount: 'alive-count',
+        physicalIndex: 'alive-indices',
+      },
+      kind: 'mesh',
       path,
       vertex: {
         alignment,
@@ -2228,12 +2380,26 @@ export function compileEmitter<
     ]),
   ].sort();
   const lifecycleLayout = lifecycleStorageLayout(definition.capacity);
-  const draws = compileSpriteDraws(
+  const spriteDraws = compileSpriteDraws(
     normalizedDefinition,
     attributeSchema,
     lifecycleLayout,
     diagnostics,
   );
+  const meshDraws = compileMeshDraws(
+    normalizedDefinition,
+    attributeSchema,
+    lifecycleLayout,
+    diagnostics,
+  );
+  const drawsByPath = new Map(
+    [...spriteDraws, ...meshDraws].map((draw) => [draw.path, draw] as const),
+  );
+  const draws = collectEmitterModules(normalizedDefinition).flatMap(({ module, path }) => {
+    if (module.stage !== 'render') return [];
+    const draw = drawsByPath.get(path);
+    return draw === undefined ? [] : [draw];
+  });
   const vertexStorageBuffers = [...new Set(draws.flatMap(({ vertex }) => vertex.storageBuffers))];
   const storageBuffers: CompiledEmitterMeta['storageBuffers'] = [
     ...attributeSchema.storageArrays.map((storage) => ({

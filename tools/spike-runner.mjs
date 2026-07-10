@@ -1,3 +1,6 @@
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+
 import { chromium } from 'playwright';
 
 const DEFAULT_URL = 'http://127.0.0.1:5173/spike-compute/';
@@ -80,6 +83,7 @@ try {
   );
 
   const harnessState = await page.evaluate(() => ({
+    artifactScreenshots: document.documentElement.dataset.artifactScreenshots ?? null,
     backend: document.documentElement.dataset.backend ?? null,
     error: document.documentElement.dataset.spikeError ?? null,
     result: document.documentElement.dataset.spikeResult ?? null,
@@ -91,6 +95,33 @@ try {
   }
 
   const result = JSON.parse(harnessState.result);
+  const artifactScreenshots = {};
+  if (harnessState.artifactScreenshots) {
+    const specifications = JSON.parse(harnessState.artifactScreenshots);
+    if (!Array.isArray(specifications)) {
+      throw new Error('data-artifact-screenshots must contain a JSON array.');
+    }
+    const artifactDirectory = path.resolve('artifacts');
+    await mkdir(artifactDirectory, { recursive: true });
+    for (const specification of specifications) {
+      const filename = specification?.filename;
+      const selector = specification?.selector;
+      if (
+        typeof filename !== 'string' ||
+        path.basename(filename) !== filename ||
+        !/^[-A-Za-z0-9_.]+\.png$/.test(filename) ||
+        typeof selector !== 'string' ||
+        !selector.startsWith('#')
+      ) {
+        throw new Error(
+          `Invalid artifact screenshot specification: ${JSON.stringify(specification)}`,
+        );
+      }
+      const outputPath = path.join(artifactDirectory, filename);
+      await page.locator(selector).screenshot({ path: outputPath, type: 'png' });
+      artifactScreenshots[filename] = outputPath;
+    }
+  }
   if (harnessState.status === 'complete' && !harnessState.performance) {
     throw new Error('Spike finished without data-perf-result.');
   }
@@ -102,6 +133,7 @@ try {
     requestedAdapter: target.adapter,
     webgpuAdapterInfo,
     backend: harnessState.backend,
+    artifactScreenshots,
     performance: performanceResult,
     diagnostics,
   };

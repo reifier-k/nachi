@@ -26,6 +26,7 @@ import type {
   EmitterDefinition,
   EventModule,
   FlipbookDefinition,
+  MeshRendererOptions,
   GradientGenerator,
   HitStopAction,
   InitModule,
@@ -354,6 +355,19 @@ export function billboard(options: BillboardOptions): RenderModule {
       ...velocityRead,
       ...flipbookRead,
     ],
+    writes: [],
+  });
+}
+
+export function meshRenderer(options: MeshRendererOptions): RenderModule {
+  const orientationRead =
+    options.alignment?.mode === 'velocity'
+      ? (['Particles.velocity'] as const)
+      : options.alignment?.mode === 'quaternion'
+        ? (['Particles.rotation'] as const)
+        : [];
+  return createModule('render', 'core/mesh-renderer', options, {
+    reads: ['Particles.color', 'Particles.position', 'Particles.scale', ...orientationRead],
     writes: [],
   });
 }

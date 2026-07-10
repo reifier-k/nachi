@@ -86,7 +86,7 @@ function spriteEffect(options: {
   readonly lifetimeSeconds?: number;
   readonly loopCount?: number;
   readonly map?: BillboardOptions['map'];
-  readonly soft?: boolean;
+  readonly soft?: BillboardOptions['soft'];
   readonly spread?: number;
   readonly speed?: number;
 }) {
@@ -229,10 +229,11 @@ async function run(): Promise<void> {
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   const atlasRef = textureRef('procedural://m3-sprites/flipbook-atlas');
   const atlasTexture = new THREE.DataTexture(
-    new Uint8Array([255, 255, 255, 255, 16, 16, 16, 255]),
+    new Uint8Array([255, 255, 255, 255, 190, 190, 190, 255, 100, 100, 100, 255, 16, 16, 16, 255]),
     2,
-    1,
+    2,
   );
+  atlasTexture.flipY = true;
   atlasTexture.magFilter = THREE.NearestFilter;
   atlasTexture.minFilter = THREE.NearestFilter;
   atlasTexture.generateMipmaps = false;
@@ -281,7 +282,7 @@ async function run(): Promise<void> {
   const facingShape = comparePixels(await render(facing.mesh), baseline);
   const stretchedShape = comparePixels(await render(stretched.mesh), baseline);
 
-  const flipbookMap = flipbook(atlasRef, { cols: 2, rows: 1 });
+  const flipbookMap = flipbook(atlasRef, { cols: 2, rows: 2 });
   const interpolatedFlipbook = await createSprite({
     count: 1,
     lifetimeSeconds: STEP * 8,
@@ -293,16 +294,30 @@ async function run(): Promise<void> {
   const discreteFlipbook = await createSprite({
     count: 1,
     lifetimeSeconds: STEP * 8,
-    map: flipbook(atlasRef, { cols: 2, interpolate: false, rows: 1 }),
+    map: flipbook(atlasRef, { cols: 2, interpolate: false, rows: 2 }),
   });
   const discreteFlipbookPixels = await render(discreteFlipbook.mesh);
+  await discreteFlipbook.system.update(STEP);
+  const nextDiscreteFlipbookPixels = await render(discreteFlipbook.mesh);
   const frameProgressDifference = compareReadbacks(firstFlipbookPixels, progressedFlipbookPixels);
   const interpolationDifference = compareReadbacks(firstFlipbookPixels, discreteFlipbookPixels);
+  const discreteFrameDifference = compareReadbacks(
+    discreteFlipbookPixels,
+    nextDiscreteFlipbookPixels,
+  );
   const flipbookBrightness = {
     discrete: centerBrightness(discreteFlipbookPixels),
     first: centerBrightness(firstFlipbookPixels),
+    nextDiscrete: centerBrightness(nextDiscreteFlipbookPixels),
     progressed: centerBrightness(progressedFlipbookPixels),
   };
+  const interpolationBrightnessRange = {
+    maximum: Math.max(flipbookBrightness.discrete, flipbookBrightness.nextDiscrete),
+    minimum: Math.min(flipbookBrightness.discrete, flipbookBrightness.nextDiscrete),
+  };
+  const flipbookDraw = interpolatedFlipbook.view.program.draws[0];
+  const flipbookDescription =
+    flipbookDraw?.kind === 'billboard' ? flipbookDraw.fragment.flipbook : undefined;
 
   const quadSprite = await createSprite({ count: 1, cutout: { vertices: 4 } });
   const cutoutSprite = await createSprite({ count: 1, cutout: { vertices: 6 } });
@@ -314,6 +329,7 @@ async function run(): Promise<void> {
     centerBrightness(quadPixels) - centerBrightness(cutoutPixels),
   );
   const cutoutDraw = cutoutSprite.view.program.draws[0];
+  const cutoutGeometry = cutoutDraw?.kind === 'billboard' ? cutoutDraw.geometry : undefined;
 
   const hardIntersectionSprite = await createSprite({ count: 1 });
   const softIntersectionSprite = await createSprite({ count: 1, soft: true });
@@ -410,9 +426,9 @@ async function run(): Promise<void> {
       Math.abs((blendBrightness.multiply ?? 0) - (blendBrightness.alpha ?? 0)) > 2 &&
       (blendMetrics.premultiplied?.foregroundPixelRatio ?? 0) > 0,
     cutoutShape:
-      cutoutDraw?.geometry.shape === 'cutout' &&
-      cutoutDraw.geometry.vertexCount === 6 &&
-      cutoutDraw.geometry.indexCount === 12 &&
+      cutoutGeometry?.shape === 'cutout' &&
+      cutoutGeometry.vertexCount === 6 &&
+      cutoutGeometry.indexCount === 12 &&
       cutoutCenterDifference < 2 &&
       cutoutMetrics.foregroundPixelRatio > 0 &&
       cutoutMetrics.foregroundPixelRatio < quadMetrics.foregroundPixelRatio,
@@ -422,9 +438,14 @@ async function run(): Promise<void> {
       frameProgressDifference.meanAbsoluteDifference > 0.1 &&
       flipbookBrightness.first > flipbookBrightness.progressed,
     flipbookInterpolation:
-      interpolationDifference.changedPixelRatio > 0.005 &&
+      // Sub-threshold per-pixel interpolation can produce a zero changed-pixel ratio; MAD plus
+      // the strict between-frame brightness check still distinguishes it from discrete playback.
       interpolationDifference.meanAbsoluteDifference > 0.1 &&
-      flipbookBrightness.discrete > flipbookBrightness.first,
+      discreteFrameDifference.meanAbsoluteDifference > 0.1 &&
+      flipbookBrightness.first > interpolationBrightnessRange.minimum + 1 &&
+      flipbookBrightness.first < interpolationBrightnessRange.maximum - 1,
+    flipbookTopLeftRows:
+      flipbookDescription?.rowOrder === 'top-left' && flipbookDescription.rows === 2,
     m2NumericRegression:
       regressionView.program.meta.storageBufferCount <= 8 &&
       Math.abs(movementDelta - STEP) < 0.0002,
@@ -446,13 +467,15 @@ async function run(): Promise<void> {
     blendMetrics,
     cutout: {
       centerDifference: cutoutCenterDifference,
-      draw: cutoutDraw?.geometry,
+      draw: cutoutGeometry,
       hex: cutoutMetrics,
       quad: quadMetrics,
     },
     consoleMessages,
     flipbook: {
       brightness: flipbookBrightness,
+      description: flipbookDescription,
+      discreteFrameDifference,
       frameProgressDifference,
       interpolationDifference,
     },
