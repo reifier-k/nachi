@@ -119,11 +119,11 @@
 
 - [x] フォース:gravity / drag / vortex / pointAttractor / linearForce — 数学は全検算済み(レビュー)
 - [x] curlNoise / turbulence(シンプレックスベース)— 位置純関数で決定論。強度正規化規約は最終バッチで
-- [ ] ベクタフィールド:FGAローダ+3Dテクスチャサンプリング
+- [x] ベクタフィールド:FGAローダ+3Dテクスチャサンプリング — UE ASCII FGA準拠パーサ+トリリニア補間(feature検出)。world固定は§16保留
 - [x] sizeOverLife / colorOverLife / rotationOverLife / velocityOverLife — velocityはf32等方(vec3対応は最終バッチで判断)
-- [ ] 向き制御:orientToVelocity / faceCamera / カスタム
+- [x] 向き制御:orientToVelocity(shortest-arc quat)/ faceCamera / カスタム軸(M3レンダラ整列が該当。RFC§9.1で関係整理済み)
 - [x] killVolume(box/sphere/plane)— emitter-local規約、フリーリスト回収統合。寿命外強制回収は最終バッチ
-- [ ] 🎯 ゴールデン#4「環境ループ」が動く
+- [x] 🎯 ゴールデン#4「環境ループ」が動く — /golden-ambient/ 蛍+落ち葉、定常性・世代区間判定含む5検証+視覚基準2点。**ゴールデン2/7達成**
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
 ## M5 — イベント&サブエミッタ
@@ -235,6 +235,7 @@
 | 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
 | 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |
+| 2026-07-11 | M4完了(監査待ち): フォース群(vortex/pointAttractor/linearForce/turbulence=数学全検算)+overLife系+killVolume(フリーリスト統合)+FGAベクタフィールド(トリリニア)+向き制御(shortest-arc quat)+space規約+turbulence正規化(理論値12/42)+**ゴールデン#4「環境ループ」達成**(定常性・世代区間判定)。テスト217本・全スモーク緑。差し戻し2回(timestampプール/スロットリサイクル追跡) |
 | 2026-07-11 | **M3マイルストーン監査**: 両監査FAIL→裁定・修正→**PASS**。①Claude監査がメッシュ向きの残存反転をGPU readbackで実証 — 真因は**TSL rotate()が列優先構築により標準CCWの転置(逆回転)として作用**するthree r185規約(前回修正はTHREE.Euler基準で不十分)→オイラー全成分符号反転+TSL実規約のCPU参照テストに差し替え+**監査人のGPUプローブで6方向一致を統括実測** ②複数renderモジュールの間接引数衝突(両監査一致)→NACHI_RENDER_MODULE_LIMITで1個制限+RFC§9にM7対応と明記 ③RFC§9.1にcutout/ブレンド意味論網羅、packed_*予約、README/CLAUDE.md更新。性能(SwiftShader): spike-compute 3.9ms(劣化なし)、m3-sprites compute 0.083/render 0.059ms、golden compute 0.306/render 47.7ms(新規基準)。ゴールデン視覚基準3点を修正後に再取得。**M4持ち越し**: [SHOULD] flipY両設定の固有色アトラスGPU検証/premultiplied検証強化(α<1テクスチャ)、[NIT] UVクランプのテクセルマージン/facing-camera-position整列モード |
 | 2026-07-11 | M3バッチ2+最終バッチ完了: フリップブック(行順規約+MVブレンディング)/cutout/ソフトパーティクル(fadeDistance API)/メッシュレンダラ/**ゴールデン#2「爆発」達成**(6検証+視覚基準)。レビューがメッシュ向き鏡映を数値反証(スモークでは構造的に検出不能だった)→修正。根本原因の学び: fixedTimeStep maxSubSteps不足でnormalizedAge停滞。テスト172本・全6スモーク緑。**M3残: マイルストーン監査のみ** |
 | 2026-07-11 | M3バッチ1完了: **vec4属性パッキング**(バッファ数 M1 10→5・M2 9→4、決定論的first-fit、論理→物理マッピング公開)+**スプライトレンダラ基盤**(billboard→InstancedMesh間接描画、整列4モード、ブレンド4種)+/m3-sprites/(オフスクリーンピクセル検証7種)。差し戻し6回(WGSL識別子/パックレーン書き戻し/WebGL2 aliveパック誤読=レビューBLOCKER等)→全緑159テスト・7スモーク。**パーティクル初描画**。**M3残**: フリップブック、cutout、メッシュレンダラ、ソフトパーティクル、ゴールデン#2 |
