@@ -7,13 +7,16 @@ import {
   VFXSystem,
   VfxDiagnosticError,
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
+  attribute,
   burst,
   defineEffect,
   defineEmitter,
   defineParameter,
+  emitTo,
   lifetime,
   killVolume,
   perDistance,
+  positionSphere,
   packedComponentIndex,
   rate,
   resolvePackedAttributeAddress,
@@ -221,6 +224,17 @@ class ZeroReadbackRenderer extends FakeRuntimeRenderer {
   }
 }
 
+class MappedReadbackRenderer extends FakeRuntimeRenderer {
+  readonly storageValues = new Map<KernelStorageNode, Uint32Array>();
+  readCount = 0;
+
+  readStorage(storage: KernelStorageNode): Promise<ArrayBuffer> {
+    this.readCount += 1;
+    const values = this.storageValues.get(storage) ?? new Uint32Array(32);
+    return Promise.resolve(values.slice().buffer);
+  }
+}
+
 const computeRender: ModuleDefinition<'render', Record<string, never>> = {
   access: { reads: [], writes: [] },
   config: {},
@@ -252,6 +266,27 @@ function runtimeEffect(
     spawn: burst({ count: 1 }),
   });
   return defineEffect({ elements: { particles: emitter } });
+}
+
+function eventEffect(target = 'smokePuffs') {
+  const sparks = defineEmitter({
+    capacity: 4,
+    events: { onDeath: emitTo(target, { inherit: ['position'] }) },
+    init: [positionSphere({ radius: 1 }), lifetime(0.05)],
+    integration: 'none',
+    lifecycle: { duration: 1 },
+    render: computeRender,
+    spawn: burst({ count: 4 }),
+  });
+  const smokePuffs = defineEmitter({
+    capacity: 8,
+    init: [positionSphere({ radius: 0 }), lifetime(1)],
+    integration: 'none',
+    lifecycle: { duration: 2 },
+    render: computeRender,
+    spawn: burst({ count: 0 }),
+  });
+  return defineEffect({ elements: { smokePuffs, sparks } });
 }
 
 describe('effect-local clock', () => {
@@ -1042,5 +1077,189 @@ describe('VFXSystem runtime scheduler', () => {
     instance.setTransform([3, 4, 5]);
     const matrix = instance.getEmitter('particles')?.kernels.uniforms['Emitter.transform']?.value;
     expect(matrix).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1]);
+  });
+
+  it('diagnoses an unresolved emitTo target in effect scope', () => {
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(eventEffect('missing'));
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_TARGET_UNKNOWN', phase: 'compile' }),
+    );
+  });
+
+  it('materializes producer and consumer event kernels from effect links', () => {
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(eventEffect());
+    const producer = instance.getEmitter('sparks')!;
+    const consumer = instance.getEmitter('smokePuffs')!;
+
+    expect(producer.kernels.eventOutputs.onDeath?.queue.payloadFields).toEqual([
+      expect.objectContaining({ attribute: 'position' }),
+    ]);
+    expect(consumer.kernels.eventInputs).toHaveLength(1);
+    expect(consumer.kernels.eventInputs[0]?.binding.sourceKey).toBe('sparks');
+  });
+
+  it('alternates event banks and consumes only the previous frame bank', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(eventEffect());
+    await system.update(0);
+    const uniforms = instance.getEmitter('sparks')!.kernels.uniforms;
+    expect(uniforms['Emitter.eventWriteBank']?.value).toBe(1);
+    expect(uniforms['Emitter.eventReadBank']?.value).toBe(0);
+
+    await system.update(0.1);
+    expect(instance.state).toBe('active');
+    expect(uniforms['Emitter.eventWriteBank']?.value).toBe(0);
+    expect(uniforms['Emitter.eventReadBank']?.value).toBe(1);
+  });
+
+  it('submits the event consumer through the indirect spawn path', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    system.spawn(eventEffect());
+    await system.update(0.1);
+
+    expect(renderer.submissions).toContain('NachiEventReset_onDeath');
+    expect(renderer.submissions).toContain('NachiEventPrepare_sparks_onDeath_0');
+    expect(renderer.submissions).toContain('NachiEventSpawn_sparks_onDeath_0');
+    expect(renderer.submissions).toContain('NachiEventFinalize_sparks_onDeath_0');
+  });
+
+  it('notifies death callbacks with low-frequency aggregate readback counts', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const instance = system.spawn(eventEffect());
+    const counts: number[] = [];
+    const unsubscribe = instance.on('death', ({ count }) => counts.push(count));
+    await system.update(0);
+    const state = instance.getEmitter('sparks')!.kernels.eventOutputs.onDeath!.state;
+    renderer.storageValues.set(state, new Uint32Array([0, 0, 0, 4]));
+    await system.update(0.1);
+    unsubscribe();
+
+    expect(counts).toEqual([4]);
+  });
+
+  it('reports append overflow without exposing particle payloads to JavaScript', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const instance = system.spawn(eventEffect());
+    await system.update(0);
+    const state = instance.getEmitter('sparks')!.kernels.eventOutputs.onDeath!.state;
+    renderer.storageValues.set(state, new Uint32Array([0, 0, 2, 4]));
+    await system.update(0.1);
+
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_QUEUE_OVERFLOW', severity: 'warning' }),
+    );
+  });
+
+  it('diagnoses inherited payload type mismatches between effect emitters', () => {
+    const source = defineEmitter({
+      attributes: { shared: attribute('shared', { default: 0, type: 'f32' }) },
+      capacity: 1,
+      events: { onDeath: emitTo('target', { inherit: ['shared'] }) },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const target = defineEmitter({
+      attributes: { shared: attribute('shared', { default: [0, 0, 0], type: 'vec3' }) },
+      capacity: 1,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 0 }),
+    });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({ elements: { source, target } }),
+    );
+
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_PAYLOAD_TYPE_MISMATCH' }),
+    );
+  });
+
+  it('diagnoses a target that does not declare an inherited custom attribute', () => {
+    const source = defineEmitter({
+      attributes: { heat: attribute('heat', { default: 0, type: 'f32' }) },
+      capacity: 1,
+      events: { onDeath: emitTo('target', { inherit: ['heat'] }) },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const target = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 0 }),
+    });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({ elements: { source, target } }),
+    );
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_PAYLOAD_TARGET_UNKNOWN' }),
+    );
+  });
+
+  it('binds multiple producer queues to one consumer emitter', () => {
+    const effect = eventEffect();
+    const secondSource = defineEmitter({
+      capacity: 1,
+      events: { onDeath: emitTo('smokePuffs', { inherit: ['position'] }) },
+      init: [positionSphere({ radius: 2 }), lifetime(1)],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const combined = defineEffect({
+      elements: { ...effect.elements, secondSource },
+    });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(combined);
+    expect(instance.getEmitter('smokePuffs')?.kernels.eventInputs).toHaveLength(2);
+  });
+
+  it('does not repeat a callback when the cumulative event total is unchanged', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const instance = system.spawn(eventEffect());
+    const counts: number[] = [];
+    instance.on('death', ({ count }) => counts.push(count));
+    await system.update(0);
+    const state = instance.getEmitter('sparks')!.kernels.eventOutputs.onDeath!.state;
+    renderer.storageValues.set(state, new Uint32Array([0, 0, 0, 2]));
+    await system.update(0.1);
+    await system.update(0.1);
+    expect(counts).toEqual([2]);
+  });
+
+  it('performs no event counter readback when the interval is omitted', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer);
+    system.spawn(eventEffect());
+    await system.update(0.1);
+    expect(renderer.readCount).toBe(0);
+  });
+
+  it('surfaces onCustom as an explicit compile diagnostic at spawn', () => {
+    const custom = defineEmitter({
+      capacity: 1,
+      events: { onCustom: emitTo('target') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const target = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 0 }),
+    });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({ elements: { custom, target } }),
+    );
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_ON_CUSTOM_UNIMPLEMENTED' }),
+    );
   });
 });

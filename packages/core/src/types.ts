@@ -613,6 +613,14 @@ export interface EffectSpawnOptions<Definition = EffectDefinition> {
 
 export type EffectInstanceState = 'active' | 'complete' | 'error' | 'released' | 'stopped';
 
+export interface EffectEventSummary {
+  /** Aggregate since the previous configured readback, never an individual particle payload. */
+  readonly count: number;
+  readonly event: 'death' | (string & {});
+}
+
+export type EffectEventCallback = (summary: EffectEventSummary) => void;
+
 export interface EffectInstance<Definition = EffectDefinition> {
   readonly definition: Definition;
   readonly diagnostics: readonly VfxDiagnostic[];
@@ -621,6 +629,7 @@ export interface EffectInstance<Definition = EffectDefinition> {
   readonly state: EffectInstanceState;
   readonly timeScale: number;
   applyHitStop(durationMs: number, timeScale?: number): void;
+  on(event: 'death' | (string & {}), callback: EffectEventCallback): () => void;
   release(): void;
   setParameter<Path extends UserParameterKeys<Definition>>(
     path: Path,

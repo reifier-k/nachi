@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#070b18" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M5 Event Smoke</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="hud">
+        <p class="eyebrow">M5 GPU smoke</p>
+        <h1>Events &amp; Sub-emitters</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing…</dd>
+          </div>
+          <div>
+            <dt>Mode</dt>
+            <dd id="mode-value">--</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <div id="scene" aria-label="M5 event and sub-emitter GPU smoke"></div>
+    </main>
+    <script type="module" src="/src/m5-events.ts"></script>
+  </body>
+</html>

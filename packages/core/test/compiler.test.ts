@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   VfxDiagnosticError,
+  allocateEventQueueResources,
   attribute,
   bakeCurveLut,
   bakeGradientLut,
@@ -16,6 +17,7 @@ import {
   defineEmitter,
   defineParameter,
   drag,
+  emitTo,
   faceCamera,
   flipbook,
   gradient,
@@ -35,6 +37,7 @@ import {
   positionSphere,
   range,
   rate,
+  readEventPayloadRecord,
   resolveRandomSampleSlot,
   sizeOverLife,
   rotationOverLife,
@@ -44,6 +47,7 @@ import {
   velocityCone,
   vectorField,
   vortex,
+  writeEventPayloadRecord,
 } from '../src/index.js';
 import type {
   CompiledKernelModule,
@@ -2282,6 +2286,239 @@ describe('emitter kernel compiler', () => {
     expect(orientToVelocity().access).toEqual({
       reads: ['Particles.rotation', 'Particles.spriteRotation', 'Particles.velocity'],
       writes: ['Particles.rotation', 'Particles.spriteRotation'],
+    });
+  });
+
+  it('compiles onDeath emitTo into a vec4-packed append queue', () => {
+    const emitter = defineEmitter({
+      attributes: { heat: attribute('heat', { default: 1, type: 'f32' }) },
+      capacity: 8,
+      events: { onDeath: emitTo('smoke', { inherit: ['position', 'heat'] }) },
+      init: [positionSphere({ radius: 1 })],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const program = compileEmitter(emitter);
+    const queue = program.events[0]!;
+
+    expect(queue).toMatchObject({
+      capacity: 8,
+      eventName: 'onDeath',
+      payloadGroupCount: 1,
+      stateWordCount: 4,
+    });
+    expect(queue.payloadFields).toEqual([
+      expect.objectContaining({ attribute: 'position', group: 0, offset: 0 }),
+      expect.objectContaining({ attribute: 'heat', group: 0, offset: 3 }),
+    ]);
+    expect(program.meta.eventQueues).toEqual(program.events);
+  });
+
+  it('unions inherited fields once across multiple onDeath handlers', () => {
+    const emitter = defineEmitter({
+      capacity: 4,
+      events: {
+        onDeath: [
+          emitTo('smoke', { inherit: ['position'] }),
+          emitTo('flash', { inherit: ['position', 'velocity'] }),
+        ],
+      },
+      init: [
+        positionSphere({ radius: 1 }),
+        velocityCone({ angle: 0, direction: [0, 1, 0], speed: 1 }),
+      ],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const queue = compileEmitter(emitter).events[0]!;
+
+    expect(queue.handlers).toHaveLength(2);
+    expect(queue.payloadFields.map(({ attribute }) => attribute)).toEqual(['position', 'velocity']);
+    expect(queue.payloadGroupCount).toBe(2);
+  });
+
+  it('diagnoses unknown inherited producer attributes', () => {
+    const emitter = {
+      ...baseEmitter({ integration: 'none' }),
+      events: { onDeath: emitTo('smoke', { inherit: ['typo'] }) },
+    };
+    expect(compileEmitter(emitter).diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_INHERIT_UNKNOWN' }),
+    );
+  });
+
+  it('diagnoses onCollision until the M6 collision stage exists', () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      events: { onCollision: emitTo('smoke') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    expect(compileEmitter(emitter).diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_ON_COLLISION_UNIMPLEMENTED' }),
+    );
+  });
+
+  it('diagnoses onCustom until tslModule emitEvent(condition) is materialized', () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      events: { onCustom: emitTo('smoke') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    expect(compileEmitter(emitter).diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_ON_CUSTOM_UNIMPLEMENTED' }),
+    );
+  });
+
+  it('materializes event reset and producer resources on WebGPU', () => {
+    const emitter = defineEmitter({
+      capacity: 2,
+      events: { onDeath: emitTo('smoke') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const built = compileEmitter(emitter).buildKernels(fakeAdapter());
+
+    expect(built.eventOutputs.onDeath).toMatchObject({
+      queue: expect.objectContaining({ eventName: 'onDeath' }),
+      reset: expect.any(FakeCompute),
+    });
+  });
+
+  it('rejects event queue materialization on WebGL2', () => {
+    const emitter = defineEmitter({
+      capacity: 2,
+      events: { onDeath: emitTo('smoke') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const adapter = fakeAdapter();
+    expect(() =>
+      compileEmitter(emitter).buildKernels({
+        ...adapter,
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+      }),
+    ).toThrow(VfxDiagnosticError);
+  });
+
+  it('keeps a payload-less queue addressable with one vec4 group', () => {
+    const emitter = defineEmitter({
+      capacity: 3,
+      events: { onDeath: emitTo('smoke') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const queue = compileEmitter(emitter).events[0]!;
+    expect(queue.payloadFields).toEqual([]);
+    expect(queue.payloadGroupCount).toBe(1);
+  });
+
+  it('does not allow an inherited field to straddle vec4 payload groups', () => {
+    const emitter = defineEmitter({
+      attributes: {
+        direction: attribute('direction', { default: [0, 1, 0], type: 'vec3' }),
+        offset: attribute('offset', { default: [0, 0], type: 'vec2' }),
+      },
+      capacity: 2,
+      events: { onDeath: emitTo('smoke', { inherit: ['direction', 'offset'] }) },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    expect(compileEmitter(emitter).events[0]?.payloadFields).toEqual([
+      expect.objectContaining({ attribute: 'direction', group: 0, offset: 0 }),
+      expect.objectContaining({ attribute: 'offset', group: 1, offset: 0 }),
+    ]);
+  });
+
+  it('publishes all three event resources in storage budget metadata', () => {
+    const emitter = defineEmitter({
+      capacity: 2,
+      events: { onDeath: emitTo('smoke') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const eventBuffers = compileEmitter(emitter).meta.storageBuffers.filter(({ name }) =>
+      name.startsWith('NachiEvent'),
+    );
+    expect(eventBuffers.map(({ name }) => name)).toEqual([
+      'NachiEventState.onDeath',
+      'NachiEventPayload.onDeath',
+      'NachiEventIndirect.onDeath',
+    ]);
+  });
+
+  it('diagnoses matrix event payload fields in M5', () => {
+    const emitter = {
+      ...baseEmitter({ integration: 'none' }),
+      attributes: {
+        matrix: attribute('matrix', {
+          default: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+          type: 'mat3',
+        }),
+      },
+      events: { onDeath: emitTo('smoke', { inherit: ['matrix'] }) },
+    };
+    expect(compileEmitter(emitter).diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_PAYLOAD_TYPE_UNSUPPORTED' }),
+    );
+  });
+
+  it('reuses effect-owned event resources during kernel materialization', () => {
+    const emitter = defineEmitter({
+      capacity: 2,
+      events: { onDeath: emitTo('smoke') },
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const adapter = fakeAdapter();
+    const program = compileEmitter(emitter);
+    const resources = allocateEventQueueResources(adapter, program.events[0]!, 'sparks');
+    const built = program.buildKernels(adapter, { eventOutputs: { onDeath: resources } });
+    expect(built.eventOutputs.onDeath?.state).toBe(resources.state);
+    expect(built.eventOutputs.onDeath?.payload).toBe(resources.payload);
+  });
+
+  it('round-trips vec4-packed payloads through the selected CPU bank and slot', () => {
+    const emitter = defineEmitter({
+      attributes: { heat: attribute('heat', { default: 0, type: 'f32' }) },
+      capacity: 3,
+      events: { onDeath: emitTo('smoke', { inherit: ['position', 'heat'] }) },
+      init: [positionSphere({ radius: 1 })],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const queue = compileEmitter(emitter).events[0]!;
+    const storage = new Float32Array(queue.capacity * queue.payloadGroupCount * 2 * 4);
+
+    writeEventPayloadRecord(storage, queue, 1, 2, {
+      heat: 0.75,
+      position: [-0.288, 0.955, 0.071],
+    });
+
+    expect(readEventPayloadRecord(storage, queue, 1, 2)).toEqual({
+      heat: 0.75,
+      position: [-0.2879999876022339, 0.9549999833106995, 0.07100000232458115],
+    });
+    expect(readEventPayloadRecord(storage, queue, 0, 2)).toEqual({
+      heat: 0,
+      position: [0, 0, 0],
     });
   });
 });

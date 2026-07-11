@@ -1,4 +1,5 @@
 import {
+  allocateEventQueueResources,
   compileEmitter,
   type BuiltEmitterKernels,
   type CompiledSpawnModule,
@@ -6,6 +7,8 @@ import {
   type KernelComputeNode,
   type KernelTslAdapter,
   type KernelUniformNode,
+  type EventInputBinding,
+  type EventQueueResources,
 } from './compiler.js';
 import { packedComponentIndex, resolvePackedAttributeAddress } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
@@ -17,6 +20,8 @@ import type {
   EffectDefinition,
   EffectElements,
   EffectInstance,
+  EffectEventCallback,
+  EffectEventSummary,
   EffectInstanceState,
   EffectSpawnOptions,
   EmitterDefinition,
@@ -337,6 +342,12 @@ type CompiledEmitterEntry = {
 
 type CompiledEffect = {
   readonly emitters: readonly CompiledEmitterEntry[];
+  readonly eventLinks: readonly {
+    readonly handler: CompiledEmitterProgram['events'][number]['handlers'][number];
+    readonly queue: CompiledEmitterProgram['events'][number];
+    readonly sourceKey: string;
+    readonly targetKey: string;
+  }[];
 };
 
 type RuntimeEffectDefinition = {
@@ -576,6 +587,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly #aliveCountReadbackInterval: number | undefined;
   readonly #maxLifetime: number;
   readonly #onDiagnostic: (diagnostic: VfxDiagnostic) => void;
+  readonly #onEventAggregate: (summary: EffectEventSummary) => void;
   readonly #parameters: Record<string, unknown>;
   readonly #renderer: VfxRuntimeRenderer;
   readonly #seed: number;
@@ -588,6 +600,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #exactAliveSequence: number | undefined;
   #initialized = false;
   #lastOverflowCount = 0;
+  readonly #lastEventOverflow = new Map<string, number>();
+  readonly #lastEventTotal = new Map<string, number>();
   #pendingDistance = 0;
   #pendingGpuSpawnRequested = 0;
   #spawnGeneration = 0;
@@ -603,6 +617,9 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     maxLifetime: number,
     aliveCountReadbackInterval: number | undefined,
     onDiagnostic: (diagnostic: VfxDiagnostic) => void,
+    eventOutputs: Readonly<Record<string, EventQueueResources>> = {},
+    eventInputs: readonly EventInputBinding[] = [],
+    onEventAggregate: (summary: EffectEventSummary) => void = () => undefined,
   ) {
     this.program = program;
     this.#renderer = renderer;
@@ -612,8 +629,9 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#maxLifetime = maxLifetime;
     this.#aliveCountReadbackInterval = aliveCountReadbackInterval;
     this.#onDiagnostic = onDiagnostic;
+    this.#onEventAggregate = onEventAggregate;
     this.controller = new EmitterLifecycleController(definition.lifecycle);
-    this.kernels = program.buildKernels(renderer.kernelAdapter);
+    this.kernels = program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', transform);
     for (const [path, value] of Object.entries(parameters)) {
@@ -650,6 +668,16 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     return this.#drainRemaining <= TIME_EPSILON;
   }
 
+  get hasEventPipeline(): boolean {
+    return this.program.events.length > 0 || this.kernels.eventInputs.length > 0;
+  }
+
+  beginFinalEventDrain(): void {
+    if (this.kernels.eventInputs.length > 0 && this.#aliveCountReadbackInterval === undefined) {
+      this.#drainRemaining = Math.max(this.#drainRemaining, this.#maxLifetime);
+    }
+  }
+
   setParameter(path: ParameterPath, value: unknown): void {
     this.#parameters[path] = value;
     setUniform(this.#renderer, this.kernels.uniforms, path, value);
@@ -668,6 +696,30 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#renderer.releaseKernels?.(this.kernels);
   }
 
+  async prepareEventFrame(writeBank: 0 | 1): Promise<void> {
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventWriteBank', writeBank);
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventReadBank', 1 - writeBank);
+    for (const output of Object.values(this.kernels.eventOutputs)) {
+      await this.#renderer.submitCompute(output.reset);
+    }
+  }
+
+  async consumeEvents(): Promise<void> {
+    for (const input of this.kernels.eventInputs) {
+      if (!this.#renderer.submitComputeIndirect) {
+        throw new Error('M5 event consumption requires indirect compute submission.');
+      }
+      await this.#renderer.submitCompute(input.prepare);
+      await this.#renderer.submitComputeIndirect(
+        input.spawn,
+        input.binding.resources.indirect.indirectResource,
+      );
+      await this.#renderer.submitCompute(input.finalize);
+      this.#pendingGpuSpawnRequested += input.binding.queue.capacity;
+    }
+    if (this.kernels.eventInputs.length > 0) await this.#compactAlive();
+  }
+
   async advance(deltaSeconds: number, context: AdvanceContext): Promise<void> {
     if (!this.#initialized) {
       await this.#renderer.submitCompute(this.kernels.initialize);
@@ -675,6 +727,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       await this.#compactAlive();
     }
     const commands = this.controller.advance(deltaSeconds);
+    let updated = false;
     for (const command of commands) {
       if (command.kind === 'activate') {
         this.#spawnGeneration = command.spawnGeneration;
@@ -716,6 +769,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
             this.#pendingDistance = 0;
           }
           await this.#renderer.submitCompute(this.kernels.update);
+          updated = true;
           this.#emitterAge += step;
           setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.age', this.#emitterAge);
           setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.localTime', this.#emitterAge);
@@ -725,6 +779,15 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           await this.#compactAlive();
         }
       }
+    }
+    // Event targets keep simulating records received after their authored spawn lifecycle has
+    // entered drain/completed state. Event consumption above compacts births even for dt=0.
+    if (!updated && this.kernels.eventInputs.length > 0 && deltaSeconds > TIME_EPSILON) {
+      this.#setFrameUniforms(deltaSeconds, context, this.controller.loopIndex);
+      await this.#renderer.submitCompute(this.kernels.update);
+      this.#emitterAge += deltaSeconds;
+      this.#drainRemaining = Math.max(0, this.#drainRemaining - deltaSeconds);
+      await this.#compactAlive();
     }
   }
 
@@ -878,6 +941,32 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           this.#reportOverflow(this.#pendingGpuSpawnRequested, overflow);
         }
         this.#pendingGpuSpawnRequested = 0;
+        for (const [eventName, output] of Object.entries(this.kernels.eventOutputs)) {
+          const state = new Uint32Array(await this.#renderer.readStorage(output.state));
+          const total = state[3] ?? 0;
+          const previousTotal = this.#lastEventTotal.get(eventName) ?? 0;
+          const emitted = (total - previousTotal) >>> 0;
+          this.#lastEventTotal.set(eventName, total);
+          if (emitted > 0) {
+            this.#onEventAggregate({
+              count: emitted,
+              event: eventName === 'onDeath' ? 'death' : eventName,
+            });
+          }
+          const overflowTotal = state[2] ?? 0;
+          const previousOverflow = this.#lastEventOverflow.get(eventName) ?? 0;
+          const eventOverflow = (overflowTotal - previousOverflow) >>> 0;
+          this.#lastEventOverflow.set(eventName, overflowTotal);
+          if (eventOverflow > 0) {
+            this.#onDiagnostic({
+              code: 'NACHI_EVENT_QUEUE_OVERFLOW',
+              message: `${eventName} append queue reached capacity ${output.queue.capacity}; ${eventOverflow} event(s) were safely dropped.`,
+              path: `events.${eventName}`,
+              phase: 'runtime',
+              severity: 'warning',
+            });
+          }
+        }
       }
     } else if (this.#renderer.readStorage) {
       const alive = this.kernels.storages.alive;
@@ -920,9 +1009,14 @@ export class VfxEffectInstance<
   readonly clock: EffectClock;
   readonly #diagnostics: VfxDiagnostic[] = [];
   readonly #emitters = new Map<string, RuntimeEmitter>();
+  readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (id: string) => void;
   readonly #parameterDefinitions: ParameterSchema;
   #state: EffectInstanceState = 'active';
+  #eventFrame = 0;
+  #completionCandidateFrame: number | undefined;
+  #eventDrainExtended = false;
+  #initialized = false;
 
   constructor(
     readonly definition: Definition,
@@ -967,10 +1061,27 @@ export class VfxEffectInstance<
     this.clock.applyHitStop(durationMs, timeScale);
   }
 
+  on(event: string, callback: EffectEventCallback): () => void {
+    this.#assertNotReleased();
+    let listeners = this.#eventListeners.get(event);
+    if (!listeners) {
+      listeners = new Set();
+      this.#eventListeners.set(event, listeners);
+    }
+    listeners.add(callback);
+    return () => listeners?.delete(callback);
+  }
+
+  emitEventSummary(summary: EffectEventSummary): void {
+    if (this.#state === 'released') return;
+    for (const callback of this.#eventListeners.get(summary.event) ?? []) callback(summary);
+  }
+
   release(): void {
     if (this.#state === 'released') return;
     for (const emitter of this.#emitters.values()) emitter.release();
     this.#emitters.clear();
+    this.#eventListeners.clear();
     this.#state = 'released';
     this.#onRelease(this.id);
   }
@@ -1019,13 +1130,18 @@ export class VfxEffectInstance<
   }
 
   async initialize(systemTime: number, prewarmStepSeconds: number): Promise<void> {
-    if (this.#state !== 'active') return;
+    if (this.#state !== 'active' || this.#initialized) return;
     const context = {
       prewarmStepSeconds,
       systemDelta: 0,
       systemTime,
     };
+    // Initialization/prewarm is itself an event-producing frame. Preserve its bank so the first
+    // externally advanced frame consumes it instead of clearing it.
+    for (const emitter of this.#emitters.values()) await emitter.prepareEventFrame(0);
+    this.#eventFrame = 1;
     for (const emitter of this.#emitters.values()) await emitter.advance(0, context);
+    this.#initialized = true;
     this.#completeIfFinished();
   }
 
@@ -1037,17 +1153,34 @@ export class VfxEffectInstance<
       systemDelta: worldDelta,
       systemTime,
     };
+    const writeBank = (this.#eventFrame & 1) as 0 | 1;
+    this.#eventFrame += 1;
+    for (const emitter of this.#emitters.values()) await emitter.prepareEventFrame(writeBank);
+    for (const emitter of this.#emitters.values()) await emitter.consumeEvents();
     for (const emitter of this.#emitters.values()) await emitter.advance(localDelta, context);
     this.#completeIfFinished();
   }
 
   #completeIfFinished(): void {
-    if (
-      this.#state === 'active' &&
-      [...this.#emitters.values()].every((emitter) => emitter.complete)
-    ) {
-      this.#state = 'complete';
+    if (this.#state !== 'active') return;
+    const emitters = [...this.#emitters.values()];
+    if (!emitters.every((emitter) => emitter.complete)) {
+      this.#completionCandidateFrame = undefined;
+      return;
     }
+    if (emitters.some((emitter) => emitter.hasEventPipeline)) {
+      if (!this.#eventDrainExtended) {
+        for (const emitter of emitters) emitter.beginFinalEventDrain();
+        this.#eventDrainExtended = true;
+        if (!emitters.every((emitter) => emitter.complete)) return;
+      }
+      if (this.#completionCandidateFrame === undefined) {
+        this.#completionCandidateFrame = this.#eventFrame;
+        return;
+      }
+      if (this.#eventFrame <= this.#completionCandidateFrame) return;
+    }
+    this.#state = 'complete';
   }
 
   #assertNotReleased(): void {
@@ -1177,6 +1310,18 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         options.parameters as Readonly<Record<string, unknown>> | undefined,
       );
       const transform = transformMatrix(options.position, options.rotation);
+      const eventResources = new Map<string, Readonly<Record<string, EventQueueResources>>>();
+      for (const entry of compiled.emitters) {
+        eventResources.set(
+          entry.key,
+          Object.fromEntries(
+            entry.program.events.map((queue) => [
+              queue.eventName,
+              allocateEventQueueResources(runtimeRenderer.kernelAdapter, queue, entry.key),
+            ]),
+          ),
+        );
+      }
       for (const [index, entry] of compiled.emitters.entries()) {
         const seed = ((options.seed ?? 0) ^ hashModuleLabel(entry.key) ^ index) >>> 0;
         instance.addEmitter(
@@ -1191,6 +1336,19 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
             entry.maxLifetime,
             this.#aliveCountReadbackInterval,
             (diagnostic) => instance.recordDiagnostic(diagnostic),
+            eventResources.get(entry.key),
+            compiled.eventLinks
+              .filter(({ targetKey }) => targetKey === entry.key)
+              .map(({ handler, queue, sourceKey }) => {
+                const resources = eventResources.get(sourceKey)?.[queue.eventName];
+                if (!resources) {
+                  throw new Error(
+                    `Event resources for ${sourceKey}.${queue.eventName} are missing.`,
+                  );
+                }
+                return { handler, queue, resources, sourceKey };
+              }),
+            (summary) => instance.emitEventSummary(summary),
           ),
         );
       }
@@ -1249,7 +1407,53 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         ...entry,
         maxLifetime: maximumLifetime(entry.program, entry.definition),
       }));
-    const compiled = { emitters };
+    const byKey = new Map(emitters.map((entry) => [entry.key, entry] as const));
+    const eventDiagnostics: VfxDiagnostic[] = [];
+    const eventLinks = emitters.flatMap((source) =>
+      source.program.events.flatMap((queue) =>
+        queue.handlers.flatMap((handler) => {
+          const target = byKey.get(handler.target);
+          if (!target) {
+            eventDiagnostics.push({
+              code: 'NACHI_EVENT_TARGET_UNKNOWN',
+              message: `emitTo() target "${handler.target}" is not an emitter in this effect.`,
+              path: `${source.key}.${handler.path}.config.target`,
+              phase: 'compile',
+              severity: 'error',
+            });
+            return [];
+          }
+          for (const [index, name] of handler.inherit.entries()) {
+            const producerAttribute = source.program.attributeSchema.byName[name];
+            const consumerAttribute = target.program.attributeSchema.byName[name];
+            if (!consumerAttribute) {
+              eventDiagnostics.push({
+                code: 'NACHI_EVENT_PAYLOAD_TARGET_UNKNOWN',
+                message: `Target emitter "${handler.target}" does not declare inherited attribute "${name}".`,
+                path: `${source.key}.${handler.path}.config.inherit[${index}]`,
+                phase: 'compile',
+                severity: 'error',
+              });
+            } else if (
+              producerAttribute &&
+              (consumerAttribute.logicalType !== producerAttribute.logicalType ||
+                consumerAttribute.components !== producerAttribute.components)
+            ) {
+              eventDiagnostics.push({
+                code: 'NACHI_EVENT_PAYLOAD_TYPE_MISMATCH',
+                message: `Inherited attribute "${name}" is ${producerAttribute.logicalType} on "${source.key}" but ${consumerAttribute.logicalType} on "${handler.target}".`,
+                path: `${source.key}.${handler.path}.config.inherit[${index}]`,
+                phase: 'compile',
+                severity: 'error',
+              });
+            }
+          }
+          return [{ handler, queue, sourceKey: source.key, targetKey: target.key }];
+        }),
+      ),
+    );
+    if (eventDiagnostics.length > 0) throw new VfxDiagnosticError(eventDiagnostics);
+    const compiled = { emitters, eventLinks };
     this.#compiledEffects.set(definition, compiled);
     this.#compilationCount += 1;
     return compiled;

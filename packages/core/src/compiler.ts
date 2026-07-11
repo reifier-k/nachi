@@ -169,6 +169,8 @@ export interface CompiledEmitterMeta {
     };
     readonly wordCount: number;
   };
+  /** M5 producer-owned, double-buffered append queues. Payload lanes are vec4-packed. */
+  readonly eventQueues: readonly CompiledEventQueueDescription[];
   readonly moduleSlots: readonly {
     readonly label?: string;
     readonly path: string;
@@ -193,6 +195,108 @@ export interface CompiledEmitterMeta {
     readonly storageType?: TslStorageType;
   }[];
   readonly storageBufferCount: number;
+}
+
+export interface CompiledEventPayloadField {
+  readonly attribute: string;
+  readonly components: number;
+  readonly eventPayloadPath: DataReference;
+  readonly group: number;
+  readonly logicalType: AttributeType;
+  readonly offset: number;
+}
+
+export interface CompiledEventHandlerDescription {
+  readonly inherit: readonly string[];
+  readonly path: string;
+  readonly target: string;
+}
+
+export interface CompiledEventQueueDescription {
+  readonly capacity: number;
+  readonly eventName: string;
+  readonly handlers: readonly CompiledEventHandlerDescription[];
+  readonly payloadFields: readonly CompiledEventPayloadField[];
+  readonly payloadGroupCount: number;
+  readonly stateWordCount: 4;
+}
+
+export type EventPayloadValues = Readonly<Record<string, number | readonly number[]>>;
+
+function eventPayloadFloatOffset(
+  queue: CompiledEventQueueDescription,
+  bank: 0 | 1,
+  slot: number,
+  group: number,
+  lane = 0,
+): number {
+  if (!Number.isSafeInteger(slot) || slot < 0 || slot >= queue.capacity) {
+    throw new RangeError(`Event payload slot ${slot} is outside capacity ${queue.capacity}.`);
+  }
+  if (!Number.isSafeInteger(group) || group < 0 || group >= queue.payloadGroupCount) {
+    throw new RangeError(
+      `Event payload group ${group} is outside group count ${queue.payloadGroupCount}.`,
+    );
+  }
+  return (
+    (bank * queue.capacity * queue.payloadGroupCount + slot * queue.payloadGroupCount + group) * 4 +
+    lane
+  );
+}
+
+/** CPU mirror of the GPU vec4 record store, used by tooling and payload layout tests. */
+export function writeEventPayloadRecord(
+  storage: Float32Array,
+  queue: CompiledEventQueueDescription,
+  bank: 0 | 1,
+  slot: number,
+  values: EventPayloadValues,
+): void {
+  const requiredLength = queue.capacity * queue.payloadGroupCount * 2 * 4;
+  if (storage.length < requiredLength) {
+    throw new RangeError(`Event payload storage needs ${requiredLength} floats.`);
+  }
+  for (let group = 0; group < queue.payloadGroupCount; group += 1) {
+    storage.fill(
+      0,
+      eventPayloadFloatOffset(queue, bank, slot, group),
+      eventPayloadFloatOffset(queue, bank, slot, group) + 4,
+    );
+  }
+  for (const field of queue.payloadFields) {
+    const input = values[field.attribute];
+    const components = typeof input === 'number' ? [input] : input;
+    if (!components || components.length !== field.components) {
+      throw new RangeError(
+        `Event payload field "${field.attribute}" needs ${field.components} component(s).`,
+      );
+    }
+    for (let component = 0; component < field.components; component += 1) {
+      storage[eventPayloadFloatOffset(queue, bank, slot, field.group, field.offset + component)] =
+        components[component] ?? 0;
+    }
+  }
+}
+
+/** CPU mirror of the consumer's vec4 lane unpacking. */
+export function readEventPayloadRecord(
+  storage: Float32Array,
+  queue: CompiledEventQueueDescription,
+  bank: 0 | 1,
+  slot: number,
+): Record<string, number | readonly number[]> {
+  const values: Record<string, number | readonly number[]> = {};
+  for (const field of queue.payloadFields) {
+    const components = Array.from(
+      { length: field.components },
+      (_, component) =>
+        storage[
+          eventPayloadFloatOffset(queue, bank, slot, field.group, field.offset + component)
+        ] ?? 0,
+    );
+    values[field.attribute] = field.components === 1 ? components[0]! : components;
+  }
+  return values;
 }
 
 export interface LifecycleStorageFieldMeta {
@@ -315,6 +419,8 @@ export interface BuiltEmitterKernels {
    */
   readonly drawIndirect?: KernelIndirectStorageNode;
   readonly drawIndirectOffsetBytes?: number;
+  readonly eventInputs: readonly BuiltEventInputKernels[];
+  readonly eventOutputs: Readonly<Record<string, BuiltEventOutputKernels>>;
   readonly finalizeIndirect?: KernelComputeNode;
   readonly finalizeSpawn?: KernelComputeNode;
   readonly freeCount?: KernelStorageNode;
@@ -332,6 +438,36 @@ export interface BuiltEmitterKernels {
   readonly storages: Readonly<Record<string, KernelStorageNode>>;
   readonly uniforms: Readonly<Record<string, KernelUniformNode>>;
   readonly update: KernelComputeNode;
+}
+
+export interface EventQueueResources {
+  readonly indirect: KernelIndirectStorageNode;
+  readonly payload: KernelStorageNode;
+  readonly state: KernelStorageNode;
+}
+
+export interface BuiltEventOutputKernels extends EventQueueResources {
+  readonly queue: CompiledEventQueueDescription;
+  readonly reset: KernelComputeNode;
+}
+
+export interface EventInputBinding {
+  readonly handler: CompiledEventHandlerDescription;
+  readonly queue: CompiledEventQueueDescription;
+  readonly resources: EventQueueResources;
+  readonly sourceKey: string;
+}
+
+export interface BuildEmitterKernelOptions {
+  readonly eventInputs?: readonly EventInputBinding[];
+  readonly eventOutputs?: Readonly<Record<string, EventQueueResources>>;
+}
+
+export interface BuiltEventInputKernels {
+  readonly binding: EventInputBinding;
+  readonly finalize: KernelComputeNode;
+  readonly prepare: KernelComputeNode;
+  readonly spawn: KernelComputeNode;
 }
 
 export interface KernelModuleBuildContext {
@@ -425,9 +561,13 @@ export interface CompileEmitterOptions {
 
 export interface CompiledEmitterProgram {
   readonly attributeSchema: ResolvedAttributeSchema;
-  readonly buildKernels: (adapter: KernelTslAdapter) => BuiltEmitterKernels;
+  readonly buildKernels: (
+    adapter: KernelTslAdapter,
+    options?: BuildEmitterKernelOptions,
+  ) => BuiltEmitterKernels;
   readonly diagnostics: readonly VfxDiagnostic[];
   readonly draws: readonly CompiledDrawDescription[];
+  readonly events: readonly CompiledEventQueueDescription[];
   readonly kernels: {
     readonly init: CompiledKernelDescription;
     readonly update: CompiledKernelDescription;
@@ -539,6 +679,8 @@ const SYSTEM_PATHS = new Set<ParameterPath>(['System.deltaTime', 'System.time'])
 const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.age',
   'Emitter.deltaTime',
+  'Emitter.eventReadBank',
+  'Emitter.eventWriteBank',
   'Emitter.events.pending',
   'Emitter.localTime',
   'Emitter.loopIndex',
@@ -552,6 +694,8 @@ const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
   'System.time',
   'Emitter.age',
   'Emitter.deltaTime',
+  'Emitter.eventReadBank',
+  'Emitter.eventWriteBank',
   'Emitter.localTime',
   'Emitter.loopIndex',
   'Emitter.seed',
@@ -586,6 +730,13 @@ const COMPILER_OWNED_WRITE_PATHS = [
     matches: (path: DataReference) => path.startsWith('Emitter.allocation.'),
     owner: 'spawn allocator',
     path: 'Emitter.allocation.*',
+  },
+  {
+    allows: (module: WriteOwnershipModule) => module.source === 'compiler',
+    matches: (path: DataReference) =>
+      path === 'Emitter.eventReadBank' || path === 'Emitter.eventWriteBank',
+    owner: 'event scheduler',
+    path: 'Emitter.event*Bank',
   },
   {
     allows: (module: WriteOwnershipModule) => module.stage === 'event',
@@ -1214,6 +1365,8 @@ function uniformDescriptions(
     describe('System.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
     describe('Emitter.age', 0, 'f32'),
     describe('Emitter.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
+    describe('Emitter.eventReadBank', 1, 'u32'),
+    describe('Emitter.eventWriteBank', 0, 'u32'),
     describe('Emitter.localTime', 0, 'f32'),
     describe('Emitter.loopIndex', 0, 'u32'),
     describe('Emitter.seed', options.emitterSeed ?? 0, 'u32'),
@@ -1393,6 +1546,168 @@ function lifecycleStorageLayout(capacity: number) {
     },
     wordCount: indirectWordCount + stateWordCount,
   } as const;
+}
+
+function compileEventQueues(
+  definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
+  schema: ResolvedAttributeSchema,
+  diagnostics: VfxDiagnostic[],
+): CompiledEventQueueDescription[] {
+  const queues: CompiledEventQueueDescription[] = [];
+  for (const [eventName, value] of Object.entries(definition.events ?? {})) {
+    const handlers = (Array.isArray(value) ? value : [value]).filter(
+      (module): module is NonNullable<typeof module> => module !== undefined,
+    );
+    if (eventName === 'onCollision') {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_EVENT_ON_COLLISION_UNIMPLEMENTED',
+          'onCollision is reserved for the M6 collision stage and cannot be scheduled in M5.',
+          `events.${eventName}`,
+        ),
+      );
+      continue;
+    }
+    if (eventName === 'onCustom') {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_EVENT_ON_CUSTOM_UNIMPLEMENTED',
+          'onCustom requires a tslModule emitEvent(condition) producer; the v1 context is reserved but not materialized yet.',
+          `events.${eventName}`,
+        ),
+      );
+      continue;
+    }
+    if (eventName !== 'onDeath') {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_EVENT_KIND_UNIMPLEMENTED',
+          `Event "${eventName}" is not implemented by the M5 GPU producer.`,
+          `events.${eventName}`,
+        ),
+      );
+      continue;
+    }
+
+    const compiledHandlers: CompiledEventHandlerDescription[] = [];
+    const inherited = new Set<string>();
+    for (const [index, module] of handlers.entries()) {
+      const path = `events.${eventName}[${index}]`;
+      if (module.type !== 'core/emit-to') {
+        // Registry-backed Event modules remain valid metadata. M5 only materializes emitTo;
+        // their execution contract is owned by the registering package.
+        continue;
+      }
+      const config = module.config as { inherit?: unknown; target?: unknown };
+      if (typeof config.target !== 'string' || config.target.length === 0) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_EVENT_TARGET_INVALID',
+            'emitTo() target must be a non-empty effect element name.',
+            `${path}.config.target`,
+          ),
+        );
+        continue;
+      }
+      const rawInherit = config.inherit;
+      const inherit = Array.isArray(rawInherit)
+        ? rawInherit.filter((name): name is string => typeof name === 'string')
+        : [];
+      if (
+        rawInherit !== undefined &&
+        (!Array.isArray(rawInherit) || inherit.length !== rawInherit.length)
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_EVENT_INHERIT_INVALID',
+            'emitTo() inherit entries must be particle attribute names.',
+            `${path}.config.inherit`,
+          ),
+        );
+      }
+      for (const [inheritIndex, name] of inherit.entries()) {
+        const attribute = schema.byName[name];
+        if (!attribute) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_EVENT_INHERIT_UNKNOWN',
+              `Inherited particle attribute "${name}" is not declared by the producer.`,
+              `${path}.config.inherit[${inheritIndex}]`,
+            ),
+          );
+          continue;
+        }
+        if (
+          attribute.components > 4 ||
+          !['color', 'f32', 'quat', 'vec2', 'vec3', 'vec4'].includes(attribute.logicalType)
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_EVENT_PAYLOAD_TYPE_UNSUPPORTED',
+              `Inherited attribute "${name}" uses ${attribute.logicalType}; M5 vec4 payload fields support float-domain types with up to four components.`,
+              `${path}.config.inherit[${inheritIndex}]`,
+            ),
+          );
+          continue;
+        }
+        inherited.add(name);
+      }
+      compiledHandlers.push({ inherit, path, target: config.target });
+    }
+
+    let lane = 0;
+    const payloadFields = [...inherited].map((name) => {
+      const attribute = schema.byName[name]!;
+      if ((lane % 4) + attribute.components > 4) lane = Math.ceil(lane / 4) * 4;
+      const field = {
+        attribute: name,
+        components: attribute.components,
+        eventPayloadPath: `Emitter.eventPayload.${name}` as DataReference,
+        group: Math.floor(lane / 4),
+        logicalType: attribute.logicalType,
+        offset: lane % 4,
+      } as const;
+      lane += attribute.components;
+      return field;
+    });
+    if (compiledHandlers.length === 0) continue;
+    queues.push({
+      capacity: definition.capacity,
+      eventName,
+      handlers: compiledHandlers,
+      payloadFields,
+      payloadGroupCount: Math.max(1, Math.ceil(lane / 4)),
+      stateWordCount: 4,
+    });
+  }
+  return queues;
+}
+
+export function allocateEventQueueResources(
+  adapter: KernelTslAdapter,
+  queue: CompiledEventQueueDescription,
+  emitterKey = 'Emitter',
+): EventQueueResources {
+  if (adapter.capabilities.backend !== 'webgpu') {
+    throw new VfxDiagnosticError([
+      diagnostic(
+        'NACHI_BACKEND_EVENT_UNSUPPORTED',
+        'GPU event queues require WebGPU atomics and indirect dispatch.',
+        `events.${queue.eventName}`,
+      ),
+    ]);
+  }
+  const state = adapter
+    .instancedArray(queue.stateWordCount, 'uint')
+    .toAtomic()
+    .setName(`NachiEventState_${emitterKey}_${queue.eventName}`);
+  const payload = adapter
+    .instancedArray(queue.capacity * queue.payloadGroupCount * 2, 'vec4')
+    .setName(`NachiEventPayload_${emitterKey}_${queue.eventName}`);
+  const indirect = adapter
+    .indirectArray(new Uint32Array(3))
+    .setName(`NachiEventIndirect_${emitterKey}_${queue.eventName}`) as KernelIndirectStorageNode;
+  return { indirect, payload, state };
 }
 
 function compileSpriteDraws(
@@ -1695,11 +2010,21 @@ function createBuildKernels(
   registry: KernelModuleRegistry,
   factories: ReadonlyMap<string, TslModuleFactory>,
   lifecycle: EmitterLifecycle | undefined,
-): (adapter: KernelTslAdapter) => BuiltEmitterKernels {
-  return (adapter) => {
+): (adapter: KernelTslAdapter, options?: BuildEmitterKernelOptions) => BuiltEmitterKernels {
+  return (adapter, options = {}) => {
     const buildDiagnostics = [...program.diagnostics];
     const backend = adapter.capabilities.backend;
     if (backend === 'webgl2') {
+      if (program.events.length > 0 || (options.eventInputs?.length ?? 0) > 0) {
+        buildDiagnostics.push({
+          code: 'NACHI_BACKEND_EVENT_UNSUPPORTED',
+          hint: 'Use the WebGPU backend for M5 event append and indirect consumption.',
+          message: 'GPU event queues require WebGPU atomics and indirect dispatch.',
+          path: 'events',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
       for (const module of program.spawn.modules) {
         if (module.type !== 'core/rate' && module.type !== 'core/per-distance') continue;
         buildDiagnostics.push({
@@ -1785,15 +2110,19 @@ function createBuildKernels(
       }
     }
     const storageBufferLimit = adapter.deviceLimits?.maxStorageBuffersPerShaderStage;
+    // Incoming queues are effect-owned and therefore absent from standalone emitter meta. Event
+    // spawn reads one source state buffer and one payload buffer in addition to target resources.
+    const materializedStorageBufferCount =
+      program.meta.storageBufferCount + ((options.eventInputs?.length ?? 0) > 0 ? 2 : 0);
     if (
       storageBufferLimit !== undefined &&
-      program.meta.storageBufferCount > storageBufferLimit &&
+      materializedStorageBufferCount > storageBufferLimit &&
       !buildDiagnostics.some(({ code }) => code === 'NACHI_STORAGE_BUFFER_LIMIT')
     ) {
       buildDiagnostics.push({
         code: 'NACHI_STORAGE_BUFFER_LIMIT',
         hint: 'Request a higher device limit or reduce the resolved attribute schema.',
-        message: `Emitter requires ${program.meta.storageBufferCount} storage buffers, but the device exposes ${storageBufferLimit} per shader stage.`,
+        message: `Emitter materialization requires ${materializedStorageBufferCount} storage buffers, but the device exposes ${storageBufferLimit} per shader stage.`,
         path: 'meta.storageBufferCount',
         phase: 'compile',
         severity: 'error',
@@ -1822,6 +2151,13 @@ function createBuildKernels(
     const lutTextures = Object.fromEntries(
       program.luts.map((lut) => [lut.id, adapter.dataTexture(lut)]),
     );
+    const eventOutputResources = Object.fromEntries(
+      program.events.map((queue) => [
+        queue.eventName,
+        options.eventOutputs?.[queue.eventName] ?? allocateEventQueueResources(adapter, queue),
+      ]),
+    ) as Readonly<Record<string, EventQueueResources>>;
+    const eventInputs = options.eventInputs ?? [];
 
     const capacity = program.attributeSchema.capacity;
     const gpuLifecycle = backend === 'webgpu';
@@ -1942,6 +2278,55 @@ function createBuildKernels(
       for (let component = 0; component < attribute.components; component += 1) {
         lanes[component]!.assign(sources[component]!);
       }
+    };
+    const eventStateElement = (resources: EventQueueResources, offset: KernelNodeInput) =>
+      resources.state.element(adapter.uint(offset));
+    const payloadElement = (
+      resources: EventQueueResources,
+      queue: CompiledEventQueueDescription,
+      bank: KernelNode,
+      slot: KernelNode,
+      group: number,
+    ) =>
+      resources.payload.element(
+        bank
+          .mul(adapter.uint(queue.capacity * queue.payloadGroupCount))
+          .add(slot.mul(adapter.uint(queue.payloadGroupCount)))
+          .add(adapter.uint(group)),
+      );
+    const appendEvent = (
+      queue: CompiledEventQueueDescription,
+      resources: EventQueueResources,
+      particleIndex: KernelNode,
+    ): void => {
+      const bank = adapter.uint(uniformNode('Emitter.eventWriteBank'));
+      const slot = adapter.atomicAdd(eventStateElement(resources, bank), adapter.uint(1), true);
+      adapter.atomicAdd(eventStateElement(resources, 3), adapter.uint(1));
+      adapter.branch(
+        slot.lessThan(adapter.uint(queue.capacity)),
+        () => {
+          // Store a complete vec4 record so producer and consumer graphs share one unambiguous
+          // write and unused lanes cannot retain data from an earlier event.
+          for (let group = 0; group < queue.payloadGroupCount; group += 1) {
+            const lanes: KernelNodeInput[] = [0, 0, 0, 0];
+            for (const field of queue.payloadFields) {
+              if (field.group !== group) continue;
+              const value = attributeNode(field.attribute, particleIndex);
+              const sources = [value.x, value.y, value.z, value.w];
+              for (let component = 0; component < field.components; component += 1) {
+                lanes[field.offset + component] =
+                  field.components === 1 ? value : sources[component]!;
+              }
+            }
+            payloadElement(resources, queue, bank, slot, group).assign(
+              adapter.vec4(lanes[0]!, lanes[1]!, lanes[2]!, lanes[3]!),
+            );
+          }
+        },
+        () => {
+          adapter.atomicAdd(eventStateElement(resources, 2), adapter.uint(1));
+        },
+      );
     };
     const uniformNode = (path: ParameterPath): KernelUniformNode => {
       const uniform = uniforms[path];
@@ -2088,6 +2473,13 @@ function createBuildKernels(
           writeLifecycle(counterOffsets.aliveCount, adapter.uint(0));
           writeLifecycle(counterOffsets.spawnSuccess, adapter.uint(0));
           writeLifecycle(counterOffsets.spawnOverflow, adapter.uint(0));
+          for (const queue of program.events) {
+            const resources = eventOutputResources[queue.eventName];
+            if (!resources) continue;
+            for (let word = 0; word < queue.stateWordCount; word += 1) {
+              adapter.atomicStore(eventStateElement(resources, word), adapter.uint(0));
+            }
+          }
         });
       })
       .compute(capacity, [program.spawn.workgroupSize])
@@ -2142,6 +2534,11 @@ function createBuildKernels(
           // Any declared update module may kill by writing Particles.alive. Recycling remains a
           // compiler-owned epilogue so every scattered death appends its physical slot once.
           adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(0)), () => {
+            for (const queue of program.events) {
+              if (queue.eventName !== 'onDeath') continue;
+              const resources = eventOutputResources[queue.eventName];
+              if (resources) appendEvent(queue, resources, particleIndex);
+            }
             recycleParticle(particleIndex);
           });
         });
@@ -2264,6 +2661,106 @@ function createBuildKernels(
         .setName('NachiEmitterFinalizeIndirect');
     }
 
+    const builtEventOutputs = Object.fromEntries(
+      program.events.map((queue) => {
+        const resources = eventOutputResources[queue.eventName];
+        if (!resources) throw new Error(`Event resources for ${queue.eventName} are missing.`);
+        const reset = adapter
+          .fn(() => {
+            const bank = adapter.uint(uniformNode('Emitter.eventWriteBank'));
+            adapter.atomicStore(eventStateElement(resources, bank), adapter.uint(0));
+          })
+          .compute(1, [1])
+          .setName(`NachiEventReset_${queue.eventName}`);
+        return [queue.eventName, { ...resources, queue, reset }] as const;
+      }),
+    );
+
+    const builtEventInputs: BuiltEventInputKernels[] = eventInputs.map((binding, inputIndex) => {
+      const { handler, queue, resources } = binding;
+      const readCount = () => {
+        const bank = adapter.uint(uniformNode('Emitter.eventReadBank'));
+        return adapter
+          .atomicLoad(eventStateElement(resources, bank))
+          .clamp(adapter.uint(0), adapter.uint(queue.capacity));
+      };
+      const prepare = adapter
+        .fn(() => {
+          adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
+          const count = readCount();
+          resources.indirect
+            .element(adapter.uint(0))
+            .assign(
+              count
+                .add(adapter.uint(program.spawn.workgroupSize - 1))
+                .div(adapter.uint(program.spawn.workgroupSize)),
+            );
+          resources.indirect.element(adapter.uint(1)).assign(adapter.uint(1));
+          resources.indirect.element(adapter.uint(2)).assign(adapter.uint(1));
+        })
+        .compute(1, [1])
+        .setName(`NachiEventPrepare_${binding.sourceKey}_${queue.eventName}_${inputIndex}`);
+      const spawn = adapter
+        .fn(() => {
+          const invocation = adapter.instanceIndex;
+          adapter.branch(invocation.lessThan(readCount()), () => {
+            const available = adapter.atomicLoad(counter(counterOffsets.freeCount));
+            adapter.branch(
+              invocation.lessThan(available),
+              () => {
+                const freeSlot = available.sub(adapter.uint(1)).sub(invocation);
+                const particleIndex = readLifecycle(
+                  stateLayout.fields.freeList.offsetWords,
+                  freeSlot,
+                );
+                writeAttribute(
+                  'spawnGeneration',
+                  attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
+                  particleIndex,
+                );
+                for (const module of initModules) buildModule(module, particleIndex);
+                const bank = adapter.uint(uniformNode('Emitter.eventReadBank'));
+                for (const name of handler.inherit) {
+                  const field = queue.payloadFields.find(
+                    (candidate) => candidate.attribute === name,
+                  );
+                  if (!field) continue;
+                  const payload = payloadElement(resources, queue, bank, invocation, field.group);
+                  const lanes = [payload.x, payload.y, payload.z, payload.w].slice(
+                    field.offset,
+                    field.offset + field.components,
+                  );
+                  const value =
+                    field.components === 1
+                      ? lanes[0]!
+                      : field.components === 2
+                        ? adapter.vec2(lanes[0]!, lanes[1]!)
+                        : field.components === 3
+                          ? adapter.vec3(lanes[0]!, lanes[1]!, lanes[2]!)
+                          : adapter.vec4(lanes[0]!, lanes[1]!, lanes[2]!, lanes[3]!);
+                  writeAttribute(name, value, particleIndex);
+                }
+                writeAttribute('alive', adapter.uint(1), particleIndex);
+                adapter.atomicAdd(counter(counterOffsets.spawnSuccess), adapter.uint(1));
+              },
+              () => {
+                adapter.atomicAdd(counter(counterOffsets.spawnOverflow), adapter.uint(1));
+              },
+            );
+          });
+        })
+        .computeKernel([program.spawn.workgroupSize])
+        .setName(`NachiEventSpawn_${binding.sourceKey}_${queue.eventName}_${inputIndex}`);
+      const finalize = adapter
+        .fn(() => {
+          const successful = adapter.atomicLoad(counter(counterOffsets.spawnSuccess));
+          adapter.atomicAdd(counter(counterOffsets.freeCount), adapter.uint(0).sub(successful));
+        })
+        .compute(1, [1])
+        .setName(`NachiEventFinalize_${binding.sourceKey}_${queue.eventName}_${inputIndex}`);
+      return { binding, finalize, prepare, spawn };
+    });
+
     return {
       aliveCount: lifecycleStorage,
       aliveIndices: lifecycleStorage,
@@ -2272,6 +2769,8 @@ function createBuildKernels(
       ...(compact === undefined ? {} : { compact }),
       counterOffsets,
       ...(drawIndirect === undefined ? {} : { drawIndirect }),
+      eventInputs: builtEventInputs,
+      eventOutputs: builtEventOutputs,
       ...(drawIndirect === undefined
         ? {}
         : {
@@ -2335,6 +2834,7 @@ export function compileEmitter<
     : authorAttributeResult;
   diagnostics.push(...attributeResult.diagnostics);
   const attributeSchema = attributeResult.value ?? emptyAttributeSchema(definition.capacity);
+  const events = compileEventQueues(untypedDefinition, attributeSchema, diagnostics);
   const updateStageOffset = includeAgeModule ? 1 : 0;
 
   const initialModules: CompiledKernelModule[] = [
@@ -2477,6 +2977,25 @@ export function compileEmitter<
         'compacted alive indices',
       ],
     },
+    ...events.flatMap((queue) => [
+      {
+        count: 1 as const,
+        name: `NachiEventState.${queue.eventName}`,
+        purposes: ['double-buffered append counters', 'event overflow and aggregate counters'],
+      },
+      {
+        count: 1 as const,
+        groupCount: queue.payloadGroupCount,
+        name: `NachiEventPayload.${queue.eventName}`,
+        purposes: ['double-buffered inherited event payload'],
+        storageType: 'vec4' as const,
+      },
+      {
+        count: 1 as const,
+        name: `NachiEventIndirect.${queue.eventName}`,
+        purposes: ['event spawn dispatch indirect arguments'],
+      },
+    ]),
   ];
   const meta: CompiledEmitterMeta = {
     backendBudgets: {
@@ -2507,6 +3026,7 @@ export function compileEmitter<
       buffers: lifecycleLayout.buffers,
       wordCount: lifecycleLayout.wordCount,
     },
+    eventQueues: events,
     moduleSlots: baked.modules.map((module) => {
       const base = {
         path: module.path,
@@ -2524,6 +3044,7 @@ export function compileEmitter<
     attributeSchema,
     diagnostics,
     draws,
+    events,
     kernels,
     luts: baked.luts,
     meta,
