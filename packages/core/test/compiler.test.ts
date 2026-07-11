@@ -14,6 +14,7 @@ import {
   collideSceneDepth,
   collideSdf,
   collideSphere,
+  clampSpawnOrderReservation,
   compileEmitter,
   coreModuleImplementationAccess,
   createCoreKernelModuleRegistry,
@@ -446,7 +447,9 @@ describe('emitter kernel compiler', () => {
       access: {
         reads: [],
         writes: program.attributeSchema.attributes
-          .filter(({ name }) => name !== 'alive' && name !== 'spawnGeneration')
+          .filter(
+            ({ name }) => name !== 'alive' && name !== 'spawnGeneration' && name !== 'spawnOrder',
+          )
           .map(({ path }) => path),
       },
       label: '$defaults',
@@ -691,6 +694,7 @@ describe('emitter kernel compiler', () => {
         name: 'NachiLifecycleState',
         purposes: [
           'free/alive/success/overflow counters',
+          'deterministic spawn-order counters and birth-index ring',
           'free-list indices',
           'compacted alive indices',
         ],
@@ -1133,6 +1137,22 @@ describe('emitter kernel compiler', () => {
     expect(built.drawIndirectOffsetBytes).toBe(3 * Uint32Array.BYTES_PER_ELEMENT);
   });
 
+  it('advances spawn order only by successful free-list reservations under saturation', () => {
+    let freeCount = 4;
+    let nextSpawnOrder = 0;
+    let successfulSpawns = 0;
+    for (const requested of [3, 3, 3]) {
+      const reserved = clampSpawnOrderReservation(requested, freeCount);
+      nextSpawnOrder += reserved;
+      successfulSpawns += reserved;
+      freeCount -= reserved;
+    }
+
+    expect(successfulSpawns).toBe(4);
+    expect(nextSpawnOrder).toBe(successfulSpawns);
+    expect(clampSpawnOrderReservation(8, 0)).toBe(0);
+  });
+
   it('uses WGSL identifiers for every materialized storage buffer name', () => {
     const names: string[] = [];
     const adapter = fakeAdapter();
@@ -1194,14 +1214,14 @@ describe('emitter kernel compiler', () => {
     const metadataWords = indirectMetadataWords + stateMetadataWords;
 
     expect(indirectMetadataWords).toBe(8);
-    expect(stateMetadataWords).toBe(20);
-    expect(metadataWords).toBe(28);
+    expect(stateMetadataWords).toBe(30);
+    expect(metadataWords).toBe(38);
     expect(indirectArguments.wordCount).toBe(indirectMetadataWords);
     expect(state.wordCount).toBe(stateMetadataWords);
     expect(program.meta.lifecycleStorage.wordCount).toBe(metadataWords);
     expect(materializedIndirectWords).toBe(indirectMetadataWords);
     expect(materializedInstancedWords.at(-1)).toBe(stateMetadataWords);
-    expect(metadataWords * Uint32Array.BYTES_PER_ELEMENT).toBe(112);
+    expect(metadataWords * Uint32Array.BYTES_PER_ELEMENT).toBe(152);
   });
 
   it('compiles burst, rate, and per-distance through the unified registry', () => {
@@ -1482,6 +1502,7 @@ describe('emitter kernel compiler', () => {
       'Particles.spawnGeneration',
       'init[0].access.writes[0]',
     ],
+    ['particle spawn order from init', 'init', 'Particles.spawnOrder', 'init[0].access.writes[0]'],
     [
       'spawn count from a custom spawn module',
       'spawn',

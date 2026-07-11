@@ -23,7 +23,10 @@ import {
   velocityOverLife,
   velocityMeshNormal,
   vortex,
+  createCoreKernelModuleRegistry,
 } from '@nachi/core';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
+import { materializeThreeRibbonDraw } from '@nachi/trails/three';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -44,6 +47,33 @@ import {
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
+  it('materializes an external @nachi/trails GPU birth-ring draw', () => {
+    const registry = registerTrails(createCoreKernelModuleRegistry());
+    const program = compileEmitter(
+      defineEmitter({
+        attributes: { ribbonId: ribbonIdAttribute() },
+        capacity: 8,
+        init: [lifetime(1), ribbonId({ count: 2, mode: 'alternating' })],
+        integration: 'none',
+        render: ribbon({ maxRibbons: 2, uv: { mode: 'stretched' }, width: 0.2 }),
+        spawn: burst({ count: 8 }),
+      }),
+      { registry },
+    );
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    const draw = materializeThreeRibbonDraw(program, kernels);
+
+    expect(program.draws[0]).toMatchObject({ kind: 'ribbon', requiresBackend: 'webgpu' });
+    expect(draw.prepareKernel).toBeDefined();
+    expect(draw.mesh.geometry.getIndirect()).toBe(draw.indirect);
+    expect(() =>
+      materializeThreeRibbonDraw(program, {
+        ...kernels,
+        capabilityPath: 'webgl2-cpu-readback',
+      }),
+    ).toThrowError('NACHI_RIBBON_WEBGL2_UNSUPPORTED');
+  });
+
   it('builds an area CDF and position texture from BufferGeometry triangles', () => {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute(
@@ -170,6 +200,20 @@ describe('three kernel adapter', () => {
     expect(createThreeKernelAdapter({ sceneDepthTexture: texture }).capabilities.sceneDepth).toBe(
       true,
     );
+  });
+
+  it('derives scene-depth sample count from a render target and normalizes samples zero', () => {
+    const multisampled = new THREE.RenderTarget(1, 1, { samples: 4 });
+    const singleSampled = new THREE.RenderTarget(1, 1, { samples: 0 });
+
+    expect(
+      createThreeKernelAdapter({ sceneDepthTexture: multisampled.texture }).capabilities
+        .sceneDepthSampleCount,
+    ).toBe(4);
+    expect(
+      createThreeKernelAdapter({ sceneDepthTexture: singleSampled.texture }).capabilities
+        .sceneDepthSampleCount,
+    ).toBe(1);
   });
 
   it('builds collideSceneDepth against a sampleable previous-frame color texture', () => {

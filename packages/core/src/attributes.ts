@@ -129,6 +129,7 @@ export const BUILT_IN_ATTRIBUTE_DEFAULTS = {
   size: 1,
   spriteRotation: 0,
   spawnGeneration: 0,
+  spawnOrder: 0,
   surfaceNormal: [0, 1, 0],
   velocity: [0, 0, 0],
 } as const;
@@ -146,6 +147,7 @@ const BUILT_IN_ATTRIBUTES = [
   ['rotation', 'quat', BUILT_IN_ATTRIBUTE_DEFAULTS.rotation],
   ['spriteRotation', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.spriteRotation],
   ['spawnGeneration', 'u32', BUILT_IN_ATTRIBUTE_DEFAULTS.spawnGeneration],
+  ['spawnOrder', 'u32', BUILT_IN_ATTRIBUTE_DEFAULTS.spawnOrder],
   ['surfaceNormal', 'vec3', BUILT_IN_ATTRIBUTE_DEFAULTS.surfaceNormal],
   ['mass', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.mass],
 ] as const satisfies readonly (readonly [string, AttributeType, unknown])[];
@@ -312,8 +314,8 @@ export function resolveAttributeSchema<
   }
 
   const usedBuiltIns = new Set<string>();
-  // M2 lifecycle state is always physical particle data. Keeping both attributes in every
-  // resolved schema makes slot reuse and deterministic per-particle generations backend-stable.
+  // Lifecycle identity is always physical particle data. spawnOrder is the deterministic birth
+  // key used by order-sensitive renderer extensions and never follows alive compaction order.
   usedBuiltIns.add('alive');
   usedBuiltIns.add('spawnGeneration');
   for (const { module, path } of collectEmitterModules(config)) {

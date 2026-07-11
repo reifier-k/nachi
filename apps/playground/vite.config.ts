@@ -15,15 +15,27 @@ export default defineConfig({
         m4Behaviors: 'm4-behaviors/index.html',
         m5Events: 'm5-events/index.html',
         m6Collision: 'm6-collision/index.html',
+        m7Ribbons: 'm7-ribbons/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },
     },
   },
   resolve: {
-    alias: {
-      '@nachi/core': fileURLToPath(new URL('../../packages/core/src/index.ts', import.meta.url)),
-    },
+    alias: [
+      {
+        find: '@nachi/trails/three',
+        replacement: fileURLToPath(new URL('../../packages/trails/src/three.ts', import.meta.url)),
+      },
+      {
+        find: '@nachi/trails',
+        replacement: fileURLToPath(new URL('../../packages/trails/src/index.ts', import.meta.url)),
+      },
+      {
+        find: '@nachi/core',
+        replacement: fileURLToPath(new URL('../../packages/core/src/index.ts', import.meta.url)),
+      },
+    ],
   },
   server: {
     host: '0.0.0.0',

@@ -42,6 +42,7 @@ import type {
   ParameterSchema,
   RangeGenerator,
   ResolvedAttributeSchema,
+  RenderModule,
   SpawnModule,
   TslFunctionRef,
   TslModuleDefinition,
@@ -73,6 +74,11 @@ export const CURL_SIMPLEX_DERIVATIVE_AMPLITUDE = 6;
 export const CURL_NOISE_FINITE_DIFFERENCE = 0.1;
 /** Calibrated by spike-depth for a visible but localized intersection transition. */
 export const DEFAULT_SOFT_PARTICLE_FADE_DISTANCE = 0.035;
+
+/** CPU mirror of the GPU spawn-order reservation rule, used by lifecycle regression tests. */
+export function clampSpawnOrderReservation(requested: number, freeCount: number): number {
+  return Math.min(Math.max(0, requested), Math.max(0, freeCount));
+}
 
 export type CompiledKernelStage = 'init' | 'update';
 export type CompiledModuleStage = CompiledKernelStage | 'spawn';
@@ -169,10 +175,13 @@ export interface CompiledEmitterMeta {
         readonly fields: {
           readonly aliveCount: LifecycleStorageFieldMeta;
           readonly aliveIndices: LifecycleStorageFieldMeta;
+          readonly birthIndices: LifecycleStorageFieldMeta;
+          readonly currentSpawnBase: LifecycleStorageFieldMeta;
           readonly freeCount: LifecycleStorageFieldMeta;
           readonly freeList: LifecycleStorageFieldMeta;
           readonly spawnOverflow: LifecycleStorageFieldMeta;
           readonly spawnSuccess: LifecycleStorageFieldMeta;
+          readonly nextSpawnOrder: LifecycleStorageFieldMeta;
         };
         readonly wordCount: number;
       };
@@ -429,6 +438,9 @@ export interface BuiltEmitterKernels {
   readonly aliveCount: KernelStorageNode;
   readonly aliveIndices: KernelStorageNode;
   readonly aliveIndicesOffset: number;
+  /** Spawn-order ring, independent from non-deterministic alive compaction. */
+  readonly birthIndices: KernelStorageNode;
+  readonly birthIndicesOffset: number;
   readonly capabilityPath: 'webgl2-cpu-readback' | 'webgpu-atomic-indirect';
   readonly compact?: KernelComputeNode;
   readonly counterOffsets: {
@@ -449,6 +461,7 @@ export interface BuiltEmitterKernels {
   readonly finalizeSpawn?: KernelComputeNode;
   readonly freeCount?: KernelStorageNode;
   readonly freeListOffset: number;
+  readonly nextSpawnOrderOffset: number;
   /** M1 all-slots compatibility kernel; never submit with the M2 lifecycle kernels. */
   readonly init: KernelComputeNode;
   /** Starts the M2 lifecycle path; mixing it with `init` leaves allocator counters inconsistent. */
@@ -557,13 +570,49 @@ export interface SpawnModuleImplementation {
   readonly version: number;
 }
 
-export type CompilerModuleImplementation = KernelModuleImplementation | SpawnModuleImplementation;
+export interface RenderModuleCompileContext {
+  readonly capacity: number;
+  readonly indirect: CompiledDrawIndirectDescription;
+  readonly module: RenderModule;
+  readonly path: string;
+  readonly schema: ResolvedAttributeSchema;
+  diagnostic(code: string, message: string, path?: string, severity?: 'error' | 'warning'): void;
+  vertex(attributes: readonly string[]): CompiledDrawVertexDescription | undefined;
+}
+
+/** External packages register render compilation without moving their public definitions to core. */
+export interface RenderModuleImplementation {
+  readonly access: ModuleAccess;
+  readonly compileDraw: (
+    context: RenderModuleCompileContext,
+  ) => CompiledDrawDescription | undefined;
+  readonly stage: 'render';
+  readonly type: string;
+  readonly version: number;
+}
+
+export type CompilerModuleImplementation =
+  | KernelModuleImplementation
+  | RenderModuleImplementation
+  | SpawnModuleImplementation;
 
 export class KernelModuleRegistry {
-  readonly #implementations = new Map<string, CompilerModuleImplementation>();
+  readonly #implementations = new Map<
+    string,
+    KernelModuleImplementation | SpawnModuleImplementation
+  >();
+  readonly #renderImplementations = new Map<string, RenderModuleImplementation>();
 
   register(implementation: CompilerModuleImplementation): void {
     const key = registryKey(implementation.type, implementation.version);
+    if (implementation.stage === 'render') {
+      const registered = this.#renderImplementations.get(key);
+      if (registered !== undefined && registered !== implementation) {
+        throw new Error(`Render module implementation ${key} is already registered.`);
+      }
+      this.#renderImplementations.set(key, implementation);
+      return;
+    }
     const registered = this.#implementations.get(key);
     if (registered !== undefined && registered !== implementation) {
       throw new Error(`Kernel module implementation ${key} is already registered.`);
@@ -571,8 +620,15 @@ export class KernelModuleRegistry {
     this.#implementations.set(key, implementation);
   }
 
-  resolve(type: string, version: number): CompilerModuleImplementation | undefined {
+  resolve(
+    type: string,
+    version: number,
+  ): KernelModuleImplementation | SpawnModuleImplementation | undefined {
     return this.#implementations.get(registryKey(type, version));
+  }
+
+  resolveRender(type: string, version: number): RenderModuleImplementation | undefined {
+    return this.#renderImplementations.get(registryKey(type, version));
   }
 }
 
@@ -606,7 +662,13 @@ export interface CompiledEmitterProgram {
   readonly uniforms: readonly CompiledUniformDescription[];
 }
 
-export type CompiledDrawDescription = CompiledMeshDrawDescription | CompiledSpriteDrawDescription;
+/** Declaration-merging extension point used by renderer packages such as @nachi/trails. */
+export interface CompiledDrawDescriptionMap {
+  readonly billboard: CompiledSpriteDrawDescription;
+  readonly mesh: CompiledMeshDrawDescription;
+}
+
+export type CompiledDrawDescription = CompiledDrawDescriptionMap[keyof CompiledDrawDescriptionMap];
 
 export interface CompiledDrawIndirectDescription {
   readonly aliveIndicesOffsetWords: number;
@@ -754,6 +816,12 @@ const COMPILER_OWNED_WRITE_PATHS = [
     path: 'Particles.spawnGeneration',
   },
   {
+    allows: (module: WriteOwnershipModule) => module.source === 'compiler',
+    matches: (path: DataReference) => path === 'Particles.spawnOrder',
+    owner: 'spawn-order allocator',
+    path: 'Particles.spawnOrder',
+  },
+  {
     allows: (module: WriteOwnershipModule) =>
       module.source === 'compiler' ||
       (module.stage === 'spawn' &&
@@ -829,7 +897,7 @@ function validateRenderModuleLimit(
   return [
     diagnostic(
       'NACHI_RENDER_MODULE_LIMIT',
-      `M3 supports one render module per emitter; received ${renderModules.length}. Per-draw indirect argument slots are planned for M7.`,
+      `M7 batch 1 supports one render module per emitter; received ${renderModules.length}. Per-draw indirect argument slots remain a later M7 batch.`,
       renderModules[1]!.path,
     ),
   ];
@@ -974,7 +1042,7 @@ function withDerivedConfigReads<Stage extends ModuleDefinition['stage']>(
 function defaultsModule(schema: ResolvedAttributeSchema): InitModule {
   const config = {
     attributes: schema.attributes
-      .filter(({ name }) => name !== 'alive' && name !== 'spawnGeneration')
+      .filter(({ name }) => name !== 'alive' && name !== 'spawnGeneration' && name !== 'spawnOrder')
       .map(({ default: defaultValue, logicalType, name, storageIndex }) => ({
         default: defaultValue,
         logicalType,
@@ -1613,10 +1681,13 @@ function lifecycleStorageLayout(capacity: number) {
     aliveCount: { offsetWords: 1, wordCount: 1 },
     spawnSuccess: { offsetWords: 2, wordCount: 1 },
     spawnOverflow: { offsetWords: 3, wordCount: 1 },
-    freeList: { offsetWords: 4, wordCount: capacity },
-    aliveIndices: { offsetWords: 4 + capacity, wordCount: capacity },
+    nextSpawnOrder: { offsetWords: 4, wordCount: 1 },
+    currentSpawnBase: { offsetWords: 5, wordCount: 1 },
+    freeList: { offsetWords: 6, wordCount: capacity },
+    aliveIndices: { offsetWords: 6 + capacity, wordCount: capacity },
+    birthIndices: { offsetWords: 6 + capacity * 2, wordCount: capacity },
   } as const;
-  const stateWordCount = stateFields.aliveIndices.offsetWords + stateFields.aliveIndices.wordCount;
+  const stateWordCount = stateFields.birthIndices.offsetWords + stateFields.birthIndices.wordCount;
   return {
     buffers: {
       indirectArguments: { fields: indirectFields, wordCount: indirectWordCount },
@@ -2069,6 +2140,98 @@ function compileMeshDraws(
         storageBuffers: vertexStorageBuffers,
       },
     });
+  }
+  return draws;
+}
+
+function compileRegisteredDraws(
+  definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
+  schema: ResolvedAttributeSchema,
+  lifecycleLayout: ReturnType<typeof lifecycleStorageLayout>,
+  registry: KernelModuleRegistry,
+  diagnostics: VfxDiagnostic[],
+): CompiledDrawDescription[] {
+  const draws: CompiledDrawDescription[] = [];
+  for (const { module, path } of collectEmitterModules(definition)) {
+    if (
+      module.stage !== 'render' ||
+      module.type === 'core/billboard' ||
+      module.type === 'core/mesh-renderer'
+    ) {
+      continue;
+    }
+    const implementation = registry.resolveRender(module.type, module.version);
+    // Core historically permits opaque render modules so renderer-specific integrations can
+    // inspect them independently. Registered packages opt into compiled draw descriptions here.
+    if (!implementation) continue;
+    if (
+      !includesImplementationAccess(
+        module.access ?? { reads: [], writes: [] },
+        implementation.access,
+      )
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_MODULE_ACCESS_MISMATCH',
+          `Render module ${module.type} access does not include its implementation reads and writes.`,
+          `${path}.access`,
+        ),
+      );
+      continue;
+    }
+    const indirect: CompiledDrawIndirectDescription = {
+      aliveIndicesOffsetWords: lifecycleLayout.buffers.state.fields.aliveIndices.offsetWords,
+      drawArgumentsOffsetBytes:
+        lifecycleLayout.buffers.indirectArguments.fields.drawIndirect.offsetWords *
+        Uint32Array.BYTES_PER_ELEMENT,
+      instanceCount: 'alive-count',
+      physicalIndex: 'alive-indices',
+    };
+    const context: RenderModuleCompileContext = {
+      capacity: definition.capacity,
+      diagnostic: (code, message, diagnosticPath = path, severity = 'error') => {
+        diagnostics.push(diagnostic(code, message, diagnosticPath, severity));
+      },
+      indirect,
+      module: module as RenderModule,
+      path,
+      schema,
+      vertex: (attributes) => {
+        if (attributes.some((name) => schema.byName[name] === undefined)) return undefined;
+        const attributeBuffers = [
+          ...new Set(
+            attributes.map((name) => {
+              const attribute = schema.byName[name];
+              const storage =
+                attribute === undefined
+                  ? undefined
+                  : schema.storageArrays[attribute.physical.bufferIndex];
+              if (!attribute || !storage) {
+                throw new Error(`Render attribute "${name}" has no physical storage.`);
+              }
+              return `Particles.${storage.name}`;
+            }),
+          ),
+        ];
+        const storageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+        if (storageBuffers.length > 8) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_STORAGE_BUFFER_LIMIT',
+              `Render vertex stage requires ${storageBuffers.length} storage buffers (${storageBuffers.join(', ')}), exceeding the default limit of 8.`,
+              `${path}.vertex.storageBufferCount`,
+            ),
+          );
+        }
+        return {
+          attributes,
+          storageBufferCount: storageBuffers.length,
+          storageBuffers,
+        };
+      },
+    };
+    const draw = implementation.compileDraw(context);
+    if (draw) draws.push(draw);
   }
   return draws;
 }
@@ -2565,6 +2728,7 @@ function createBuildKernels(
     };
 
     const initModules = program.kernels.init.modules;
+    const hasSpawnOrder = program.attributeSchema.byName.spawnOrder !== undefined;
     const ageModule = program.kernels.update.modules.find(({ type }) => type === 'core/age');
     const updateModules = program.kernels.update.modules.filter(({ type }) => type !== 'core/age');
 
@@ -2572,6 +2736,7 @@ function createBuildKernels(
       .fn(() => {
         writeAttribute('alive', adapter.constant(false, 'bool'));
         writeAttribute('spawnGeneration', adapter.constant(0, 'u32'));
+        if (hasSpawnOrder) writeAttribute('spawnOrder', adapter.constant(0, 'u32'));
         writeLifecycle(
           stateLayout.fields.freeList.offsetWords,
           adapter.uint(adapter.instanceIndex),
@@ -2582,6 +2747,8 @@ function createBuildKernels(
           writeLifecycle(counterOffsets.aliveCount, adapter.uint(0));
           writeLifecycle(counterOffsets.spawnSuccess, adapter.uint(0));
           writeLifecycle(counterOffsets.spawnOverflow, adapter.uint(0));
+          writeLifecycle(stateLayout.fields.nextSpawnOrder.offsetWords, adapter.uint(0));
+          writeLifecycle(stateLayout.fields.currentSpawnBase.offsetWords, adapter.uint(0));
           for (const queue of program.events) {
             const resources = eventOutputResources[queue.eventName];
             if (!resources) continue;
@@ -2599,6 +2766,12 @@ function createBuildKernels(
     // free/alive counters, so submitting both paths can make allocator counters inconsistent.
     const init = adapter
       .fn(() => {
+        if (hasSpawnOrder) writeAttribute('spawnOrder', adapter.uint(adapter.instanceIndex));
+        writeLifecycle(
+          stateLayout.fields.birthIndices.offsetWords,
+          adapter.uint(adapter.instanceIndex),
+          adapter.instanceIndex,
+        );
         for (const module of initModules) buildModule(module, adapter.instanceIndex);
         writeAttribute('alive', adapter.constant(true, 'bool'));
       })
@@ -2674,6 +2847,18 @@ function createBuildKernels(
                 attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
                 particleIndex,
               );
+              const spawnOrder = readLifecycle(stateLayout.fields.currentSpawnBase.offsetWords).add(
+                invocation,
+              );
+              if (hasSpawnOrder) writeAttribute('spawnOrder', spawnOrder, particleIndex);
+              const birthSlot = spawnOrder.sub(
+                spawnOrder.div(adapter.uint(capacity)).mul(adapter.uint(capacity)),
+              );
+              writeLifecycle(
+                stateLayout.fields.birthIndices.offsetWords,
+                adapter.uint(particleIndex),
+                birthSlot,
+              );
               for (const module of initModules) buildModule(module, particleIndex);
               writeAttribute('alive', adapter.uint(1), particleIndex);
               adapter.atomicAdd(counter(counterOffsets.spawnSuccess), adapter.uint(1));
@@ -2688,6 +2873,12 @@ function createBuildKernels(
             'spawnGeneration',
             attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
             particleIndex,
+          );
+          if (hasSpawnOrder) writeAttribute('spawnOrder', invocation, particleIndex);
+          writeLifecycle(
+            stateLayout.fields.birthIndices.offsetWords,
+            adapter.uint(particleIndex),
+            invocation,
           );
           for (const module of initModules) buildModule(module, particleIndex);
           writeAttribute('alive', adapter.uint(1), particleIndex);
@@ -2717,6 +2908,14 @@ function createBuildKernels(
         .fn(() => {
           adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
           const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
+          const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
+          const reservation = requested.clamp(adapter.uint(0), freeCount);
+          const spawnBase = adapter.atomicAdd(
+            counter(stateLayout.fields.nextSpawnOrder.offsetWords),
+            reservation,
+            true,
+          );
+          adapter.atomicStore(counter(stateLayout.fields.currentSpawnBase.offsetWords), spawnBase);
           writeIndirect(
             indirectLayout.fields.spawnDispatch.offsetWords,
             requested
@@ -2797,6 +2996,14 @@ function createBuildKernels(
         .fn(() => {
           adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
           const count = readCount();
+          const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
+          const reservation = count.clamp(adapter.uint(0), freeCount);
+          const spawnBase = adapter.atomicAdd(
+            counter(stateLayout.fields.nextSpawnOrder.offsetWords),
+            reservation,
+            true,
+          );
+          adapter.atomicStore(counter(stateLayout.fields.currentSpawnBase.offsetWords), spawnBase);
           resources.indirect
             .element(adapter.uint(0))
             .assign(
@@ -2826,6 +3033,18 @@ function createBuildKernels(
                   'spawnGeneration',
                   attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
                   particleIndex,
+                );
+                const spawnOrder = readLifecycle(
+                  stateLayout.fields.currentSpawnBase.offsetWords,
+                ).add(invocation);
+                if (hasSpawnOrder) writeAttribute('spawnOrder', spawnOrder, particleIndex);
+                const birthSlot = spawnOrder.sub(
+                  spawnOrder.div(adapter.uint(capacity)).mul(adapter.uint(capacity)),
+                );
+                writeLifecycle(
+                  stateLayout.fields.birthIndices.offsetWords,
+                  adapter.uint(particleIndex),
+                  birthSlot,
                 );
                 for (const module of initModules) buildModule(module, particleIndex);
                 const bank = adapter.uint(uniformNode('Emitter.eventReadBank'));
@@ -2874,6 +3093,8 @@ function createBuildKernels(
       aliveCount: lifecycleStorage,
       aliveIndices: lifecycleStorage,
       aliveIndicesOffset: stateLayout.fields.aliveIndices.offsetWords,
+      birthIndices: lifecycleStorage,
+      birthIndicesOffset: stateLayout.fields.birthIndices.offsetWords,
       capabilityPath: gpuLifecycle ? 'webgpu-atomic-indirect' : 'webgl2-cpu-readback',
       ...(compact === undefined ? {} : { compact }),
       counterOffsets,
@@ -2890,6 +3111,7 @@ function createBuildKernels(
       ...(finalizeSpawn === undefined ? {} : { finalizeSpawn }),
       freeCount: lifecycleStorage,
       freeListOffset: stateLayout.fields.freeList.offsetWords,
+      nextSpawnOrderOffset: stateLayout.fields.nextSpawnOrder.offsetWords,
       init,
       initialize,
       luts: lutTextures,
@@ -3057,8 +3279,15 @@ export function compileEmitter<
     lifecycleLayout,
     diagnostics,
   );
+  const registeredDraws = compileRegisteredDraws(
+    normalizedDefinition,
+    attributeSchema,
+    lifecycleLayout,
+    registry,
+    diagnostics,
+  );
   const drawsByPath = new Map(
-    [...spriteDraws, ...meshDraws].map((draw) => [draw.path, draw] as const),
+    [...spriteDraws, ...meshDraws, ...registeredDraws].map((draw) => [draw.path, draw] as const),
   );
   const draws = collectEmitterModules(normalizedDefinition).flatMap(({ module, path }) => {
     if (module.stage !== 'render') return [];
@@ -3096,6 +3325,7 @@ export function compileEmitter<
       name: 'NachiLifecycleState',
       purposes: [
         'free/alive/success/overflow counters',
+        'deterministic spawn-order counters and birth-index ring',
         'free-list indices',
         'compacted alive indices',
       ],

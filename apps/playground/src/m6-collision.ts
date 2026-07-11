@@ -220,6 +220,9 @@ async function run(): Promise<void> {
         HEIGHT,
       );
       const centerDepth = centerDepthOf(pixels);
+      // This tripwire intentionally compares the exact center pixel only. Every preceding test
+      // configuration moves the large center-covering occluder, so equality is a strong stale-copy
+      // signal here; it is not a general-purpose depth-change detector for sub-pixel geometry.
       if (previousDepthCopy !== null && centerDepth === previousDepthCopy.centerDepth) {
         throw new Error(
           `Stale scene-depth copy: ${configuration} retained center depth from ${previousDepthCopy.configuration}.`,
@@ -608,6 +611,7 @@ async function run(): Promise<void> {
       close(movingDepthNextPosition[2] ?? Number.NaN, 0.352, 0.02),
     depthNormalBounce:
       close(slopeDepth.velocity[0] ?? Number.NaN, expectedSlopeVelocity[0], 0.04) &&
+      close(slopeDepth.velocity[1] ?? Number.NaN, expectedSlopeVelocity[1], 0.002) &&
       close(slopeDepth.velocity[2] ?? Number.NaN, expectedSlopeVelocity[2], 0.04),
     depthThicknessReject:
       close(thicknessDepth.position[2] ?? Number.NaN, -1, 0.002) &&

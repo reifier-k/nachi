@@ -260,6 +260,7 @@ export interface BuiltInTslParticleBindings {
   readonly size: TslExpression<number>;
   readonly spriteRotation: TslExpression<number>;
   readonly spawnGeneration: TslExpression<number>;
+  readonly spawnOrder: TslExpression<number>;
   readonly velocity: TslExpression<Vec3>;
 }
 

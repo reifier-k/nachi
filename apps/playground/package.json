@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@nachi/core": "workspace:*",
+    "@nachi/trails": "workspace:*",
     "three": "0.185.1",
     "tweakpane": "4.0.5"
   },

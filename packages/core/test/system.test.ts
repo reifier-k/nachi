@@ -4,6 +4,7 @@ import {
   EffectClock,
   EmitterLifecycleController,
   FixedStepAccumulator,
+  SPAWN_ORDER_WRAP_WARNING_THRESHOLD,
   VFXSystem,
   VfxDiagnosticError,
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
@@ -11,6 +12,7 @@ import {
   burst,
   collidePlane,
   collideSceneDepth,
+  crossesSpawnOrderWarningThreshold,
   defineEffect,
   defineEmitter,
   defineParameter,
@@ -393,6 +395,14 @@ describe('fixed timestep accumulator', () => {
   });
 });
 
+describe('spawn-order wrap warning', () => {
+  it('crosses once at the u32 half-range safety threshold', () => {
+    expect(crossesSpawnOrderWarningThreshold(SPAWN_ORDER_WRAP_WARNING_THRESHOLD - 1, 1)).toBe(true);
+    expect(crossesSpawnOrderWarningThreshold(SPAWN_ORDER_WRAP_WARNING_THRESHOLD, 1)).toBe(false);
+    expect(crossesSpawnOrderWarningThreshold(0, 1)).toBe(false);
+  });
+});
+
 describe('emitter lifecycle state machine', () => {
   it('stays delayed until startDelay elapses', () => {
     const lifecycle = new EmitterLifecycleController({ duration: 1, startDelay: 0.5 });
@@ -505,15 +515,35 @@ describe('VFXSystem runtime scheduler', () => {
       },
     });
 
-  it('warns when scene-depth collision is spawned before camera uniforms are set', () => {
-    const instance = new VFXSystem(sceneDepthRenderer()).spawn(sceneDepthEffect());
+  it('warns on first update when scene-depth collision has no configured camera', async () => {
+    const system = new VFXSystem(sceneDepthRenderer());
+    const instance = system.spawn(sceneDepthEffect());
 
     expect(instance.state).toBe('active');
+    expect(instance.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_SCENE_DEPTH_CAMERA_UNSET' }),
+    );
+    await system.update(0);
     expect(instance.diagnostics).toContainEqual(
       expect.objectContaining({
         code: 'NACHI_SCENE_DEPTH_CAMERA_UNSET',
         severity: 'warning',
       }),
+    );
+  });
+
+  it('does not warn when camera uniforms are configured before the first update', async () => {
+    const system = new VFXSystem(sceneDepthRenderer());
+    const instance = system.spawn(sceneDepthEffect());
+    system.setCamera({
+      projectionMatrix: [1, 0, 0, 0, 0, 1, -1, -1, 0, 0, -1, -1, 0, 0, -0.1, 0],
+      viewMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      viewportSize: [64, 64],
+    });
+    await system.update(0);
+
+    expect(instance.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_SCENE_DEPTH_CAMERA_UNSET' }),
     );
   });
 
@@ -534,6 +564,24 @@ describe('VFXSystem runtime scheduler', () => {
         severity: 'warning',
       }),
     );
+  });
+
+  it('deduplicates reverse-z camera warnings per instance and diagnostic code', () => {
+    const system = new VFXSystem(sceneDepthRenderer());
+    const instance = system.spawn(sceneDepthEffect());
+    const camera = {
+      projectionMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.01, -1, 0, 0, 0.1, 0],
+      viewMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      viewportSize: [64, 64] as const,
+    };
+
+    system.setCamera(camera);
+    system.setCamera(camera);
+    system.setCamera(camera);
+
+    expect(
+      instance.diagnostics.filter(({ code }) => code === 'NACHI_SCENE_DEPTH_REVERSE_Z_UNSUPPORTED'),
+    ).toHaveLength(1);
   });
 
   it('caches compilation by effect-definition identity', () => {
@@ -929,6 +977,31 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_SPAWN_CAPACITY_EXCEEDED' }),
     );
+  });
+
+  it('warns once when readback observes spawnOrder at the u32 half-range', async () => {
+    const base = new FakeRuntimeRenderer();
+    let nextSpawnOrderOffset = 0;
+    const renderer: VfxRuntimeRenderer = {
+      kernelAdapter: base.kernelAdapter,
+      readStorage: () => {
+        const counters = new Uint32Array(nextSpawnOrderOffset + 1);
+        counters[nextSpawnOrderOffset] = SPAWN_ORDER_WRAP_WARNING_THRESHOLD;
+        return Promise.resolve(counters.buffer);
+      },
+      submitCompute: (kernel) => base.submitCompute(kernel),
+      submitComputeIndirect: (kernel) => base.submitCompute(kernel),
+    };
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    nextSpawnOrderOffset = instance.getEmitter('particles')?.kernels.nextSpawnOrderOffset ?? 0;
+
+    await system.update(0);
+    await system.update(0);
+
+    expect(
+      instance.diagnostics.filter(({ code }) => code === 'NACHI_SPAWN_ORDER_WRAP_RISK'),
+    ).toHaveLength(1);
   });
 
   it('reports CPU-side spawn clamping immediately without readback', async () => {

@@ -77,7 +77,7 @@ export interface ThreeKernelAdapterOptions {
   readonly resolveVectorField?: ThreeVectorFieldResolver;
   /** Sampleable color copy of the previous frame's normalized scene depth. */
   readonly sceneDepthTexture?: THREE.Texture;
-  /** Sample count of the source copied into sceneDepthTexture. Must be one for collisions. */
+  /** Source sample count. Three.js `samples: 0` is normalized to one non-MSAA sample. */
   readonly sceneDepthSampleCount?: number;
 }
 
@@ -409,8 +409,16 @@ export function createThreeKernelAdapter(
   const sourceRenderTarget = options.sceneDepthTexture as
     | (THREE.Texture & { readonly renderTarget?: { readonly samples?: number } })
     | undefined;
-  const sceneDepthSampleCount =
+  const configuredSceneDepthSampleCount =
     options.sceneDepthSampleCount ?? sourceRenderTarget?.renderTarget?.samples ?? 1;
+  if (
+    !Number.isSafeInteger(configuredSceneDepthSampleCount) ||
+    configuredSceneDepthSampleCount < 0
+  ) {
+    throw new RangeError('sceneDepthSampleCount must be a non-negative safe integer.');
+  }
+  const sceneDepthSampleCount =
+    configuredSceneDepthSampleCount === 0 ? 1 : configuredSceneDepthSampleCount;
   const base: KernelTslAdapter = {
     capabilities: {
       atomics: options.backend !== 'webgl2',

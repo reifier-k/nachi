@@ -5,6 +5,7 @@ import {
   type CompiledSpawnModule,
   type CompiledEmitterProgram,
   type KernelComputeNode,
+  type KernelModuleRegistry,
   type KernelTslAdapter,
   type KernelUniformNode,
   type EventInputBinding,
@@ -38,6 +39,14 @@ import type {
 const DEFAULT_MAX_SUB_STEPS = 8;
 const DEFAULT_PREWARM_STEP_SECONDS = 1 / 60;
 const TIME_EPSILON = 1e-10;
+export const SPAWN_ORDER_WRAP_WARNING_THRESHOLD = 0x8000_0000;
+
+export function crossesSpawnOrderWarningThreshold(previous: number, increment: number): boolean {
+  return (
+    previous < SPAWN_ORDER_WRAP_WARNING_THRESHOLD &&
+    previous + increment >= SPAWN_ORDER_WRAP_WARNING_THRESHOLD
+  );
+}
 
 export interface VfxDeviceLossInfo {
   readonly message?: string;
@@ -70,6 +79,8 @@ export interface VfxSystemOptions {
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
   readonly now?: () => number;
   readonly prewarmStepSeconds?: number;
+  /** Module/render compiler registrations supplied by optional packages. */
+  readonly registry?: KernelModuleRegistry;
 }
 
 export interface VfxCameraState {
@@ -660,6 +671,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly #lastEventTotal = new Map<string, number>();
   #pendingDistance = 0;
   #pendingGpuSpawnRequested = 0;
+  #spawnOrderRequestTotal = 0;
+  #spawnOrderWrapWarned = false;
   #spawnGeneration = 0;
   #transform: readonly number[];
 
@@ -978,6 +991,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       );
       await this.#renderer.submitCompute(finalizeSpawn);
       this.#pendingGpuSpawnRequested += dispatchCount;
+      this.#trackSpawnOrderRequests(dispatchCount);
     } else {
       await this.#renderer.submitCompute(this.kernels.spawn);
     }
@@ -1017,6 +1031,11 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           this.#reportOverflow(this.#pendingGpuSpawnRequested, overflow);
         }
         this.#pendingGpuSpawnRequested = 0;
+        if (
+          (counters[this.kernels.nextSpawnOrderOffset] ?? 0) >= SPAWN_ORDER_WRAP_WARNING_THRESHOLD
+        ) {
+          this.#warnSpawnOrderWrapRisk();
+        }
         for (const [eventName, output] of Object.entries(this.kernels.eventOutputs)) {
           const state = new Uint32Array(await this.#renderer.readStorage(output.state));
           const total = state[3] ?? 0;
@@ -1082,6 +1101,25 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.localTime', this.#emitterAge);
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.loopIndex', loopIndex);
   }
+
+  #trackSpawnOrderRequests(requested: number): void {
+    const previous = this.#spawnOrderRequestTotal;
+    this.#spawnOrderRequestTotal = Math.min(Number.MAX_SAFE_INTEGER, previous + requested);
+    if (crossesSpawnOrderWarningThreshold(previous, requested)) this.#warnSpawnOrderWrapRisk();
+  }
+
+  #warnSpawnOrderWrapRisk(): void {
+    if (this.#spawnOrderWrapWarned) return;
+    this.#spawnOrderWrapWarned = true;
+    this.#onDiagnostic({
+      code: 'NACHI_SPAWN_ORDER_WRAP_RISK',
+      message:
+        'Spawn-order usage has reached the conservative u32 half-range safety threshold; restart this emitter before wrap can invalidate birth-ring ordering.',
+      path: 'Particles.spawnOrder',
+      phase: 'runtime',
+      severity: 'warning',
+    });
+  }
 }
 
 export class VfxEffectInstance<
@@ -1089,6 +1127,7 @@ export class VfxEffectInstance<
 > implements EffectInstance<Definition> {
   readonly clock: EffectClock;
   readonly #diagnostics: VfxDiagnostic[] = [];
+  readonly #diagnosticCodes = new Set<string>();
   readonly #emitters = new Map<string, RuntimeEmitter>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (id: string) => void;
@@ -1240,6 +1279,12 @@ export class VfxEffectInstance<
     if (this.#state !== 'released') this.#diagnostics.push(diagnostic);
   }
 
+  recordDiagnosticOnce(diagnostic: VfxDiagnostic): void {
+    if (this.#state === 'released' || this.#diagnosticCodes.has(diagnostic.code)) return;
+    this.#diagnosticCodes.add(diagnostic.code);
+    this.#diagnostics.push(diagnostic);
+  }
+
   async initialize(systemTime: number, prewarmStepSeconds: number): Promise<void> {
     if (this.#state !== 'active' || this.#initialized) return;
     const context = {
@@ -1324,6 +1369,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #instances = new Map<string, VfxEffectInstance<RuntimeEffectDefinition>>();
   readonly #now: () => number;
   readonly #prewarmStepSeconds: number;
+  readonly #registry: KernelModuleRegistry | undefined;
   #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
   #cameraConfigured = false;
   #compilationCount = 0;
@@ -1339,6 +1385,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     options: VfxSystemOptions = {},
   ) {
     this.#aliveCountReadbackInterval = options.aliveCountReadbackInterval;
+    this.#registry = options.registry;
     if (
       this.#aliveCountReadbackInterval !== undefined &&
       (!Number.isSafeInteger(this.#aliveCountReadbackInterval) ||
@@ -1391,7 +1438,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     for (const instance of this.#instances.values()) {
       instance.setCamera(this.#cameraState);
       if (instance.usesSceneDepth && reverseZDiagnostic) {
-        instance.recordDiagnostic(reverseZDiagnostic);
+        instance.recordDiagnosticOnce(reverseZDiagnostic);
       }
     }
   }
@@ -1433,19 +1480,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       const usesSceneDepth = compiled.emitters.some(({ program }) =>
         program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth'),
       );
-      if (usesSceneDepth && !this.#cameraConfigured) {
-        instance.recordDiagnostic(
-          runtimeDiagnostic(
-            'NACHI_SCENE_DEPTH_CAMERA_UNSET',
-            'collideSceneDepth() is using identity camera uniforms because VFXSystem.setCamera() was not called.',
-            'System.projectionMatrix',
-            'warning',
-          ),
-        );
-      }
       const reverseZDiagnostic = reverseZCameraDiagnostic(this.#cameraState);
       if (usesSceneDepth && this.#cameraConfigured && reverseZDiagnostic) {
-        instance.recordDiagnostic(reverseZDiagnostic);
+        instance.recordDiagnosticOnce(reverseZDiagnostic);
       }
       instance.setEventDrainFrames(compiled.eventDrainFrames);
       const parameters = effectParameters(
@@ -1512,6 +1549,16 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     requireNonNegativeFinite(delta, 'deltaSeconds');
     const run = async () => {
       for (const instance of this.#instances.values()) {
+        if (instance.usesSceneDepth && !this.#cameraConfigured) {
+          instance.recordDiagnosticOnce(
+            runtimeDiagnostic(
+              'NACHI_SCENE_DEPTH_CAMERA_UNSET',
+              'collideSceneDepth() is using identity camera uniforms because VFXSystem.setCamera() was not called before the first update.',
+              'System.projectionMatrix',
+              'warning',
+            ),
+          );
+        }
         instance.syncAttachment();
         await this.#advanceInstance(instance, () =>
           instance.initialize(this.#systemTime, this.#prewarmStepSeconds),
@@ -1565,6 +1612,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           key,
           program: compileEmitter(emitter, {
             eventPayloadFields: [...(eventPayloadFields.get(key) ?? [])],
+            ...(this.#registry === undefined ? {} : { registry: this.#registry }),
           }),
         };
       })

@@ -41,6 +41,9 @@ importers:
       '@nachi/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@nachi/trails':
+        specifier: workspace:*
+        version: link:../../packages/trails
       three:
         specifier: 0.185.1
         version: 0.185.1
@@ -59,6 +62,19 @@ importers:
         version: 7.3.1(@types/node@24.10.13)
 
   packages/core: {}
+
+  packages/trails:
+    dependencies:
+      '@nachi/core':
+        specifier: workspace:*
+        version: link:../core
+      three:
+        specifier: 0.185.1
+        version: 0.185.1
+    devDependencies:
+      '@types/three':
+        specifier: 0.185.0
+        version: 0.185.0
 
 packages:
 
