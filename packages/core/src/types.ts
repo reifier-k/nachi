@@ -245,6 +245,8 @@ export interface TslExpression<T> {
   div(value: number | TslExpression<number>): TslExpression<T>;
   mul(value: number | TslExpression<number>): TslExpression<T>;
   sub(value: T | TslExpression<T>): TslExpression<T>;
+  /** Explicit numeric conversion for integer-backed bindings such as spawnOrder. */
+  toFloat(): TslExpression<number>;
 }
 
 export interface BuiltInTslParticleBindings {
@@ -544,6 +546,10 @@ export interface BillboardOptions {
     | { readonly mode: 'velocity-aligned' }
     | { readonly mode: 'velocity-stretch'; readonly factor?: number };
   readonly blending?: BlendingMode;
+  /** WebGPU-only back-to-front particle sorting by camera depth. Alpha modes only. */
+  readonly sorted?: boolean;
+  /** Local-space center used by emitter-level coarse sorting. Defaults to the emitter origin. */
+  readonly sortCenter?: Vec3;
   readonly cutout?: { readonly vertices: 4 | 5 | 6 | 7 | 8 };
   readonly map?: FlipbookDefinition | TextureRef;
   /**
@@ -560,6 +566,10 @@ export interface MeshRendererOptions {
     | { readonly mode: 'quaternion' }
     | { readonly mode: 'velocity' };
   readonly blending?: BlendingMode;
+  /** WebGPU-only back-to-front particle sorting by camera depth. Alpha modes only. */
+  readonly sorted?: boolean;
+  /** Local-space center used by emitter-level coarse sorting. Defaults to the emitter origin. */
+  readonly sortCenter?: Vec3;
   readonly geometry: GeometryRef;
 }
 

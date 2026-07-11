@@ -77,6 +77,31 @@ export const CURL_SIMPLEX_DERIVATIVE_AMPLITUDE = 6;
 export const CURL_NOISE_FINITE_DIFFERENCE = 0.1;
 /** Calibrated by spike-depth for a visible but localized intersection transition. */
 export const DEFAULT_SOFT_PARTICLE_FADE_DISTANCE = 0.035;
+/** Bound keeps O(log^2 n) dispatch count and two padded storage buffers explicit. */
+export const MAX_SORTED_PARTICLE_CAPACITY = 65_536;
+
+export interface BitonicSortPass {
+  readonly blockSize: number;
+  readonly compareDistance: number;
+}
+
+export function paddedSortCapacity(capacity: number): number {
+  if (!Number.isSafeInteger(capacity) || capacity <= 0) {
+    throw new RangeError('Sort capacity must be a positive safe integer.');
+  }
+  return 2 ** Math.ceil(Math.log2(capacity));
+}
+
+export function bitonicSortPasses(capacity: number): readonly BitonicSortPass[] {
+  const padded = paddedSortCapacity(capacity);
+  const passes: BitonicSortPass[] = [];
+  for (let blockSize = 2; blockSize <= padded; blockSize *= 2) {
+    for (let compareDistance = blockSize / 2; compareDistance >= 1; compareDistance /= 2) {
+      passes.push({ blockSize, compareDistance });
+    }
+  }
+  return passes;
+}
 
 /** CPU mirror of the GPU spawn-order reservation rule, used by lifecycle regression tests. */
 export function clampSpawnOrderReservation(requested: number, freeCount: number): number {
@@ -472,6 +497,13 @@ export interface BuiltEmitterKernels {
   readonly luts: Readonly<Record<string, unknown>>;
   readonly prepareSpawn?: KernelComputeNode;
   readonly resetAliveCount?: KernelComputeNode;
+  /** Initializes padded depth/index keys from the latest alive compaction. */
+  readonly prepareSort?: KernelComputeNode;
+  /** One dispatch per bitonic (k,j) stage; backends may submit the ordered array as one pass. */
+  readonly sortPasses?: readonly KernelComputeNode[];
+  readonly sortedDepths?: KernelStorageNode;
+  readonly sortedIndices?: KernelStorageNode;
+  readonly sortPaddedCapacity?: number;
   readonly spawn: KernelComputeNode;
   readonly spawnDispatch?: KernelIndirectStorageNode;
   readonly spawnOverflow: KernelStorageNode;
@@ -693,7 +725,9 @@ export interface CompiledDrawIndirectDescription {
   readonly aliveIndicesOffsetWords: number;
   readonly drawArgumentsOffsetBytes: number;
   readonly instanceCount: 'alive-count';
-  readonly physicalIndex: 'alive-indices';
+  readonly physicalIndex: 'alive-indices' | 'sorted-indices';
+  /** Power-of-two sort extent. Valid values occupy [paddedCapacity - aliveCount, end). */
+  readonly sortedPaddedCapacity?: number;
 }
 
 export interface CompiledDrawVertexDescription {
@@ -703,6 +737,7 @@ export interface CompiledDrawVertexDescription {
 }
 
 export interface CompiledSpriteDrawDescription {
+  readonly coarseSortCenter: Vec3;
   readonly fragment: {
     readonly blending: BlendingMode;
     readonly flipbook?: {
@@ -731,6 +766,7 @@ export interface CompiledSpriteDrawDescription {
 }
 
 export interface CompiledMeshDrawDescription {
+  readonly coarseSortCenter: Vec3;
   readonly fragment: { readonly blending: BlendingMode };
   readonly geometry: { readonly resource: GeometryRef; readonly topology: 'triangle-list' };
   readonly indirect: CompiledDrawIndirectDescription;
@@ -1925,6 +1961,39 @@ function compileSpriteDraws(
   for (const { module, path } of renderModules) {
     if (module.type !== 'core/billboard') continue;
     const options = module.config as BillboardOptions;
+    const blending = options.blending ?? 'alpha';
+    const sorted = options.sorted === true;
+    const coarseSortCenter = options.sortCenter ?? ([0, 0, 0] as const);
+    if (
+      coarseSortCenter.length !== 3 ||
+      coarseSortCenter.some((component) => !Number.isFinite(component))
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_CENTER_INVALID',
+          'Emitter sortCenter must be a finite local-space vec3.',
+          `${path}.config.sortCenter`,
+        ),
+      );
+    }
+    if (sorted && blending !== 'alpha' && blending !== 'premultiplied') {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_BLEND_UNSUPPORTED',
+          'Particle depth sorting is only meaningful for alpha or premultiplied blending.',
+          `${path}.config.sorted`,
+        ),
+      );
+    }
+    if (sorted && definition.capacity > MAX_SORTED_PARTICLE_CAPACITY) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_CAPACITY_EXCEEDED',
+          `Sorted particle capacity ${definition.capacity} exceeds the WebGPU limit ${MAX_SORTED_PARTICLE_CAPACITY}.`,
+          `${path}.config.sorted`,
+        ),
+      );
+    }
     const alignment = options.alignment ?? { mode: 'camera-facing' as const };
     if (alignment.mode === 'custom-axis') {
       if (
@@ -2044,7 +2113,11 @@ function compileSpriteDraws(
         }),
       ),
     ];
-    const vertexStorageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+    const vertexStorageBuffers = [
+      ...attributeBuffers,
+      'NachiLifecycleState',
+      ...(sorted ? ['NachiSortedIndices'] : []),
+    ];
     if (vertexStorageBuffers.length > 8) {
       diagnostics.push(
         diagnostic(
@@ -2065,8 +2138,9 @@ function compileSpriteDraws(
         : undefined;
     const geometryVertexCount = cutoutVertices as 4 | 5 | 6 | 7 | 8;
     draws.push({
+      coarseSortCenter,
       fragment: {
-        blending: options.blending ?? 'alpha',
+        blending,
         ...(flipbook === undefined
           ? {}
           : {
@@ -2094,7 +2168,8 @@ function compileSpriteDraws(
           lifecycleLayout.buffers.indirectArguments.fields.drawIndirect.offsetWords *
           Uint32Array.BYTES_PER_ELEMENT,
         instanceCount: 'alive-count',
-        physicalIndex: 'alive-indices',
+        physicalIndex: sorted ? 'sorted-indices' : 'alive-indices',
+        ...(sorted ? { sortedPaddedCapacity: paddedSortCapacity(definition.capacity) } : {}),
       },
       kind: 'billboard',
       path,
@@ -2122,6 +2197,39 @@ function compileMeshDraws(
   for (const { module, path } of renderModules) {
     if (module.type !== 'core/mesh-renderer') continue;
     const options = module.config as MeshRendererOptions;
+    const blending = options.blending ?? 'alpha';
+    const sorted = options.sorted === true;
+    const coarseSortCenter = options.sortCenter ?? ([0, 0, 0] as const);
+    if (
+      coarseSortCenter.length !== 3 ||
+      coarseSortCenter.some((component) => !Number.isFinite(component))
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_CENTER_INVALID',
+          'Emitter sortCenter must be a finite local-space vec3.',
+          `${path}.config.sortCenter`,
+        ),
+      );
+    }
+    if (sorted && blending !== 'alpha' && blending !== 'premultiplied') {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_BLEND_UNSUPPORTED',
+          'Particle depth sorting is only meaningful for alpha or premultiplied blending.',
+          `${path}.config.sorted`,
+        ),
+      );
+    }
+    if (sorted && definition.capacity > MAX_SORTED_PARTICLE_CAPACITY) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_CAPACITY_EXCEEDED',
+          `Sorted particle capacity ${definition.capacity} exceeds the WebGPU limit ${MAX_SORTED_PARTICLE_CAPACITY}.`,
+          `${path}.config.sorted`,
+        ),
+      );
+    }
     const alignment = options.alignment ?? { mode: 'none' as const };
     if (
       alignment.mode === 'custom-axis' &&
@@ -2173,7 +2281,11 @@ function compileMeshDraws(
         }),
       ),
     ];
-    const vertexStorageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+    const vertexStorageBuffers = [
+      ...attributeBuffers,
+      'NachiLifecycleState',
+      ...(sorted ? ['NachiSortedIndices'] : []),
+    ];
     if (vertexStorageBuffers.length > 8) {
       diagnostics.push(
         diagnostic(
@@ -2184,7 +2296,8 @@ function compileMeshDraws(
       );
     }
     draws.push({
-      fragment: { blending: options.blending ?? 'alpha' },
+      coarseSortCenter,
+      fragment: { blending },
       geometry: { resource: options.geometry, topology: 'triangle-list' },
       indirect: {
         aliveIndicesOffsetWords: lifecycleLayout.buffers.state.fields.aliveIndices.offsetWords,
@@ -2192,7 +2305,8 @@ function compileMeshDraws(
           lifecycleLayout.buffers.indirectArguments.fields.drawIndirect.offsetWords *
           Uint32Array.BYTES_PER_ELEMENT,
         instanceCount: 'alive-count',
-        physicalIndex: 'alive-indices',
+        physicalIndex: sorted ? 'sorted-indices' : 'alive-indices',
+        ...(sorted ? { sortedPaddedCapacity: paddedSortCapacity(definition.capacity) } : {}),
       },
       kind: 'mesh',
       path,
@@ -2694,6 +2808,20 @@ function createBuildKernels(
         hint: 'Use the WebGPU backend for GPU top-N light selection.',
         message: 'The light renderer requires WebGPU storage selection before bounded readback.',
         path: lightDraw.path,
+        phase: 'compile',
+        severity: 'error',
+      });
+    }
+    const sortedDrawForBackend = program.draws.find(
+      (draw) => 'indirect' in draw && draw.indirect.physicalIndex === 'sorted-indices',
+    );
+    if (sortedDrawForBackend && backend === 'webgl2') {
+      buildDiagnostics.push({
+        code: 'NACHI_PARTICLE_SORT_WEBGL2_UNSUPPORTED',
+        hint: 'Use WebGPU or disable the render module sorted option.',
+        message:
+          'GPU bitonic particle sorting requires WebGPU storage buffers and ordered compute dispatches.',
+        path: sortedDrawForBackend.path,
         phase: 'compile',
         severity: 'error',
       });
@@ -3251,6 +3379,11 @@ function createBuildKernels(
     let finalizeIndirect: KernelComputeNode | undefined;
     let spawnDispatch: KernelIndirectStorageNode | undefined;
     let drawIndirect: KernelIndirectStorageNode | undefined;
+    let prepareSort: KernelComputeNode | undefined;
+    let sortedDepths: KernelStorageNode | undefined;
+    let sortedIndices: KernelStorageNode | undefined;
+    let sortPaddedCapacity: number | undefined;
+    let sortPassNodes: KernelComputeNode[] = [];
 
     if (gpuLifecycle) {
       spawnDispatch = lifecycleIndirectStorage as KernelIndirectStorageNode;
@@ -3323,6 +3456,96 @@ function createBuildKernels(
         })
         .compute(1, [1])
         .setName('NachiEmitterFinalizeIndirect');
+    }
+
+    const particleSortedDraw = program.draws.find(
+      (draw): draw is CompiledSpriteDrawDescription | CompiledMeshDrawDescription =>
+        (draw.kind === 'billboard' || draw.kind === 'mesh') &&
+        draw.indirect.physicalIndex === 'sorted-indices',
+    );
+    if (gpuLifecycle && particleSortedDraw) {
+      const padded = particleSortedDraw.indirect.sortedPaddedCapacity!;
+      sortPaddedCapacity = padded;
+      sortedDepths = adapter.instancedArray(padded, 'float').setName('NachiSortedDepths');
+      sortedIndices = adapter.instancedArray(padded, 'uint').setName('NachiSortedIndices');
+      const depths = sortedDepths;
+      const indices = sortedIndices;
+      prepareSort = adapter
+        .fn(() => {
+          const outputIndex = adapter.uint(adapter.instanceIndex);
+          const aliveCount = readLifecycle(counterOffsets.aliveCount);
+          const paddingCount = adapter.uint(padded).sub(aliveCount);
+          adapter.branch(
+            outputIndex.lessThan(paddingCount),
+            () => {
+              // Padding lives at the front after sorting. Vertex fetch skips it dynamically.
+              depths.element(outputIndex).assign(adapter.constant(-3.402823466e38, 'f32'));
+              // Its outputIndex is reused as a harmless index; depth=-FLT_MAX identifies it.
+              indices.element(outputIndex).assign(outputIndex);
+            },
+            () => {
+              const compactIndex = outputIndex.sub(paddingCount);
+              const physicalIndex = readLifecycle(
+                stateLayout.fields.aliveIndices.offsetWords,
+                compactIndex,
+              );
+              const position = attributeNode('position', physicalIndex);
+              const viewPosition = uniformNode('System.viewMatrix').mul(
+                adapter.vec4(position.x, position.y, position.z, adapter.constant(1, 'f32')),
+              );
+              depths.element(outputIndex).assign(viewPosition.z);
+              indices.element(outputIndex).assign(physicalIndex);
+            },
+          );
+        })
+        .compute(padded, [program.kernels.update.workgroupSize])
+        .setName('NachiEmitterPrepareDepthSort');
+
+      sortPassNodes = bitonicSortPasses(padded).map(({ blockSize, compareDistance }) =>
+        adapter
+          .fn(() => {
+            const invocation = adapter.uint(adapter.instanceIndex);
+            const group = invocation.div(adapter.uint(compareDistance));
+            const local = invocation.sub(group.mul(adapter.uint(compareDistance)));
+            const left = group.mul(adapter.uint(compareDistance * 2)).add(local);
+            const right = left.add(adapter.uint(compareDistance));
+            const leftDepth =
+              (depths.element(left) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+              depths.element(left);
+            const rightDepth =
+              (depths.element(right) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+              depths.element(right);
+            const leftIndex =
+              (indices.element(left) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+              indices.element(left);
+            const rightIndex =
+              (indices.element(right) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+              indices.element(right);
+            const block = left.div(adapter.uint(blockSize));
+            const ascending = block
+              .sub(block.div(adapter.uint(2)).mul(adapter.uint(2)))
+              .equal(adapter.uint(0));
+            const depthSwap = adapter.select(
+              ascending,
+              rightDepth.lessThan(leftDepth),
+              leftDepth.lessThan(rightDepth),
+            );
+            const tieSwap = adapter.select(
+              ascending,
+              rightIndex.lessThan(leftIndex),
+              leftIndex.lessThan(rightIndex),
+            );
+            const swap = adapter.select(leftDepth.equal(rightDepth), tieSwap, depthSwap);
+            adapter.branch(swap, () => {
+              depths.element(left).assign(rightDepth);
+              depths.element(right).assign(leftDepth);
+              indices.element(left).assign(rightIndex);
+              indices.element(right).assign(leftIndex);
+            });
+          })
+          .compute(padded / 2, [program.kernels.update.workgroupSize])
+          .setName(`NachiBitonicSort_k${blockSize}_j${compareDistance}`),
+      );
     }
 
     const builtEventOutputs = Object.fromEntries(
@@ -3479,10 +3702,15 @@ function createBuildKernels(
       initialize,
       luts: lutTextures,
       ...(prepareSpawn === undefined ? {} : { prepareSpawn }),
+      ...(prepareSort === undefined ? {} : { prepareSort }),
       ...(resetAliveCount === undefined ? {} : { resetAliveCount }),
       spawn,
       ...(spawnDispatch === undefined ? {} : { spawnDispatch }),
       spawnOverflow: lifecycleStorage,
+      sortPasses: sortPassNodes,
+      ...(sortedDepths === undefined ? {} : { sortedDepths }),
+      ...(sortedIndices === undefined ? {} : { sortedIndices }),
+      ...(sortPaddedCapacity === undefined ? {} : { sortPaddedCapacity }),
       storages,
       uniforms,
       update,

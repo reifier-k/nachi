@@ -64,6 +64,8 @@ export interface VfxRuntimeRenderer {
   releaseKernels?(kernels: BuiltEmitterKernels): void;
   setUniformValue?(uniform: KernelUniformNode, path: ParameterPath, value: unknown): void;
   setInstanceCount?(kernels: BuiltEmitterKernels, count: number): void;
+  /** Applies VFXSystem's stable far-to-near emitter order to backend draw objects. */
+  setRenderOrder?(kernels: BuiltEmitterKernels, order: number): void;
   submitCompute(kernel: KernelComputeNode): Promise<void> | void;
   submitComputeIndirect?(
     kernel: KernelComputeNode,
@@ -103,6 +105,25 @@ const DEFAULT_CAMERA_STATE: VfxCameraState = {
   viewMatrix: IDENTITY_MATRIX,
   viewportSize: [1, 1],
 };
+
+export interface CoarseTransparencyEntry<T = unknown> {
+  readonly stableKey: string;
+  readonly value: T;
+  readonly worldPosition: readonly [number, number, number];
+}
+
+/** Stable far-to-near ordering using the same column-major view matrix accepted by setCamera(). */
+export function sortEmittersBackToFront<T>(
+  entries: readonly CoarseTransparencyEntry<T>[],
+  viewMatrix: readonly number[],
+): readonly CoarseTransparencyEntry<T>[] {
+  const depth = ({ worldPosition: [x, y, z] }: CoarseTransparencyEntry<T>) =>
+    -(viewMatrix[2]! * x + viewMatrix[6]! * y + viewMatrix[10]! * z + viewMatrix[14]!);
+  return [...entries].sort((left, right) => {
+    const difference = depth(right) - depth(left);
+    return difference === 0 ? left.stableKey.localeCompare(right.stableKey) : difference;
+  });
+}
 
 function validateCameraState(camera: VfxCameraState): VfxCameraState {
   const matrix = (value: readonly number[], name: string) => {
@@ -763,6 +784,47 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     );
   }
 
+  get alphaBlended(): boolean {
+    return this.program.draws.some(
+      (draw) =>
+        (draw.kind === 'billboard' || draw.kind === 'mesh') &&
+        (draw.fragment.blending === 'alpha' || draw.fragment.blending === 'premultiplied'),
+    );
+  }
+
+  get particleSorted(): boolean {
+    return this.program.draws.some(
+      (draw) =>
+        (draw.kind === 'billboard' || draw.kind === 'mesh') &&
+        draw.indirect.physicalIndex === 'sorted-indices',
+    );
+  }
+
+  get worldPosition(): readonly [number, number, number] {
+    const draw = this.program.draws.find(
+      (candidate) => candidate.kind === 'billboard' || candidate.kind === 'mesh',
+    );
+    const [x, y, z] = draw?.coarseSortCenter ?? [0, 0, 0];
+    return [
+      this.#transform[0]! * x +
+        this.#transform[4]! * y +
+        this.#transform[8]! * z +
+        this.#transform[12]!,
+      this.#transform[1]! * x +
+        this.#transform[5]! * y +
+        this.#transform[9]! * z +
+        this.#transform[13]!,
+      this.#transform[2]! * x +
+        this.#transform[6]! * y +
+        this.#transform[10]! * z +
+        this.#transform[14]!,
+    ];
+  }
+
+  setRenderOrder(order: number): void {
+    this.#renderer.setRenderOrder?.(this.kernels, order);
+  }
+
   beginFinalEventDrain(): void {
     if (this.kernels.eventInputs.length > 0 && this.#aliveCountReadbackInterval === undefined) {
       this.#drainRemaining = Math.max(this.#drainRemaining, this.#maxLifetime);
@@ -1043,6 +1105,15 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       await this.#renderer.submitCompute(resetAliveCount);
       await this.#renderer.submitCompute(compact);
       await this.#renderer.submitCompute(finalizeIndirect);
+      if (this.kernels.prepareSort) {
+        await this.#renderer.submitCompute(this.kernels.prepareSort);
+        // Each bitonic stage depends on all writes from the preceding stage. Keep stage boundaries
+        // as distinct backend submissions: a single Three.js compute group records every dispatch
+        // into one compute pass and provides no whole-grid storage barrier between them.
+        for (const pass of this.kernels.sortPasses ?? []) {
+          await this.#renderer.submitCompute(pass);
+        }
+      }
       if (
         this.#renderer.readStorage &&
         this.#aliveCountReadbackInterval !== undefined &&
@@ -1212,6 +1283,11 @@ export class VfxEffectInstance<
 
   addEmitter(key: string, emitter: RuntimeEmitter): void {
     this.#emitters.set(key, emitter);
+  }
+
+  /** @internal Supplies stable emitter keys to VFXSystem's coarse transparency sort. */
+  transparencyEmitters(): readonly (readonly [string, RuntimeEmitter])[] {
+    return [...this.#emitters.entries()].filter(([, emitter]) => emitter.alphaBlended);
   }
 
   setEventDrainFrames(frames: number): void {
@@ -1520,6 +1596,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         instance.recordDiagnosticOnce(reverseZDiagnostic);
       }
     }
+    this.#updateTransparencyOrder();
   }
 
   spawn<
@@ -1664,6 +1741,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
             );
           }
           instance.syncAttachment();
+        }
+        this.#updateTransparencyOrder();
+        for (const instance of this.#instances.values()) {
           await this.#advanceInstance(instance, () =>
             instance.initialize(this.#systemTime, this.#prewarmStepSeconds),
           );
@@ -1671,8 +1751,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
         for (const step of steps) {
           this.#systemTime += step;
+          for (const instance of this.#instances.values()) instance.syncAttachment();
+          this.#updateTransparencyOrder();
           for (const instance of this.#instances.values()) {
-            instance.syncAttachment();
             await this.#advanceInstance(instance, () =>
               instance.advance(step, this.#systemTime, this.#prewarmStepSeconds),
             );
@@ -1685,6 +1766,34 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const scheduled = this.#updateQueue.then(run, run);
     this.#updateQueue = scheduled.catch(() => undefined);
     return scheduled;
+  }
+
+  #updateTransparencyOrder(): void {
+    const entries = [...this.#instances.values()].flatMap((instance) =>
+      instance.transparencyEmitters().map(([key, emitter]) => ({
+        instance,
+        stableKey: `${instance.id}/${key}`,
+        value: emitter,
+        worldPosition: emitter.worldPosition,
+      })),
+    );
+    const needsCamera = entries.length > 1 || entries.some(({ value }) => value.particleSorted);
+    if (needsCamera && !this.#cameraConfigured) {
+      for (const { instance } of entries.filter(
+        ({ value }) => entries.length > 1 || value.particleSorted,
+      )) {
+        instance.recordDiagnosticOnce(
+          runtimeDiagnostic(
+            'NACHI_ALPHA_SORT_CAMERA_UNSET',
+            'Alpha emitter ordering and sorted particle depth require VFXSystem.setCamera().',
+            'System.viewMatrix',
+            'warning',
+          ),
+        );
+      }
+    }
+    const ordered = sortEmittersBackToFront(entries, this.#cameraState.viewMatrix);
+    for (const [rank, entry] of ordered.entries()) entry.value.setRenderOrder(1_000 + rank);
   }
 
   #compile(definition: RuntimeEffectDefinition): CompiledEffect {

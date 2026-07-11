@@ -8,7 +8,7 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 - `packages/trails`: ribbon/trail definitions and renderer integration.
 - `packages/tsl-kit`: standalone reusable Three Shading Language helpers.
 - `packages/mesh-fx`: procedural effect meshes, materials, and VAT runtime.
-- `packages/post`: RenderPipeline-integrated distortion, radial blur, and bloom presets.
+- `packages/post`: RenderPipeline distortion/blur/bloom plus native-WebGPU weighted blended OIT.
 - `packages/timeline`: effect composition, sequencing, hit stop, and mesh-fx lifecycle runtime.
 - `apps/playground`: Vite/TypeScript playground plus compute and depth spikes.
 - `tools`: Playwright-based WebGPU probes, spike collection, and screenshots.
@@ -54,6 +54,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m9-compose/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m9-timeline/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m10-post/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m10-post/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/m10-sort/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m10-sort/?backend=webgl
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
@@ -66,6 +68,12 @@ Core `defineEffect()` composes elements and parameters but deliberately does not
 timeline targets or timeline values. That validation belongs to `@nachi/timeline` authoring and its
 defensive runtime normalization, including for definitions created through the core compatibility
 factories.
+
+Alpha render modules can opt into WebGPU particle sorting with `sorted: true`; core preserves the
+non-deterministic compaction array and sorts a separate draw indirection after every compaction.
+Use `sortCenter` for emitter-level coarse ordering. WBOIT materials assign
+`createWboitOutput()` to `NodeMaterial.mrtNode`, not `outputNode`; WBOIT and bitonic sorting are
+normally alternatives.
 
 ## Three-layer verification
 

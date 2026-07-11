@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 
-import { bloomPreset, createPostPipeline, radialBlur, screenDistortion } from '../src/index.js';
+import {
+  bloomPreset,
+  compositeWboitLayers,
+  createWboitPipeline,
+  createPostPipeline,
+  radialBlur,
+  screenDistortion,
+  wboitWeight,
+} from '../src/index.js';
 import { heatHazeOffsetCpu, radialBlurSampleUvs, shockwaveOffsetCpu } from '../src/math.js';
 
 type GraphNode = {
@@ -28,6 +36,43 @@ function bloomInputNodeKinds(pipeline: ReturnType<typeof createPostPipeline>): S
 }
 
 describe('@nachi/post authoring', () => {
+  it('matches the McGuire-Bavoil weighted two-layer reference and is order invariant', () => {
+    const layers = [
+      { alpha: 0.35, color: [0.9, 0.15, 0.05] as const, depth: 0.23 },
+      { alpha: 0.6, color: [0.05, 0.2, 0.85] as const, depth: 0.71 },
+    ];
+    const forward = compositeWboitLayers(layers);
+    const reverse = compositeWboitLayers([...layers].reverse());
+    expect(wboitWeight(0.35, 0.23)).toBeCloseTo(3_000, 8);
+    expect(forward.accum).toEqual(reverse.accum);
+    expect(forward.revealage).toBeCloseTo(0.26, 12);
+    expect(forward.color).toEqual(reverse.color);
+    expect(forward.color[3]).toBeCloseTo(0.74, 12);
+  });
+
+  it('allocates RGBA16F accum plus R8 revealage and rejects WebGL2 explicitly', () => {
+    const renderer = { backend: { compatibilityMode: false } } as unknown as THREE.WebGPURenderer;
+    const pipeline = createWboitPipeline(renderer, new THREE.Scene(), new THREE.Camera(), {
+      backend: 'webgpu',
+      height: 24,
+      width: 32,
+    });
+    expect(pipeline.target.textures).toHaveLength(2);
+    expect(pipeline.target.textures[0]).toMatchObject({
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+    });
+    expect(pipeline.target.textures[1]).toMatchObject({
+      format: THREE.RedFormat,
+      type: THREE.UnsignedByteType,
+    });
+    pipeline.dispose();
+    expect(() =>
+      createWboitPipeline(renderer, new THREE.Scene(), new THREE.Camera(), {
+        backend: 'webgl2',
+      }),
+    ).toThrow(/NACHI_WBOIT_WEBGL2_UNSUPPORTED/);
+  });
   it('provides immutable bloom presets with overrides', () => {
     const soft = bloomPreset('soft');
     const intense = bloomPreset('intense', { threshold: 1.2 });

@@ -9,10 +9,12 @@ import {
   VfxDiagnosticError,
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
   attribute,
+  billboard,
   burst,
   collidePlane,
   collideSceneDepth,
   crossesSpawnOrderWarningThreshold,
+  decalRenderer,
   defineEffect,
   defineEmitter,
   defineParameter,
@@ -24,8 +26,27 @@ import {
   packedComponentIndex,
   rate,
   resolvePackedAttributeAddress,
+  sortEmittersBackToFront,
   tslModule,
 } from '../src/index.js';
+
+describe('M10 coarse transparency order', () => {
+  it('sorts far-to-near and uses a stable key for equal depth', () => {
+    const entries = [
+      { stableKey: 'b', value: 2, worldPosition: [0, 0, -2] as const },
+      { stableKey: 'c', value: 3, worldPosition: [0, 0, -7] as const },
+      { stableKey: 'a', value: 1, worldPosition: [1, 0, -2] as const },
+    ];
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    expect(sortEmittersBackToFront(entries, identity).map(({ stableKey }) => stableKey)).toEqual([
+      'c',
+      'a',
+      'b',
+    ]);
+    const reversedView = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1];
+    expect(sortEmittersBackToFront(entries, reversedView)[0]?.stableKey).toBe('a');
+  });
+});
 import type {
   KernelComputeBuilder,
   KernelComputeNode,
@@ -490,6 +511,93 @@ describe('emitter lifecycle state machine', () => {
 });
 
 describe('VFXSystem runtime scheduler', () => {
+  it('warns without a camera and reverses stable coarse alpha render order with the view', async () => {
+    class OrderRenderer extends FakeRuntimeRenderer {
+      readonly orders: number[] = [];
+      readonly byKernels = new Map<unknown, number>();
+      setRenderOrder(kernels: unknown, order: number): void {
+        this.orders.push(order);
+        this.byKernels.set(kernels, order);
+      }
+    }
+    const renderer = new OrderRenderer();
+    const alphaEmitter = (z: number) =>
+      defineEmitter({
+        capacity: 1,
+        init: [positionSphere({ radius: 0 }), lifetime(1)],
+        integration: 'none' as const,
+        render: billboard({ blending: 'alpha', sortCenter: [0, 0, z] }),
+        spawn: burst({ count: 1 }),
+      });
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(
+      defineEffect({ elements: { far: alphaEmitter(-3), near: alphaEmitter(2) } }),
+    );
+    await system.update(0);
+    expect(instance.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'NACHI_ALPHA_SORT_CAMERA_UNSET' })]),
+    );
+    renderer.orders.length = 0;
+    system.setCamera({
+      projectionMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      viewMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      viewportSize: [64, 64],
+    });
+    const farKernels = instance.getEmitter('far')!.kernels;
+    const nearKernels = instance.getEmitter('near')!.kernels;
+    const forward = [renderer.byKernels.get(farKernels), renderer.byKernels.get(nearKernels)];
+    renderer.orders.length = 0;
+    system.setCamera({
+      projectionMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      viewMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1],
+      viewportSize: [64, 64],
+    });
+    const reverse = [renderer.byKernels.get(farKernels), renderer.byKernels.get(nearKernels)];
+    expect(forward).toEqual([1_000, 1_001]);
+    expect(reverse).toEqual([1_001, 1_000]);
+  });
+
+  it('warns without a camera and submits each bitonic stage in dependency order', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 8,
+            init: [positionSphere({ radius: 1 }), lifetime(1)],
+            integration: 'none',
+            render: billboard({ blending: 'alpha', sorted: true }),
+            spawn: burst({ count: 8 }),
+          }),
+        },
+      }),
+    );
+
+    await system.update(0);
+
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ALPHA_SORT_CAMERA_UNSET' }),
+    );
+    const stages = renderer.submissions.filter((name) => name.startsWith('NachiBitonicSort_'));
+    const expectedStages = [
+      ['2', '1'],
+      ['4', '2'],
+      ['4', '1'],
+      ['8', '4'],
+      ['8', '2'],
+      ['8', '1'],
+    ];
+    expect(stages.length).toBeGreaterThan(0);
+    expect(stages.length % expectedStages.length).toBe(0);
+    for (let offset = 0; offset < stages.length; offset += expectedStages.length) {
+      expect(
+        stages
+          .slice(offset, offset + expectedStages.length)
+          .map((name) => name.match(/_k(\d+)_j(\d+)$/)?.slice(1)),
+      ).toEqual(expectedStages);
+    }
+  });
   const sceneDepthRenderer = (): VfxRuntimeRenderer => {
     const base = new FakeRuntimeRenderer();
     return {
@@ -514,6 +622,36 @@ describe('VFXSystem runtime scheduler', () => {
         }),
       },
     });
+
+  it('does not consume an alpha coarse-sort rank for a projection decal', async () => {
+    const base = sceneDepthRenderer();
+    let renderOrderWrites = 0;
+    const system = new VFXSystem({
+      ...base,
+      setRenderOrder: () => {
+        renderOrderWrites += 1;
+      },
+    });
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          decal: defineEmitter({
+            capacity: 1,
+            integration: 'none',
+            render: decalRenderer({ blending: 'alpha' }),
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+
+    await system.update(0);
+
+    expect(renderOrderWrites).toBe(0);
+    expect(instance.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ALPHA_SORT_CAMERA_UNSET' }),
+    );
+  });
 
   it('warns on first update when scene-depth collision has no configured camera', async () => {
     const system = new VFXSystem(sceneDepthRenderer());

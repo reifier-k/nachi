@@ -401,6 +401,18 @@ const indirectAttributesByAdapter = new WeakMap<
   KernelTslAdapter,
   Set<THREE.IndirectStorageBufferAttribute>
 >();
+const drawObjectsByKernels = new WeakMap<BuiltEmitterKernels, Set<THREE.Object3D>>();
+const renderOrderByKernels = new WeakMap<BuiltEmitterKernels, number>();
+
+function registerDrawObject(kernels: BuiltEmitterKernels, object: THREE.Object3D): void {
+  let objects = drawObjectsByKernels.get(kernels);
+  if (!objects) {
+    objects = new Set();
+    drawObjectsByKernels.set(kernels, objects);
+  }
+  objects.add(object);
+  object.renderOrder = renderOrderByKernels.get(kernels) ?? object.renderOrder;
+}
 
 function materializeInstancedArray(length: number, type: TslStorageType): KernelStorageNode {
   const node = createInstancedArray(length, type) as KernelStorageNode;
@@ -691,6 +703,10 @@ export function createThreeRuntimeRenderer(
     readStorage: (storageNode: KernelStorageNode) =>
       renderer.getArrayBufferAsync(storageNode.value as never),
     setUniformValue: setThreeUniformValue,
+    setRenderOrder: (kernels: BuiltEmitterKernels, order: number) => {
+      renderOrderByKernels.set(kernels, order);
+      for (const object of drawObjectsByKernels.get(kernels) ?? []) object.renderOrder = order;
+    },
     ...(setInstanceCount === undefined ? {} : { setInstanceCount }),
     submitCompute: (kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0]) => {
       initializeIndirectAttributes();
@@ -827,6 +843,30 @@ function createThreeParticleVertexBindings(
       program.meta.lifecycleStorage.buffers.state.wordCount,
     ) as unknown as { toReadOnly(): KernelStorageNode }
   ).toReadOnly();
+  if (indirect.physicalIndex === 'sorted-indices') {
+    if (
+      !kernels.sortedIndices ||
+      kernels.sortPaddedCapacity === undefined ||
+      indirect.sortedPaddedCapacity !== kernels.sortPaddedCapacity
+    ) {
+      throw new Error('Compiled sorted draw is missing its padded indirection buffer.');
+    }
+    const sortedRead = (
+      storage(
+        kernels.sortedIndices.value as never,
+        'uint',
+        kernels.sortPaddedCapacity,
+      ) as unknown as {
+        toReadOnly(): KernelStorageNode;
+      }
+    ).toReadOnly();
+    const aliveCount = lifecycleRead.element(asNode(uint(kernels.counterOffsets.aliveCount)));
+    // Valid sorted entries occupy [P - aliveCount, P); instanceIndex is relative to that suffix.
+    const sortedIndex = asNode(uint(kernels.sortPaddedCapacity))
+      .sub(aliveCount)
+      .add(asNode(uint(instanceIndex)));
+    return { compactedIndex: sortedRead.element(sortedIndex), logicalAttribute };
+  }
   const aliveIndex = asNode(uint(instanceIndex)).add(
     asNode(uint(indirect.aliveIndicesOffsetWords)),
   );
@@ -988,6 +1028,7 @@ export function materializeThreeSpriteDraw(
   }
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
+  registerDrawObject(kernels, mesh);
   return mesh;
 }
 
@@ -1101,6 +1142,7 @@ export function materializeThreeMeshDraw(
   }
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
+  registerDrawObject(kernels, mesh);
   return mesh;
 }
 

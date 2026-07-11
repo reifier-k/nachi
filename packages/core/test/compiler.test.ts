@@ -6,6 +6,7 @@ import {
   attribute,
   bakeCurveLut,
   bakeGradientLut,
+  bitonicSortPasses,
   billboard,
   burst,
   colorOverLife,
@@ -42,6 +43,7 @@ import {
   orientToVelocity,
   parameter,
   perDistance,
+  paddedSortCapacity,
   pointAttractor,
   pcgRandomFloat,
   positionSphere,
@@ -61,6 +63,92 @@ import {
   vortex,
   writeEventPayloadRecord,
 } from '../src/index.js';
+
+function applyBitonicReference(
+  values: readonly { depth: number; index: number }[],
+): readonly { depth: number; index: number }[] {
+  const output = [...values];
+  for (const { blockSize, compareDistance } of bitonicSortPasses(output.length)) {
+    for (let invocation = 0; invocation < output.length / 2; invocation += 1) {
+      const group = Math.floor(invocation / compareDistance);
+      const left = group * compareDistance * 2 + (invocation % compareDistance);
+      const right = left + compareDistance;
+      const a = output[left]!;
+      const b = output[right]!;
+      const ascending = Math.floor(left / blockSize) % 2 === 0;
+      const comparison = a.depth === b.depth ? a.index - b.index : a.depth - b.depth;
+      if ((ascending && comparison > 0) || (!ascending && comparison < 0)) {
+        output[left] = b;
+        output[right] = a;
+      }
+    }
+  }
+  return output;
+}
+
+describe('M10 bitonic particle sort contract', () => {
+  it('pads to 2^n, keeps far sentinels in the skipped prefix, and breaks ties by index', () => {
+    const alive = [
+      { depth: -2, index: 7 },
+      { depth: -8, index: 4 },
+      { depth: -2, index: 1 },
+      { depth: -5, index: 9 },
+      { depth: -3, index: 2 },
+    ];
+    const padded = paddedSortCapacity(alive.length);
+    const padding = Array.from({ length: padded - alive.length }, (_, index) => ({
+      depth: -Number.MAX_VALUE,
+      index,
+    }));
+    const first = applyBitonicReference([...padding, ...alive]);
+    const second = applyBitonicReference([...padding, ...alive]);
+    const visible = first.slice(padded - alive.length);
+    expect(padded).toBe(8);
+    expect(first).toEqual(second);
+    expect(visible.map(({ depth }) => depth)).toEqual([-8, -5, -3, -2, -2]);
+    expect(visible.slice(-2).map(({ index }) => index)).toEqual([1, 7]);
+    expect(bitonicSortPasses(padded)).toHaveLength(6);
+  });
+
+  it('diagnoses a non-finite particle sort center', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ blending: 'alpha', sortCenter: [0, Number.NaN, 0] }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_CENTER_INVALID' }),
+    );
+  });
+
+  it('diagnoses sorted particle blending that cannot benefit from depth order', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ blending: 'additive', sorted: true }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_BLEND_UNSUPPORTED' }),
+    );
+  });
+
+  it('diagnoses sorted particle capacity above the bounded WebGPU tier', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 65_537,
+        render: billboard({ blending: 'alpha', sorted: true }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_CAPACITY_EXCEEDED' }),
+    );
+  });
+});
 import type {
   CompiledKernelModule,
   CurveGenerator,
@@ -197,6 +285,53 @@ class FakeStorage implements KernelStorageNode {
     return this;
   }
   toAtomic(): KernelStorageNode {
+    return this;
+  }
+}
+
+class StatementTraceNode extends FakeNode {
+  constructor(
+    private readonly label: string,
+    private readonly assignments: string[],
+  ) {
+    super();
+  }
+
+  override get x(): KernelNode {
+    return new StatementTraceNode(`${this.label}.x`, this.assignments);
+  }
+
+  override get y(): KernelNode {
+    return new StatementTraceNode(`${this.label}.y`, this.assignments);
+  }
+
+  override get z(): KernelNode {
+    return new StatementTraceNode(`${this.label}.z`, this.assignments);
+  }
+
+  override get w(): KernelNode {
+    return new StatementTraceNode(`${this.label}.w`, this.assignments);
+  }
+
+  override assign(): KernelNode {
+    this.assignments.push(this.label);
+    return this;
+  }
+}
+
+class StatementTraceStorage extends FakeStorage {
+  #name = 'unnamed';
+
+  constructor(private readonly assignments: string[]) {
+    super();
+  }
+
+  override element(): KernelNode {
+    return new StatementTraceNode(this.#name, this.assignments);
+  }
+
+  override setName(name?: string): KernelStorageNode {
+    if (name !== undefined) this.#name = name;
     return this;
   }
 }
@@ -870,6 +1005,49 @@ describe('emitter kernel compiler', () => {
         expect.objectContaining({ name: 'velocity', group: 1, offset: 0 }),
       ]),
     });
+  });
+
+  it('materializes opt-in padded bitonic passes without replacing compaction indices', () => {
+    const definition = defineEmitter({
+      capacity: 7,
+      init: [positionSphere({ radius: 1 }), lifetime(2)],
+      integration: 'none',
+      render: billboard({ blending: 'alpha', sortCenter: [0, 0, 2], sorted: true }),
+      spawn: burst({ count: 5 }),
+    });
+    const program = compileEmitter(definition);
+    const draw = program.draws[0];
+    expect(draw).toMatchObject({
+      coarseSortCenter: [0, 0, 2],
+      indirect: { physicalIndex: 'sorted-indices', sortedPaddedCapacity: 8 },
+    });
+    const kernels = program.buildKernels(fakeAdapter());
+    expect(kernels.aliveIndices).toBeDefined();
+    expect(kernels.sortedIndices).toBeDefined();
+    expect(kernels.sortedIndices).not.toBe(kernels.aliveIndices);
+    expect(kernels.sortPaddedCapacity).toBe(8);
+    expect(kernels.sortPasses).toHaveLength(6);
+
+    let webglError: unknown;
+    try {
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+      });
+    } catch (error) {
+      webglError = error;
+    }
+    expect(webglError).toBeInstanceOf(VfxDiagnosticError);
+    expect((webglError as VfxDiagnosticError).diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_WEBGL2_UNSUPPORTED' }),
+      ]),
+    );
   });
 
   it('compiles flipbook interpolation, motion vectors, cutout, and soft depth fade', () => {
@@ -1952,6 +2130,38 @@ describe('emitter kernel compiler', () => {
       writes: ['Particles.heat', 'Particles.velocity'],
     });
     expect(program.diagnostics).toEqual([]);
+  });
+
+  it('assigns spawnOrder before an init tslModule reads it', () => {
+    const assignments: string[] = [];
+    const moduleReadOffsets: number[] = [];
+    const initializeFromOrder = tslModule(
+      ({ spawnOrder }) => {
+        if (spawnOrder instanceof StatementTraceNode) {
+          moduleReadOffsets.push(assignments.length);
+        }
+        return { lifetime: spawnOrder.toFloat() };
+      },
+      { stage: 'init' },
+    );
+    const program = compileEmitter(
+      baseEmitter({ init: [initializeFromOrder], integration: 'none' }),
+    );
+    program.buildKernels({
+      ...fakeAdapter(),
+      instancedArray: () => new StatementTraceStorage(assignments),
+    });
+
+    const attribute = program.attributeSchema.byName.spawnOrder!;
+    const storage = program.attributeSchema.storageArrays[attribute.physical.bufferIndex]!;
+    const lane = ['x', 'y', 'z', 'w'][attribute.physical.offset]!;
+    const spawnOrderTarget = `NachiParticles_${storage.name}.${lane}`;
+    expect(moduleReadOffsets).toHaveLength(2);
+    let previousOffset = 0;
+    for (const offset of moduleReadOffsets) {
+      expect(assignments.slice(previousOffset, offset)).toContain(spawnOrderTarget);
+      previousOffset = offset;
+    }
   });
 
   it('accepts traced access that is a subset of an explicit manifest', () => {

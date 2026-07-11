@@ -815,6 +815,7 @@ export function billboard(options: BillboardOptions): RenderModule {
       'Particles.spriteRotation',
       ...velocityRead,
       ...flipbookRead,
+      ...(options.sorted ? (['System.viewMatrix'] as const) : []),
     ],
     writes: [],
   });
@@ -832,7 +833,13 @@ export function meshRenderer(options: MeshRendererOptions): RenderModule {
         ? (['Particles.rotation'] as const)
         : [];
   return createModule('render', 'core/mesh-renderer', options, {
-    reads: ['Particles.color', 'Particles.position', 'Particles.scale', ...orientationRead],
+    reads: [
+      'Particles.color',
+      'Particles.position',
+      'Particles.scale',
+      ...orientationRead,
+      ...(options.sorted ? (['System.viewMatrix'] as const) : []),
+    ],
     writes: [],
   });
 }

@@ -470,6 +470,39 @@ describe('three kernel adapter', () => {
     expect(mesh.material.blending).toBe(2);
   });
 
+  it('binds opt-in sorted indirection instead of the compact alive array', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 5,
+        init: [positionSphere({ radius: 1 }), lifetime(1)],
+        integration: 'none',
+        render: billboard({ blending: 'alpha', sorted: true }),
+        spawn: burst({ count: 5 }),
+      }),
+    );
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    const mesh = materializeThreeSpriteDraw(program, kernels);
+    const graphBuffers = new Set<unknown>();
+    const visit = (node: unknown) => {
+      const candidate = node as { value?: unknown };
+      if (candidate.value !== undefined) graphBuffers.add(candidate.value);
+    };
+    for (const root of [
+      mesh.material.positionNode,
+      mesh.material.scaleNode,
+      mesh.material.rotationNode,
+      mesh.material.colorNode,
+      mesh.material.opacityNode,
+    ]) {
+      (root as { traverse(callback: (node: unknown) => void): void } | null)?.traverse(visit);
+    }
+
+    expect(kernels.sortPaddedCapacity).toBe(8);
+    expect(kernels.sortedIndices).toBeDefined();
+    expect(kernels.sortPasses).toHaveLength(6);
+    expect(graphBuffers).toContain(kernels.sortedIndices!.value);
+  });
+
   it('fully initializes indirect words before compute and uses partial updates afterward', async () => {
     const program = compileEmitter(
       defineEmitter({

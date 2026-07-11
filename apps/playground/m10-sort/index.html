@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#060914" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M10 Transparency Smoke</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="hud">
+        <p class="eyebrow">M10 GPU smoke · offscreen/readback only</p>
+        <h1>Transparency ordering</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing…</dd>
+          </div>
+          <div>
+            <dt>Path</dt>
+            <dd>coarse → bitonic → WBOIT</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <section class="visual-shell">
+        <canvas
+          id="sort-visual"
+          width="192"
+          height="64"
+          aria-label="Transparency readback panels"
+        ></canvas>
+        <div class="labels" aria-hidden="true">
+          <span>camera A</span><span>camera B</span><span>WBOIT</span>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/m10-sort.ts"></script>
+  </body>
+</html>

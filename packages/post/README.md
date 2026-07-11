@@ -1,8 +1,8 @@
 # @nachi/post
 
 Composable screen-space effects for Three.js r185's TSL `RenderPipeline`. The package provides
-shockwave and heat-haze distortion, radial blur, and bloom presets without depending on
-`@nachi/core`.
+shockwave and heat-haze distortion, radial blur, bloom presets, and native-WebGPU weighted blended
+OIT without depending on `@nachi/core`.
 
 ```sh
 pnpm add @nachi/post three
@@ -81,3 +81,25 @@ pixel-to-pixel white noise. Distortion and multi-sample radial-blur UVs use an i
 The pipeline renders into the renderer's currently selected target. Headless WebGPU must select an
 offscreen `RenderTarget`, call `post.render()`, and use `readRenderTargetPixelsAsync()`; do not
 present the WebGPU canvas. Use `outputColorTransform: false` when measuring linear pixel thresholds.
+
+## Weighted blended OIT
+
+Use `createWboitPipeline()` with a transparent-only scene. Each participating `NodeMaterial` must
+assign `createWboitOutput()` to `material.mrtNode`:
+
+```ts
+const material = new THREE.NodeMaterial();
+material.transparent = true;
+material.depthWrite = false;
+material.mrtNode = createWboitOutput(colorNode, alphaNode);
+
+const oit = createWboitPipeline(renderer, transparentScene, camera, { width, height });
+oit.render(); // composites over the renderer's current output target
+```
+
+The accum target is RGBA16F and revealage is R8. Native WebGPU attachment-specific blending is
+required; WebGL2 is rejected explicitly. WBOIT is order-independent but approximate, so particle
+bitonic sorting is normally disabled for objects routed through this pipeline. The current pipeline
+owns a separate depth attachment and cannot import the opaque target's depth, so opaque geometry
+does not occlude WBOIT fragments yet; keep effects that must disappear behind walls on a sorted
+alpha path until borrowed-depth ownership is implemented.

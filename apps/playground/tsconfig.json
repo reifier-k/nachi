@@ -7,6 +7,7 @@
     "paths": {
       "@nachi/core": ["packages/core/src/index.ts"],
       "@nachi/mesh-fx": ["packages/mesh-fx/src/index.ts"],
+      "@nachi/post": ["packages/post/src/index.ts"],
       "@nachi/timeline": ["packages/timeline/src/index.ts"],
       "@nachi/tsl-kit": ["packages/tsl-kit/src/index.ts"],
       "@nachi/tsl-kit/math": ["packages/tsl-kit/src/math.ts"],
