@@ -184,6 +184,8 @@ function fakeAdapter(): KernelTslAdapter {
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     inverse: node,
     sampleTexture: node,
+    sampleMeshSurface: () => ({ normal: node(), position: node() }),
+    sampleSdf: () => ({ distance: node(), gradient: node() }),
     sampleVectorField: node,
     select: node,
     simplexNoise: node,
@@ -1121,6 +1123,43 @@ describe('VFXSystem runtime scheduler', () => {
     instance.setTransform([3, 4, 5]);
     const matrix = instance.getEmitter('particles')?.kernels.uniforms['Emitter.transform']?.value;
     expect(matrix).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1]);
+  });
+
+  it('attaches an effect to a mutable world-transform source immediately', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const source = {
+      getWorldTransform: () => ({ position: [2, 3, 4] as const }),
+    };
+    instance.attachTo(source);
+    expect(instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value).toEqual([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1,
+    ]);
+  });
+
+  it('refreshes attached transforms before every system update', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    let position: readonly [number, number, number] = [0, 0, 0];
+    instance.attachTo({ getWorldTransform: () => ({ position }) });
+    position = [5, 6, 7];
+    await system.update(0);
+    expect(instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value).toEqual([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1,
+    ]);
+  });
+
+  it('stops socket transform refresh after detach', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    let position: readonly [number, number, number] = [1, 0, 0];
+    instance.attachTo({ getWorldTransform: () => ({ position }) });
+    instance.detach();
+    position = [9, 0, 0];
+    await system.update(0);
+    expect(instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value).toEqual([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1,
+    ]);
   });
 
   it('supplies camera uniforms to emitters spawned after setCamera', () => {

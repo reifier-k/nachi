@@ -7,6 +7,7 @@ export default defineConfig({
       input: {
         goldenExplosion: 'golden-explosion/index.html',
         goldenAmbient: 'golden-ambient/index.html',
+        goldenCharacter: 'golden-character/index.html',
         playground: 'index.html',
         m1Kernel: 'm1-kernel/index.html',
         m2Runtime: 'm2-runtime/index.html',

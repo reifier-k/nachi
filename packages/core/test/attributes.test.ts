@@ -62,6 +62,7 @@ describe('resolved attribute schema', () => {
       size: 1,
       spawnGeneration: 0,
       spriteRotation: 0,
+      surfaceNormal: [0, 1, 0],
       velocity: [0, 0, 0],
     });
   });

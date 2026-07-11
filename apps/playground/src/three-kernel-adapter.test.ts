@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   billboard,
+  bakeSdf,
   burst,
   compileEmitter,
   collideSceneDepth,
+  collideSdf,
   defineEmitter,
   curve,
   flipbook,
@@ -14,10 +16,12 @@ import {
   pointAttractor,
   parseFga,
   positionSphere,
+  positionMeshSurface,
   rotationOverLife,
   turbulence,
   vectorField,
   velocityOverLife,
+  velocityMeshNormal,
   vortex,
 } from '@nachi/core';
 import * as THREE from 'three/webgpu';
@@ -25,8 +29,13 @@ import * as THREE from 'three/webgpu';
 import {
   createThreeKernelAdapter,
   createThreeGeometryResolver,
+  createThreeMeshSurfaceResolver,
+  createThreeMeshSurfaceResource,
+  createThreeSdfResolver,
+  createThreeSdfResource,
   createThreeSpriteGeometry,
   createThreeTextureResolver,
+  createThreeTransformSource,
   createThreeVectorFieldResolver,
   createThreeVectorFieldResource,
   directionEulerAngles,
@@ -35,6 +44,126 @@ import {
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
+  it('builds an area CDF and position texture from BufferGeometry triangles', () => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0], 3),
+    );
+    const resource = createThreeMeshSurfaceResource(
+      new THREE.Mesh(geometry, new THREE.MeshBasicMaterial()),
+      6,
+    );
+    const cdf = resource.cdfTexture.image.data as Float32Array;
+    expect(resource.triangleCount).toBe(2);
+    expect(cdf[0]).toBeCloseTo(0.5);
+    expect(cdf[1]).toBe(1);
+    expect(resource.positionTexture.image.width).toBe(6);
+  });
+
+  it('rejects a one-row mesh texture wider than maxTextureDimension2D', () => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0], 3),
+    );
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    expect(() => createThreeMeshSurfaceResource(mesh, 5)).toThrowError(
+      'NACHI_MESH_SURFACE_TEXTURE_TOO_WIDE: Mesh surface sampling requires 6 texels, exceeding maxTextureDimension2D 5.',
+    );
+  });
+
+  it('updates CPU-skinned triangle positions after a bone transform', () => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3),
+    );
+    geometry.setAttribute(
+      'skinIndex',
+      new THREE.Uint16BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 4),
+    );
+    geometry.setAttribute(
+      'skinWeight',
+      new THREE.Float32BufferAttribute([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 4),
+    );
+    const bone = new THREE.Bone();
+    const mesh = new THREE.SkinnedMesh(geometry, new THREE.MeshBasicMaterial());
+    mesh.add(bone);
+    mesh.bind(new THREE.Skeleton([bone]));
+    const resource = createThreeMeshSurfaceResource(mesh);
+    const positions = resource.positionTexture.image.data as Float32Array;
+    const before = positions.slice();
+    bone.position.y = 0.5;
+    resource.updateFromMesh(mesh);
+    expect(positions[1]).toBeCloseTo((before[1] ?? 0) + 0.5);
+  });
+
+  it('materializes analytic SDF data as a bounds-aware 3D texture', () => {
+    const resource = createThreeSdfResource(
+      bakeSdf({
+        boundsMax: [1, 1, 1],
+        boundsMin: [-1, -1, -1],
+        resolution: [3, 3, 3],
+        shapes: [{ center: [0, 0, 0], radius: 0.5, shape: 'sphere' }],
+      }),
+      true,
+    );
+    expect(resource.texture.image).toMatchObject({ width: 3, height: 3, depth: 3 });
+    expect(resource.texture.minFilter).toBe(THREE.LinearFilter);
+    expect((resource.texture.image.data as Float32Array)[13]).toBeCloseTo(-0.5);
+  });
+
+  it('builds mesh-surface init and SDF collision graphs through resolvers', () => {
+    const meshRef = { assetType: 'mesh', kind: 'asset-ref', uri: 'character.mesh' } as const;
+    const sdfRef = { assetType: 'sdf', kind: 'asset-ref', uri: 'character.sdf' } as const;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3),
+    );
+    const meshResource = createThreeMeshSurfaceResource(
+      new THREE.Mesh(geometry, new THREE.MeshBasicMaterial()),
+    );
+    const sdfResource = createThreeSdfResource(
+      bakeSdf({
+        boundsMax: [1, 1, 1],
+        boundsMin: [-1, -1, -1],
+        resolution: [3, 3, 3],
+        shapes: [{ center: [0, 0, 0], radius: 0.5, shape: 'sphere' }],
+      }),
+    );
+    const adapter = createThreeKernelAdapter({
+      resolveMeshSurface: createThreeMeshSurfaceResolver(new Map([[meshRef.uri, meshResource]])),
+      resolveSdf: createThreeSdfResolver(new Map([[sdfRef.uri, sdfResource]])),
+    });
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [
+          positionMeshSurface({ mesh: meshRef, mode: 'surface' }),
+          velocityMeshNormal({ speed: 1 }),
+        ],
+        integration: 'none',
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+        update: [collideSdf({ field: sdfRef, mode: 'bounce' })],
+      }),
+    );
+    expect(() => program.buildKernels(adapter)).not.toThrow();
+  });
+
+  it('adapts an Object3D world transform for EffectInstance.attachTo', () => {
+    const parent = new THREE.Object3D();
+    const socket = new THREE.Object3D();
+    parent.add(socket);
+    parent.position.set(1, 2, 3);
+    socket.position.set(0, 0.5, 0);
+    const transform = createThreeTransformSource(socket).getWorldTransform();
+    expect(transform.position).toEqual([1, 2.5, 3]);
+    expect(transform.rotation).toHaveLength(4);
+  });
+
   it('advertises scene-depth compute support only when an explicit depth copy is bound', () => {
     const texture = new THREE.DataTexture(new Float32Array([0.5, 0, 0, 1]), 1, 1);
     expect(createThreeKernelAdapter().capabilities.sceneDepth).toBe(false);

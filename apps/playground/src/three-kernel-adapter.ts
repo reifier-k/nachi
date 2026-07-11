@@ -3,6 +3,7 @@ import type {
   BuiltEmitterKernels,
   CompiledDrawIndirectDescription,
   CompiledEmitterProgram,
+  EffectTransformSource,
   GeometryRef,
   FieldRef,
   KernelNode,
@@ -10,8 +11,11 @@ import type {
   KernelStorageNode,
   KernelTslAdapter,
   KernelUniformNode,
+  MeshRef,
   ParameterPath,
+  ParsedSdfField,
   ParsedVectorField,
+  SdfRef,
   TextureRef,
   Vec3,
   TslStorageType,
@@ -68,6 +72,8 @@ export interface ThreeKernelAdapterOptions {
   readonly linearFloat32Filtering?: boolean;
   readonly maxStorageBuffersPerShaderStage?: number;
   readonly maxTransformFeedbackSeparateAttribs?: number;
+  readonly resolveMeshSurface?: ThreeMeshSurfaceResolver;
+  readonly resolveSdf?: ThreeSdfResolver;
   readonly resolveVectorField?: ThreeVectorFieldResolver;
   /** Sampleable color copy of the previous frame's normalized scene depth. */
   readonly sceneDepthTexture?: THREE.Texture;
@@ -92,6 +98,20 @@ export interface ThreeVectorFieldResource {
 export type ThreeVectorFieldResolver = (
   reference: FieldRef,
 ) => ThreeVectorFieldResource | undefined;
+export interface ThreeSdfResource {
+  readonly boundsMax: Vec3;
+  readonly boundsMin: Vec3;
+  readonly resolution: readonly [number, number, number];
+  readonly texture: THREE.Data3DTexture;
+}
+export type ThreeSdfResolver = (reference: SdfRef) => ThreeSdfResource | undefined;
+export interface ThreeMeshSurfaceResource {
+  readonly cdfTexture: THREE.DataTexture;
+  readonly positionTexture: THREE.DataTexture;
+  readonly triangleCount: number;
+  updateFromMesh(mesh: THREE.Mesh | THREE.SkinnedMesh): void;
+}
+export type ThreeMeshSurfaceResolver = (reference: MeshRef) => ThreeMeshSurfaceResource | undefined;
 
 export function createThreeTextureResolver(
   textures: ReadonlyMap<string, THREE.Texture>,
@@ -103,6 +123,22 @@ export function createThreeGeometryResolver(
   geometries: ReadonlyMap<string, THREE.BufferGeometry>,
 ): ThreeGeometryResolver {
   return (reference) => geometries.get(reference.uri);
+}
+
+export function createThreeTransformSource(object: THREE.Object3D): EffectTransformSource {
+  const position = new THREE.Vector3();
+  const rotation = new THREE.Quaternion();
+  return {
+    getWorldTransform: () => {
+      object.updateWorldMatrix(true, false);
+      object.getWorldPosition(position);
+      object.getWorldQuaternion(rotation);
+      return {
+        position: [position.x, position.y, position.z],
+        rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
+      };
+    },
+  };
 }
 
 export function createThreeVectorFieldResource(
@@ -140,6 +176,124 @@ export function createThreeVectorFieldResolver(
   fields: ReadonlyMap<string, ThreeVectorFieldResource>,
 ): ThreeVectorFieldResolver {
   return (reference) => fields.get(reference.uri);
+}
+
+export function createThreeSdfResource(
+  field: ParsedSdfField,
+  linearFloat32Filtering = false,
+): ThreeSdfResource {
+  const [width, height, depth] = field.resolution;
+  const texture = new THREE.Data3DTexture(field.distances.slice(), width, height, depth);
+  texture.format = THREE.RedFormat;
+  texture.type = THREE.FloatType;
+  const filter = linearFloat32Filtering ? THREE.LinearFilter : THREE.NearestFilter;
+  texture.minFilter = filter;
+  texture.magFilter = filter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.wrapR = THREE.ClampToEdgeWrapping;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return {
+    boundsMax: field.boundsMax,
+    boundsMin: field.boundsMin,
+    resolution: field.resolution,
+    texture,
+  };
+}
+
+export function createThreeSdfResolver(
+  fields: ReadonlyMap<string, ThreeSdfResource>,
+): ThreeSdfResolver {
+  return (reference) => fields.get(reference.uri);
+}
+
+export function createThreeMeshSurfaceResource(
+  mesh: THREE.Mesh | THREE.SkinnedMesh,
+  maxTextureDimension2D = 8192,
+): ThreeMeshSurfaceResource {
+  if (!Number.isSafeInteger(maxTextureDimension2D) || maxTextureDimension2D <= 0) {
+    throw new RangeError('maxTextureDimension2D must be a positive safe integer.');
+  }
+  const position = mesh.geometry.getAttribute('position');
+  if (!position) throw new Error('Mesh surface sampling requires a position attribute.');
+  const index = mesh.geometry.getIndex();
+  const triangleCount = (index?.count ?? position.count) / 3;
+  if (!Number.isSafeInteger(triangleCount) || triangleCount <= 0) {
+    throw new Error('Mesh surface sampling requires a non-empty triangle list.');
+  }
+  const positionTextureWidth = triangleCount * 3;
+  if (positionTextureWidth > maxTextureDimension2D) {
+    throw new Error(
+      `NACHI_MESH_SURFACE_TEXTURE_TOO_WIDE: Mesh surface sampling requires ${positionTextureWidth} texels, exceeding maxTextureDimension2D ${maxTextureDimension2D}.`,
+    );
+  }
+  const positions = new Float32Array(triangleCount * 3 * 4);
+  const cdf = new Float32Array(triangleCount);
+  const positionTexture = new THREE.DataTexture(
+    positions,
+    positionTextureWidth,
+    1,
+    THREE.RGBAFormat,
+    THREE.FloatType,
+  );
+  const cdfTexture = new THREE.DataTexture(cdf, triangleCount, 1, THREE.RedFormat, THREE.FloatType);
+  for (const value of [positionTexture, cdfTexture]) {
+    value.minFilter = THREE.NearestFilter;
+    value.magFilter = THREE.NearestFilter;
+    value.wrapS = THREE.ClampToEdgeWrapping;
+    value.wrapT = THREE.ClampToEdgeWrapping;
+    value.generateMipmaps = false;
+  }
+  const vertex = new THREE.Vector3();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const edgeA = new THREE.Vector3();
+  const edgeB = new THREE.Vector3();
+  const vertexIndex = (corner: number) => index?.getX(corner) ?? corner;
+  const readVertex = (target: THREE.Vector3, sourceIndex: number) => {
+    vertex.fromBufferAttribute(position as THREE.BufferAttribute, sourceIndex);
+    if (mesh instanceof THREE.SkinnedMesh) mesh.applyBoneTransform(sourceIndex, vertex);
+    target.copy(vertex);
+  };
+  const resource: ThreeMeshSurfaceResource = {
+    cdfTexture,
+    positionTexture,
+    triangleCount,
+    updateFromMesh(source) {
+      if (source !== mesh) {
+        throw new Error('Mesh surface resources can only update from their source mesh.');
+      }
+      mesh.updateMatrixWorld(true);
+      if (mesh instanceof THREE.SkinnedMesh) mesh.skeleton.update();
+      let totalArea = 0;
+      for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+        readVertex(a, vertexIndex(triangle * 3));
+        readVertex(b, vertexIndex(triangle * 3 + 1));
+        readVertex(c, vertexIndex(triangle * 3 + 2));
+        for (const [corner, value] of [a, b, c].entries()) {
+          positions.set([value.x, value.y, value.z, 1], (triangle * 3 + corner) * 4);
+        }
+        totalArea += edgeA.subVectors(b, a).cross(edgeB.subVectors(c, a)).length() * 0.5;
+        cdf[triangle] = totalArea;
+      }
+      if (!(totalArea > 0)) throw new Error('Mesh surface sampling requires positive total area.');
+      for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+        cdf[triangle] = (cdf[triangle] ?? 0) / totalArea;
+      }
+      positionTexture.needsUpdate = true;
+      cdfTexture.needsUpdate = true;
+    },
+  };
+  resource.updateFromMesh(mesh);
+  return resource;
+}
+
+export function createThreeMeshSurfaceResolver(
+  meshes: ReadonlyMap<string, ThreeMeshSurfaceResource>,
+): ThreeMeshSurfaceResolver {
+  return (reference) => meshes.get(reference.uri);
 }
 
 function asNode(value: unknown): KernelNode {
@@ -310,6 +464,90 @@ export function createThreeKernelAdapter(
           sampleSceneDepth: (uv: KernelNode) =>
             asNode(texture(options.sceneDepthTexture!, uv as never)).r,
         }),
+    sampleMeshSurface: (reference, triangleSample, barycentricA, barycentricB) => {
+      const resource = options.resolveMeshSurface?.(reference);
+      if (!resource) {
+        throw new Error(`No mesh-surface resolver supplied for resource "${reference.uri}".`);
+      }
+      const cdfSample = (triangle: KernelNode) =>
+        asNode(
+          texture(
+            resource.cdfTexture,
+            vec2(triangle.add(0.5).div(resource.triangleCount) as never, 0.5),
+          ),
+        ).r;
+      let low = asNode(float(0));
+      let high = asNode(float(resource.triangleCount - 1));
+      const searchSteps = Math.ceil(Math.log2(resource.triangleCount));
+      for (let step = 0; step < searchSteps; step += 1) {
+        const middle = asNode(floor(low.add(high).mul(0.5) as never));
+        const beforeOrAt = triangleSample.lessThanEqual(cdfSample(middle));
+        low = asNode(select(beforeOrAt as never, low as never, middle.add(1) as never));
+        high = asNode(select(beforeOrAt as never, middle as never, high as never));
+      }
+      const triangle = low;
+      const vertex = (corner: number) => {
+        const texel = triangle.mul(3).add(corner);
+        return asNode(
+          texture(
+            resource.positionTexture,
+            vec2(texel.add(0.5).div(resource.triangleCount * 3) as never, 0.5),
+          ),
+        ).xyz;
+      };
+      const a = vertex(0);
+      const b = vertex(1);
+      const c = vertex(2);
+      const sqrtA = barycentricA.sqrt();
+      const weightA = asNode(float(1)).sub(sqrtA);
+      const weightB = sqrtA.mul(asNode(float(1)).sub(barycentricB));
+      const weightC = sqrtA.mul(barycentricB);
+      const position = a.mul(weightA).add(b.mul(weightB)).add(c.mul(weightC));
+      const rawNormal = nodeCross(b.sub(a), c.sub(a));
+      const normal = rawNormal.div(nodeLength(rawNormal).clamp(0.000001, 1e20));
+      return { normal, position };
+    },
+    sampleSdf: (reference, position) => {
+      const field = options.resolveSdf?.(reference);
+      if (!field) throw new Error(`No SDF resolver supplied for resource "${reference.uri}".`);
+      const extent = field.boundsMax.map(
+        (value, axis) => value - (field.boundsMin[axis] ?? value),
+      ) as unknown as Vec3;
+      const spacing = field.resolution.map(
+        (dimension, axis) => extent[axis]! / (dimension - 1),
+      ) as unknown as Vec3;
+      const sample = (samplePosition: KernelNode) => {
+        const normalized = samplePosition
+          .sub(asNode(vec3(...field.boundsMin)))
+          .div(asNode(vec3(...extent)))
+          .clamp(0, 1);
+        const texelScale = field.resolution.map(
+          (dimension) => (dimension - 1) / dimension,
+        ) as unknown as Vec3;
+        const texelOffset = field.resolution.map((dimension) => 0.5 / dimension) as unknown as Vec3;
+        const coordinates = normalized
+          .mul(asNode(vec3(...texelScale)))
+          .add(asNode(vec3(...texelOffset)));
+        return asNode(texture3D(field.texture).sample(coordinates as never)).r;
+      };
+      const x = asNode(vec3(spacing[0], 0, 0));
+      const y = asNode(vec3(0, spacing[1], 0));
+      const z = asNode(vec3(0, 0, spacing[2]));
+      const gradient = asNode(
+        vec3(
+          sample(position.add(x))
+            .sub(sample(position.sub(x)))
+            .div(2 * spacing[0]) as never,
+          sample(position.add(y))
+            .sub(sample(position.sub(y)))
+            .div(2 * spacing[1]) as never,
+          sample(position.add(z))
+            .sub(sample(position.sub(z)))
+            .div(2 * spacing[2]) as never,
+        ),
+      );
+      return { distance: sample(position), gradient };
+    },
     sampleVectorField: (reference, position, tiling) => {
       const field = options.resolveVectorField?.(reference);
       if (!field) {

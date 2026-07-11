@@ -24,6 +24,7 @@ import type {
   EffectEventSummary,
   EffectInstanceState,
   EffectSpawnOptions,
+  EffectTransformSource,
   EmitterDefinition,
   EmitterLifecycle,
   ParameterPath,
@@ -1073,6 +1074,7 @@ export class VfxEffectInstance<
   #eventDrainFrames = 0;
   #eventDrainExtended = false;
   #initialized = false;
+  #attachment: EffectTransformSource | undefined;
 
   constructor(
     readonly definition: Definition,
@@ -1119,6 +1121,22 @@ export class VfxEffectInstance<
     this.#assertNotReleased();
     if (this.#state !== 'active') return;
     this.clock.applyHitStop(durationMs, timeScale);
+  }
+
+  attachTo(source: EffectTransformSource): void {
+    this.#assertNotReleased();
+    this.#attachment = source;
+    this.syncAttachment();
+  }
+
+  detach(): void {
+    this.#assertNotReleased();
+    this.#attachment = undefined;
+  }
+
+  syncAttachment(): void {
+    const transform = this.#attachment?.getWorldTransform();
+    if (transform) this.setTransform(transform.position, transform.rotation);
   }
 
   on(event: string, callback: EffectEventCallback): () => void {
@@ -1440,6 +1458,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     requireNonNegativeFinite(delta, 'deltaSeconds');
     const run = async () => {
       for (const instance of this.#instances.values()) {
+        instance.syncAttachment();
         await this.#advanceInstance(instance, () =>
           instance.initialize(this.#systemTime, this.#prewarmStepSeconds),
         );
@@ -1448,6 +1467,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       for (const step of steps) {
         this.#systemTime += step;
         for (const instance of this.#instances.values()) {
+          instance.syncAttachment();
           await this.#advanceInstance(instance, () =>
             instance.advance(step, this.#systemTime, this.#prewarmStepSeconds),
           );

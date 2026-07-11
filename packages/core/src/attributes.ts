@@ -129,6 +129,7 @@ export const BUILT_IN_ATTRIBUTE_DEFAULTS = {
   size: 1,
   spriteRotation: 0,
   spawnGeneration: 0,
+  surfaceNormal: [0, 1, 0],
   velocity: [0, 0, 0],
 } as const;
 
@@ -145,6 +146,7 @@ const BUILT_IN_ATTRIBUTES = [
   ['rotation', 'quat', BUILT_IN_ATTRIBUTE_DEFAULTS.rotation],
   ['spriteRotation', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.spriteRotation],
   ['spawnGeneration', 'u32', BUILT_IN_ATTRIBUTE_DEFAULTS.spawnGeneration],
+  ['surfaceNormal', 'vec3', BUILT_IN_ATTRIBUTE_DEFAULTS.surfaceNormal],
   ['mass', 'f32', BUILT_IN_ATTRIBUTE_DEFAULTS.mass],
 ] as const satisfies readonly (readonly [string, AttributeType, unknown])[];
 

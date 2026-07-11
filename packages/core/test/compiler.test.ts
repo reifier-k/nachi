@@ -12,6 +12,7 @@ import {
   collideBox,
   collidePlane,
   collideSceneDepth,
+  collideSdf,
   collideSphere,
   compileEmitter,
   coreModuleImplementationAccess,
@@ -39,6 +40,7 @@ import {
   pointAttractor,
   pcgRandomFloat,
   positionSphere,
+  positionMeshSurface,
   range,
   rate,
   readEventPayloadRecord,
@@ -49,6 +51,7 @@ import {
   turbulence,
   velocityOverLife,
   velocityCone,
+  velocityMeshNormal,
   vectorField,
   vortex,
   writeEventPayloadRecord,
@@ -381,6 +384,11 @@ function fakeAdapter(): KernelTslAdapter {
     inverse: node,
     sampleTexture: node,
     sampleSceneDepth: node,
+    sampleMeshSurface: () => ({ normal: node(), position: node() }),
+    sampleSdf: (_field, position) => {
+      markAccessRead(position);
+      return { distance: node(), gradient: node() };
+    },
     sampleVectorField: (_field, position) => {
       markAccessRead(position);
       return node();
@@ -2111,6 +2119,10 @@ describe('emitter kernel compiler', () => {
       }).access,
       'core/collide-plane': collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 }).access,
       'core/collide-scene-depth': collideSceneDepth().access,
+      'core/collide-sdf': collideSdf({
+        field: { assetType: 'sdf', kind: 'asset-ref', uri: 'shape.sdf' },
+        mode: 'bounce',
+      }).access,
       'core/collide-sphere': collideSphere({
         center: [0, 0, 0],
         mode: 'bounce',
@@ -2124,6 +2136,10 @@ describe('emitter kernel compiler', () => {
       'core/orient-to-velocity': orientToVelocity().access,
       'core/lifetime': lifetime(1).access,
       'core/point-attractor': pointAttractor({ position: [0, 0, 0], strength: 1 }).access,
+      'core/position-mesh-surface': positionMeshSurface({
+        mesh: { assetType: 'mesh', kind: 'asset-ref', uri: 'character.mesh' },
+        mode: 'surface',
+      }).access,
       'core/position-sphere': positionSphere({ radius: 1 }).access,
       'core/rotation-over-life': rotationOverLife(curve([0, 0], [1, 1])).access,
       'core/size-over-life': sizeOverLife(curve([0, 0], [1, 1])).access,
@@ -2134,6 +2150,7 @@ describe('emitter kernel compiler', () => {
         strength: 1,
       }).access,
       'core/velocity-cone': velocityCone({ angle: 30, direction: [0, 1, 0], speed: 1 }).access,
+      'core/velocity-mesh-normal': velocityMeshNormal({ speed: 1 }).access,
       'core/vortex': vortex({ axis: [0, 1, 0], strength: 1 }).access,
     };
     for (const [type, manifest] of Object.entries(expected)) expect(access[type]).toEqual(manifest);
@@ -2160,7 +2177,15 @@ describe('emitter kernel compiler', () => {
     const cases: ReadonlyArray<readonly [string, object, string?]> = [
       ['core/age', {}],
       ['core/position-sphere', { radius: 1, surfaceOnly: false }],
+      [
+        'core/position-mesh-surface',
+        {
+          mesh: { assetType: 'mesh', kind: 'asset-ref', uri: 'character.mesh' },
+          mode: 'surface',
+        },
+      ],
       ['core/velocity-cone', { angle: 30, direction: [0, 1, 0], speed: 2 }],
+      ['core/velocity-mesh-normal', { speed: 2 }],
       ['core/lifetime', { value: 2 }],
       ['core/gravity', { value: -9.8 }],
       ['core/drag', { value: 0.1 }],
@@ -2181,18 +2206,22 @@ describe('emitter kernel compiler', () => {
         {
           bounce: 0.5,
           friction: 0.2,
-          mode: 'bounce',
+          mode: 'kill',
           normal: [0, 1, 0],
           offset: 0,
           space: 'emitter',
         },
       ],
-      ['core/collide-sphere', { center: [0, 0, 0], mode: 'bounce', radius: 1, space: 'emitter' }],
+      ['core/collide-sphere', { center: [0, 0, 0], mode: 'kill', radius: 1, space: 'emitter' }],
+      ['core/collide-box', { center: [0, 0, 0], mode: 'kill', size: [1, 1, 1], space: 'emitter' }],
+      ['core/collide-scene-depth', { mode: 'kill' }],
       [
-        'core/collide-box',
-        { center: [0, 0, 0], mode: 'bounce', size: [1, 1, 1], space: 'emitter' },
+        'core/collide-sdf',
+        {
+          field: { assetType: 'sdf', kind: 'asset-ref', uri: 'shape.sdf' },
+          mode: 'kill',
+        },
       ],
-      ['core/collide-scene-depth', { mode: 'bounce' }],
       ['core/orient-to-velocity', {}],
       ['core/size-over-life', { value: curve([0, 0], [1, 1]) }, 'size-lut'],
       ['core/rotation-over-life', { value: curve([0, 0], [1, 1]) }, 'rotation-lut'],
@@ -2321,6 +2350,70 @@ describe('emitter kernel compiler', () => {
       'System.viewMatrix': expect.any(FakeNode),
       'System.viewportSize': expect.any(FakeNode),
     });
+  });
+
+  it('keeps non-kill collision responses from writing Particles.alive', () => {
+    const traced = traceCoreImplementation('core/collide-plane', {
+      mode: 'bounce',
+      normal: [0, 1, 0],
+      offset: 0,
+    });
+    expect(traced.writes).not.toContain('Particles.alive');
+    expect(traced.writes).toEqual(['Particles.position', 'Particles.velocity']);
+  });
+
+  it('diagnoses invalid scene-depth thickness', () => {
+    const program = compileEmitter(
+      baseEmitter({ integration: 'none', update: [collideSceneDepth({ thickness: 0 })] }),
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_COLLISION_DEPTH_THICKNESS_INVALID' }),
+    );
+  });
+
+  it('compiles SDF collision with optional penetration thickness', () => {
+    const field = { assetType: 'sdf', kind: 'asset-ref', uri: 'shape.sdf' } as const;
+    const program = compileEmitter(
+      baseEmitter({
+        update: [collideSdf({ bounce: 0.5, field, friction: 0.2, mode: 'bounce', thickness: 0.4 })],
+      }),
+    );
+    expect(program.diagnostics).toEqual([]);
+    expect(program.kernels.update.modules.map(({ type }) => type)).toEqual([
+      'core/collide-sdf',
+      'core/integrate',
+    ]);
+    expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
+  });
+
+  it('diagnoses invalid SDF collision thickness', () => {
+    const field = { assetType: 'sdf', kind: 'asset-ref', uri: 'shape.sdf' } as const;
+    expect(
+      compileEmitter(
+        baseEmitter({
+          integration: 'none',
+          update: [collideSdf({ field, mode: 'stick', thickness: -1 })],
+        }),
+      ).diagnostics,
+    ).toContainEqual(expect.objectContaining({ code: 'NACHI_COLLISION_SDF_THICKNESS_INVALID' }));
+  });
+
+  it('compiles mesh-surface position and normal-velocity init modules', () => {
+    const mesh = { assetType: 'mesh', kind: 'asset-ref', uri: 'character.mesh' } as const;
+    const program = compileEmitter(
+      baseEmitter({
+        init: [positionMeshSurface({ mesh, mode: 'surface' }), velocityMeshNormal({ speed: 0.5 })],
+        integration: 'none',
+      }),
+    );
+    expect(program.diagnostics).toEqual([]);
+    expect(program.kernels.init.modules.map(({ type }) => type)).toEqual([
+      'core/defaults',
+      'core/position-mesh-surface',
+      'core/velocity-mesh-normal',
+    ]);
+    expect(program.attributeSchema.byName.surfaceNormal).toBeDefined();
+    expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
   });
 
   it('keeps analytic colliders world-space by default and serializes emitter-space opt-in', () => {

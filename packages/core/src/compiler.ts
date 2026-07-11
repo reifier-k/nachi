@@ -21,6 +21,7 @@ import type {
   CollideBoxOptions,
   CollidePlaneOptions,
   CollideSceneDepthOptions,
+  CollideSdfOptions,
   CollideSphereOptions,
   CollisionMode,
   CurveGenerator,
@@ -33,6 +34,7 @@ import type {
   GradientGenerator,
   InitModule,
   MeshRendererOptions,
+  MeshRef,
   ModuleAccess,
   ModuleDefinition,
   ParameterGenerator,
@@ -56,6 +58,9 @@ import type {
   VectorFieldOptions,
   VortexOptions,
   PointAttractorOptions,
+  PositionMeshSurfaceOptions,
+  SdfRef,
+  VelocityMeshNormalOptions,
   KillVolumeOptions,
 } from './types.js';
 
@@ -397,6 +402,16 @@ export interface KernelTslAdapter {
   inverse(value: KernelNode): KernelNode;
   sampleTexture(texture: unknown, uv: KernelNode): KernelNode;
   sampleSceneDepth?(uv: KernelNode): KernelNode;
+  sampleMeshSurface(
+    mesh: MeshRef,
+    triangleSample: KernelNode,
+    barycentricA: KernelNode,
+    barycentricB: KernelNode,
+  ): { readonly normal: KernelNode; readonly position: KernelNode };
+  sampleSdf(
+    field: SdfRef,
+    position: KernelNode,
+  ): { readonly distance: KernelNode; readonly gradient: KernelNode };
   sampleVectorField(field: FieldRef, position: KernelNode, tiling: boolean): KernelNode;
   select(condition: KernelNode, whenTrue: KernelNodeInput, whenFalse: KernelNodeInput): KernelNode;
   simplexNoise(position: KernelNode): KernelNode;
@@ -1008,6 +1023,7 @@ function normalizeModules(
           'core/collide-box',
           'core/collide-plane',
           'core/collide-scene-depth',
+          'core/collide-sdf',
           'core/collide-sphere',
         ].includes(module.type)
       ) {
@@ -3258,7 +3274,9 @@ function writeCollisionResponse(
         : responseVelocity;
     context.write('velocity', worldVelocity);
     context.emitEvent('onCollision');
-    context.write('alive', context.adapter.constant(config.mode !== 'kill', 'bool'));
+    if (config.mode === 'kill') {
+      context.write('alive', context.adapter.constant(false, 'bool'));
+    }
   });
 }
 
@@ -3357,6 +3375,35 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
+      reads: ['Emitter.seed', 'Emitter.transform', 'Particles.spawnGeneration'],
+      writes: ['Particles.position', 'Particles.surfaceNormal'],
+    },
+    build(context) {
+      const config = context.module.config as PositionMeshSurfaceOptions;
+      const sample = context.adapter.sampleMeshSurface(
+        config.mesh,
+        context.random(1),
+        context.random(2),
+        context.random(3),
+      );
+      const transform = context.uniform('Emitter.transform');
+      const worldPosition = transform.mul(
+        context.adapter.vec4(sample.position.x, sample.position.y, sample.position.z, 1),
+      ).xyz;
+      const worldNormal = normalized3(
+        context,
+        transform.mul(context.adapter.vec4(sample.normal.x, sample.normal.y, sample.normal.z, 0))
+          .xyz,
+      );
+      context.write('position', worldPosition);
+      context.write('surfaceNormal', worldNormal);
+    },
+    stage: 'init',
+    type: 'core/position-mesh-surface',
+    version: 1,
+  });
+  registry.register({
+    access: {
       reads: ['Emitter.seed', 'Particles.spawnGeneration'],
       writes: ['Particles.velocity'],
     },
@@ -3393,6 +3440,22 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'init',
     type: 'core/velocity-cone',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Particles.surfaceNormal'],
+      writes: ['Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as VelocityMeshNormalOptions;
+      context.write(
+        'velocity',
+        context.attribute('surfaceNormal').mul(context.value(config.speed, 'f32', 1)),
+      );
+    },
+    stage: 'init',
+    type: 'core/velocity-mesh-normal',
     version: 1,
   });
   registry.register({
@@ -3925,7 +3988,12 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .and(uv.y.lessThanEqual(one));
       const collided = visible
         .and(sceneDepth.lessThan(0.999999))
-        .and(sceneDepth.lessThan(particleDepth));
+        .and(sceneDepth.lessThan(particleDepth))
+        .and(
+          surfaceView.z
+            .sub(viewPosition.z)
+            .lessThanEqual(context.value(config.thickness ?? 0.1, 'f32', 2)),
+        );
       writeCollisionResponse(
         context,
         { ...config, mode: config.mode ?? 'bounce', space: 'world' },
@@ -3937,6 +4005,40 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/collide-scene-depth',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Particles.position', 'Particles.velocity'],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as CollideSdfOptions;
+      const position = context.attribute('position');
+      const sampled = context.adapter.sampleSdf(
+        config.field,
+        context.adapter.vec3(position.x, position.y, position.z),
+      );
+      const normal = normalized3(context, sampled.gradient);
+      const penetration = sampled.distance.mul(-1);
+      const collided = sampled.distance
+        .lessThan(context.adapter.constant(0, 'f32'))
+        .and(
+          config.thickness === undefined
+            ? context.adapter.constant(true, 'bool')
+            : penetration.lessThanEqual(context.value(config.thickness, 'f32', 1)),
+        );
+      writeCollisionResponse(
+        context,
+        { ...config, space: 'world' },
+        collided,
+        position.sub(normal.mul(sampled.distance)),
+        normal,
+        context.attribute('velocity'),
+      );
+    },
+    stage: 'update',
+    type: 'core/collide-sdf',
     version: 1,
   });
   registry.register({
@@ -4151,7 +4253,9 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/defaults',
       'core/age',
       'core/position-sphere',
+      'core/position-mesh-surface',
       'core/velocity-cone',
+      'core/velocity-mesh-normal',
       'core/lifetime',
       'core/gravity',
       'core/drag',
@@ -4165,6 +4269,7 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/collide-sphere',
       'core/collide-box',
       'core/collide-scene-depth',
+      'core/collide-sdf',
       'core/orient-to-velocity',
       'core/size-over-life',
       'core/rotation-over-life',

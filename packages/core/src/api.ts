@@ -13,6 +13,7 @@ import type {
   BillboardOptions,
   BurstOptions,
   CameraShakeAction,
+  CollideSdfOptions,
   ColorInput,
   CollideBoxOptions,
   CollidePlaneOptions,
@@ -46,6 +47,7 @@ import type {
   ParameterSchema,
   PerDistanceSpawnOptions,
   PlayAction,
+  PositionMeshSurfaceOptions,
   PositionSphereOptions,
   PointAttractorOptions,
   RangeGenerator,
@@ -71,6 +73,7 @@ import type {
   Vec3,
   Vec4,
   VelocityConeOptions,
+  VelocityMeshNormalOptions,
   VortexOptions,
 } from './types.js';
 
@@ -255,9 +258,23 @@ export function positionSphere(options: PositionSphereOptions): InitModule {
   });
 }
 
+export function positionMeshSurface(options: PositionMeshSurfaceOptions): InitModule {
+  return createModule('init', 'core/position-mesh-surface', options, {
+    reads: ['Emitter.seed', 'Emitter.transform', 'Particles.spawnGeneration'],
+    writes: ['Particles.position', 'Particles.surfaceNormal'],
+  });
+}
+
 export function velocityCone(options: VelocityConeOptions): InitModule {
   return createModule('init', 'core/velocity-cone', options, {
     reads: ['Emitter.seed', 'Particles.spawnGeneration'],
+    writes: ['Particles.velocity'],
+  });
+}
+
+export function velocityMeshNormal(options: VelocityMeshNormalOptions): InitModule {
+  return createModule('init', 'core/velocity-mesh-normal', options, {
+    reads: ['Particles.surfaceNormal'],
     writes: ['Particles.velocity'],
   });
 }
@@ -366,6 +383,13 @@ export function collideSceneDepth(options: CollideSceneDepthOptions = {}): Updat
       'Particles.position',
       'Particles.velocity',
     ],
+    writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+  });
+}
+
+export function collideSdf(options: CollideSdfOptions): UpdateModule {
+  return createModule('update', 'core/collide-sdf', options, {
+    reads: ['Particles.position', 'Particles.velocity'],
     writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
   });
 }

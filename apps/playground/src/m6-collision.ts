@@ -413,7 +413,7 @@ async function run(): Promise<void> {
     defineEffect({
       elements: {
         particles: particleEmitter({
-          update: [collideSceneDepth({ mode: 'stick', surfaceOffset: 0.002 })],
+          update: [collideSceneDepth({ mode: 'stick', surfaceOffset: 0.002, thickness: 0.15 })],
           velocity: [0, 0, -1],
         }),
       },

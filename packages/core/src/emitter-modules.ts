@@ -277,6 +277,27 @@ export function collectEmitterBehaviorConfigDiagnostics(
           ),
         );
       }
+      const thickness = staticScalarMinimum(moduleConfig.thickness);
+      if (thickness !== undefined && (!Number.isFinite(thickness) || thickness <= 0)) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_COLLISION_DEPTH_THICKNESS_INVALID',
+            'Scene-depth collision thickness must be positive and finite.',
+            `${path}.config.thickness`,
+          ),
+        );
+      }
+    } else if (module.type === 'core/collide-sdf') {
+      const thickness = staticScalarMinimum(moduleConfig.thickness);
+      if (thickness !== undefined && (!Number.isFinite(thickness) || thickness <= 0)) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_COLLISION_SDF_THICKNESS_INVALID',
+            'SDF collision thickness must be positive and finite.',
+            `${path}.config.thickness`,
+          ),
+        );
+      }
     }
 
     if (module.type === 'core/vortex') {

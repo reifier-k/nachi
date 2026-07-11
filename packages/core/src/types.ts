@@ -394,6 +394,15 @@ export interface VectorFieldOptions {
   readonly tiling?: boolean;
 }
 
+export interface PositionMeshSurfaceOptions {
+  readonly mesh: MeshRef;
+  readonly mode: 'surface';
+}
+
+export interface VelocityMeshNormalOptions {
+  readonly speed: ValueInput<number>;
+}
+
 export type CollisionMode = 'bounce' | 'kill' | 'stick';
 export type CollisionSpace = 'emitter' | 'world';
 
@@ -431,6 +440,41 @@ export interface CollideSceneDepthOptions {
   readonly mode?: CollisionMode;
   /** World-space separation applied after reconstructing the scene surface. Defaults to 0.001. */
   readonly surfaceOffset?: ValueInput<number>;
+  /** Maximum linear view-depth penetration accepted as a collision. Defaults to 0.1. */
+  readonly thickness?: ValueInput<number>;
+}
+
+export interface CollideSdfOptions extends Omit<CollisionResponseOptions, 'space'> {
+  readonly field: SdfRef;
+  /** Maximum penetration eligible for correction. Omitted accepts every negative distance. */
+  readonly thickness?: ValueInput<number>;
+}
+
+export type SdfShape =
+  | {
+      readonly center: Vec3;
+      readonly radius: number;
+      readonly shape: 'sphere';
+    }
+  | {
+      readonly center: Vec3;
+      readonly size: Vec3;
+      readonly shape: 'box';
+    };
+
+export interface BakeSdfOptions {
+  readonly boundsMax: Vec3;
+  readonly boundsMin: Vec3;
+  readonly resolution: readonly [number, number, number];
+  /** Shapes are combined as a signed-distance union. */
+  readonly shapes: readonly SdfShape[];
+}
+
+export interface ParsedSdfField {
+  readonly boundsMax: Vec3;
+  readonly boundsMin: Vec3;
+  readonly distances: Float32Array;
+  readonly resolution: readonly [number, number, number];
 }
 
 export interface ParsedVectorField {
@@ -474,6 +518,8 @@ export interface AssetRef<AssetType extends string = string> {
 export type TextureRef = AssetRef<'texture'>;
 export type GeometryRef = AssetRef<'geometry'>;
 export type FieldRef = AssetRef<'vector-field'>;
+export type MeshRef = AssetRef<'mesh'>;
+export type SdfRef = AssetRef<'sdf'>;
 
 /** Playback reads Particles.normalizedAge; without a lifetime writer it remains on frame 0. */
 export interface FlipbookDefinition {
@@ -654,6 +700,15 @@ export interface EffectSpawnOptions<Definition = EffectDefinition> {
   readonly timeScale?: number;
 }
 
+export interface EffectWorldTransform {
+  readonly position: PositionInput;
+  readonly rotation?: RotationInput;
+}
+
+export interface EffectTransformSource {
+  getWorldTransform(): EffectWorldTransform;
+}
+
 export type EffectInstanceState = 'active' | 'complete' | 'error' | 'released' | 'stopped';
 
 export interface EffectEventSummary {
@@ -672,6 +727,8 @@ export interface EffectInstance<Definition = EffectDefinition> {
   readonly state: EffectInstanceState;
   readonly timeScale: number;
   applyHitStop(durationMs: number, timeScale?: number): void;
+  attachTo(source: EffectTransformSource): void;
+  detach(): void;
   on(event: 'death' | (string & {}), callback: EffectEventCallback): () => void;
   release(): void;
   setParameter<Path extends UserParameterKeys<Definition>>(
