@@ -138,11 +138,11 @@
 
 - [x] 深度バッファ衝突(バウンス・摩擦・消滅)— 前フレーム深度コピー経由+法線再構成、GPU実証。thicknessは最終バッチで
 - [x] 解析的コライダ:plane / sphere / box — CPU参照軌道一致で物理実証、space規約統一
-- [ ] SDFテクスチャ衝突(SDFベイクユーティリティ含む)
-- [ ] 静的メッシュ表面サンプリング(スポーン位置・法線)
-- [ ] スキンメッシュ表面サンプリング(TSLでのスキニング済み頂点取得)
-- [ ] ソケット/ボーン追従(Object3D/Bone参照のトランスフォーム束縛)
-- [ ] 🎯 ゴールデン#6「キャラクター付随」が動く
+- [x] SDFテクスチャ衝突(SDFベイクユーティリティ含む)— 正準SDF式+勾配法線、texel中心補正
+- [x] 静的メッシュ表面サンプリング(スポーン位置・法線)— 面積CDF一様サンプリング(数学検算済み)
+- [x] スキンメッシュ表面サンプリング — v1はCPUスキニング+テクスチャ再アップロード(制約RFC文書化。GPUスキニングDIは将来)
+- [x] ソケット/ボーン追従 — attachTo(同フレーム反映、EffectTransformSource抽象でcore非依存維持)
+- [x] 🎯 ゴールデン#6「キャラクター付随」が動く — /golden-character/ 6検証+視覚基準。**ゴールデン3/7達成**
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
 ## M7 — レンダラ第二陣
@@ -235,6 +235,7 @@
 | 2026-07-10 | M0最終バッチ完了:常設perf計測(GPU timestamp query対応、SwiftShaderで実測成功=真のGPU時間5ms vs encode 0.03msの乖離を定量化)、LICENSE(MIT)、CLAUDE.md、持ち越し6件+検収発見の退行(正規表現語順)+runnerエラー隠蔽を修正→Claudeレビュー PASS→コミット。**持ち越しNIT3件**: fade閾値0.35の校正根拠コメント+定数一元化/perf.tsのavailable→pending戻り/packages/core/package.jsonにlicenseフィールド。**M0残**: ライブラリ名決定(ユーザー判断)、マイルストーン監査(別セッション、Windows目視3項目=間接描画実行・WebGPU深度フェード・perf HUD含む) |
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
 | 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |
+| 2026-07-11 | M6完了(監査待ち): 解析コライダ+深度バッファ衝突(前フレーム深度コピー+法線再構成+thickness)+onCollision実体化+SDF衝突+メッシュ表面サンプリング(静的+スキン)+ソケット追従+**ゴールデン#6達成(3/7)**。テスト292本・全スモーク緑。レビュー2回とも物理/数学の全検算でPASS |
 | 2026-07-11 | **M5マイルストーン監査**: Codex=FAIL(多段連鎖の最終イベント消失/interval≥2完了競合=精密なコードパス指摘)/Claude=条件付きPASS(11検証2回再現・並行安全性の構造検証)→裁定で全採用・修正: イベントグラフ深度drain・強制readback・eventPayload語彙強制・timestamp計測分離。m5-events 13検証に拡張、テスト251本。性能: m5-events 0.067ms(M5基準)、全ベースライン劣化なし。**最終判定: 条件付きPASS** |
 | 2026-07-11 | M5完了(監査待ち): GPUイベント&サブエミッタ — onDeath→emitTo連鎖が完全動作(/m5-events/ 11検証、payloadMatchesParent=GPU直接照合)。差し戻し3回の白眉は**診断readback恒久化による証拠駆動切り分け**(機能は正常でスモークのスロット選択誤りと判明)。テスト246本。**持ち越しNIT4**: storageBufferCountのステージ別集計化(M7)/overflow報告の「up to N」表現/純イベント駆動エミッタの糖衣(M9)/emitEvent予約の型コメント |
 | 2026-07-11 | **M4マイルストーン監査**: Codex=FAIL/Claude=条件付きPASS→裁定: Codexビルド系は既知環境起因で却下、実質指摘を全採用し修正→**条件付きPASS**。修正: ①curlNoiseをシンプレックスポテンシャルの数値curl(発散ゼロ)に刷新+GPU検証(sin/cos場のM1実装がRFC未記載のまま残っていた黙認逸脱を解消) ②vector fieldのtexel中心補正+RepeatWrapping+非対称場の数値検証 ③velocityOverLifeを比率形式lut(t)/lut(t_prev)に(ステップレート非依存、30/60Hz一致検証) ④落ち葉回転検証をmesh描画が実際に消費するquat属性に接続 ⑤M4 range()の独立sampleOffset ⑥視覚回帰に許容誤差0.5%方針(firefliesがcompaction順非決定論でバイト再現不能とGPU実証→§16注記) ⑦縮退値診断。性能(SwiftShader): m4-behaviors 0.114ms/golden-ambient 0.605+16.8msをM4基準として記録、既存ベースライン劣化なし。テスト221本 |
