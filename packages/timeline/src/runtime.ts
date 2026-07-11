@@ -79,6 +79,16 @@ export interface TimelineEffectSpawnOptions<
   readonly cameraShakeTarget?: CameraShakeTarget;
 }
 
+/** @internal Timeline owns fixed stepping and budgets its choreography as one unit. */
+export function timelineCoreOptions(options: TimelineSystemOptions): VfxSystemOptions {
+  return Object.fromEntries(
+    Object.entries(options).filter(
+      ([key]) =>
+        key !== 'cameraShakeTarget' && key !== 'fixedTimeStep' && key !== 'significanceBudget',
+    ),
+  ) as VfxSystemOptions;
+}
+
 type RuntimeDefinition = {
   readonly elements: Readonly<Record<string, EffectElementDefinition>>;
   readonly kind: 'effect';
@@ -799,12 +809,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     this.#fixedStep = options.fixedTimeStep
       ? new FixedStepAccumulator(options.fixedTimeStep)
       : undefined;
-    const coreOptions = Object.fromEntries(
-      Object.entries(options).filter(
-        ([key]) => key !== 'cameraShakeTarget' && key !== 'fixedTimeStep',
-      ),
-    ) as VfxSystemOptions;
-    this.#core = new CoreVFXSystem(renderer, scene, coreOptions);
+    this.#core = new CoreVFXSystem(renderer, scene, timelineCoreOptions(options));
   }
 
   get instanceCount(): number {

@@ -615,12 +615,42 @@ export interface EmitterLifecycle {
   readonly startDelay?: number;
 }
 
+export type QualityTier = 'low' | 'medium' | 'high' | 'epic';
+
+export interface QualityFeatureGates {
+  /** False removes lit billboard variants from this tier. */
+  readonly lit?: boolean;
+  /** False removes scene-depth soft-particle sampling from this tier. */
+  readonly soft?: boolean;
+  /** False removes per-particle sorted-indirection variants from this tier. */
+  readonly sorted?: boolean;
+}
+
+export interface EmitterQualityTierOverride {
+  /** Logical live-particle ceiling relative to authored capacity. */
+  readonly capacityScale?: number;
+  readonly features?: QualityFeatureGates;
+  /** Multiplier applied to burst, rate, and per-distance spawn policies. */
+  readonly spawnRateScale?: number;
+}
+
+export type EmitterQualityTiers = Readonly<
+  Partial<Record<QualityTier, EmitterQualityTierOverride>>
+>;
+
+export interface EmitterBounds {
+  readonly center?: Vec3;
+  readonly radius: number;
+}
+
 export type EmitterIntegration = 'euler' | 'none';
 
 export interface EmitterConfig<
   Attributes extends AttributeSchema = AttributeSchema,
   Parameters extends ParameterSchema = EmptyParameterSchema,
 > {
+  /** Conservative local-space sphere used by instance culling and significance. */
+  readonly bounds?: EmitterBounds;
   readonly capacity: number;
   readonly attributes?: Attributes;
   readonly events?: Partial<Record<ParticleEventName, EventModule | readonly EventModule[]>>;
@@ -628,6 +658,8 @@ export interface EmitterConfig<
   readonly integration?: EmitterIntegration;
   readonly lifecycle?: EmitterLifecycle;
   readonly parameters?: Parameters;
+  /** Serializable per-emitter overrides layered over Nachi's four system quality presets. */
+  readonly quality?: EmitterQualityTiers;
   readonly render: RenderModule | readonly RenderModule[];
   readonly spawn: SpawnModule | readonly SpawnModule[];
   readonly update?: readonly UpdateModule[];
@@ -658,12 +690,14 @@ export interface EmitterOverrideConfig<
   Parameters extends ParameterSchema = EmptyParameterSchema,
 > {
   readonly attributes?: Attributes;
+  readonly bounds?: EmitterBounds;
   readonly capacity?: number;
   readonly events?: Partial<Record<ParticleEventName, EventModule | readonly EventModule[]>>;
   readonly init?: EmitterModuleListOverride<InitModule>;
   readonly integration?: EmitterIntegration;
   readonly lifecycle?: EmitterLifecycle;
   readonly parameters?: Parameters;
+  readonly quality?: EmitterQualityTiers;
   readonly render?: EmitterModuleListOverride<RenderModule>;
   /** Spawn policy is replaced as a unit; it is not a particle module-stack inheritance patch. */
   readonly spawn?: SpawnModule | readonly SpawnModule[];
@@ -744,9 +778,33 @@ export interface EffectConfig<
 > {
   readonly elements: Elements;
   readonly parameters?: Parameters;
+  readonly scalability?: EffectScalabilityConfig;
   readonly timeline?:
     | TimelineDefinition<Extract<keyof Elements, string>>
     | readonly TimelineEntry<Extract<keyof Elements, string>>[];
+}
+
+export interface EffectDistanceCulling {
+  /** Fully hidden and paused at or beyond this camera distance. */
+  readonly fadeEnd: number;
+  /** Fade starts here. Defaults to fadeEnd (a hard cut). */
+  readonly fadeStart?: number;
+}
+
+export interface EffectCullingConfig {
+  readonly distance?: EffectDistanceCulling;
+  /** Defaults to true when this culling object is present. */
+  readonly frustum?: boolean;
+}
+
+export interface EffectSignificanceConfig {
+  /** Author priority. Zero is neutral; larger values win budget contention. */
+  readonly priority?: number;
+}
+
+export interface EffectScalabilityConfig {
+  readonly culling?: EffectCullingConfig;
+  readonly significance?: EffectSignificanceConfig;
 }
 
 export interface EffectDefinition<
@@ -832,6 +890,8 @@ export type DefinitionParameterValues<Definition> = Readonly<
 export interface EffectSpawnOptions<Definition = EffectDefinition> {
   readonly parameters?: DefinitionParameterValues<Definition>;
   readonly position?: PositionInput;
+  /** Per-instance significance priority added to the authored effect priority. */
+  readonly priority?: number;
   readonly rotation?: RotationInput;
   readonly seed?: number;
   readonly timeScale?: number;
@@ -861,6 +921,7 @@ export interface EffectInstance<Definition = EffectDefinition> {
   readonly diagnostics: readonly VfxDiagnostic[];
   readonly id: string;
   readonly localTime: number;
+  readonly scalability: EffectScalabilityStatus;
   readonly state: EffectInstanceState;
   readonly timeScale: number;
   applyHitStop(durationMs: number, timeScale?: number): void;
@@ -876,6 +937,25 @@ export interface EffectInstance<Definition = EffectDefinition> {
   setTransform(position: PositionInput, rotation?: RotationInput): void;
   /** Stops scheduling immediately. GPU resources remain owned until release(). */
   stop(): void;
+}
+
+export type EffectScalabilityAction = 'culled' | 'full' | 'spawn-suppressed';
+
+export interface EffectSignificanceComponents {
+  readonly distance: number;
+  readonly distanceScore: number;
+  readonly priority: number;
+  readonly priorityScore: number;
+  readonly screenOccupancy: number;
+  readonly screenScore: number;
+}
+
+export interface EffectScalabilityStatus {
+  readonly action: EffectScalabilityAction;
+  readonly fade: number;
+  readonly reasons: readonly string[];
+  readonly score: number;
+  readonly significance: EffectSignificanceComponents;
 }
 
 export interface FxMaterialDefinition {

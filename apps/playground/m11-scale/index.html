@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M11 scalability</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">M11 / scalability &amp; debugging</p>
+        <h1>Quality, culling, and significance</h1>
+        <p>GPU readback and deterministic budget decisions across runtime quality paths.</p>
+      </header>
+      <canvas id="scale-visual" width="256" height="96"></canvas>
+      <dl class="status">
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Contract</dt>
+          <dd id="status-value">running</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/m11-scale.ts"></script>
+  </body>
+</html>

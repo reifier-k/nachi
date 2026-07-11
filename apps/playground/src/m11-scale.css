@@ -1,0 +1,48 @@
+:root {
+  color: #e7fbff;
+  background: #030710;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+.shell {
+  box-sizing: border-box;
+  display: grid;
+  gap: 1rem;
+  min-height: 100vh;
+  padding: 1.5rem;
+}
+header,
+.status {
+  max-width: 52rem;
+}
+.eyebrow,
+dt {
+  color: #64dcff;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+h1,
+p {
+  margin: 0.25rem 0;
+}
+canvas {
+  width: min(100%, 48rem);
+  image-rendering: pixelated;
+  border: 1px solid #17405a;
+}
+.status {
+  display: flex;
+  gap: 2rem;
+  margin: 0;
+}
+.status div {
+  display: grid;
+  gap: 0.25rem;
+}
+dd {
+  margin: 0;
+}

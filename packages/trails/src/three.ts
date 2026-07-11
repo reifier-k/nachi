@@ -340,7 +340,7 @@ export function materializeThreeRibbonDraw(
   });
   material.positionNode = center.add(side.mul(signedWidth)) as never;
   material.colorNode = fragmentColor.xyz as never;
-  material.opacityNode = fragmentColor.a as never;
+  material.opacityNode = fragmentColor.a.mul(node(kernels.uniforms['System.visibility']!)) as never;
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
 

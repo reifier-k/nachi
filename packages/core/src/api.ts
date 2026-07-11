@@ -235,6 +235,33 @@ function withoutUndefined<Value extends object>(value: Value | undefined): Parti
   ) as Partial<Value>;
 }
 
+function mergeEmitterQuality(
+  base: EmitterDefinition['quality'],
+  patch: EmitterOverrideConfig['quality'],
+): EmitterDefinition['quality'] {
+  const quality = Object.fromEntries(
+    (['low', 'medium', 'high', 'epic'] as const).flatMap((tier) => {
+      const inherited = base?.[tier];
+      const override = patch?.[tier];
+      if (!inherited && !override) return [];
+      const inheritedValues = withoutUndefined({ ...inherited, features: undefined });
+      const overrideValues = withoutUndefined({ ...override, features: undefined });
+      const features = {
+        ...(inherited?.features ?? {}),
+        ...withoutUndefined(override?.features),
+      };
+      const merged = {
+        ...inheritedValues,
+        ...withoutUndefined(overrideValues),
+        ...(Object.keys(features).length === 0 ? {} : { features }),
+      };
+      if (Object.keys(merged).length === 0) return [];
+      return [[tier, merged]];
+    }),
+  );
+  return Object.keys(quality).length === 0 ? undefined : quality;
+}
+
 function moduleIdentity(module: ModuleDefinition<ModuleStage, object>, index: number): string {
   return module.label === undefined ? `index:${index}` : `label:${module.label}`;
 }
@@ -466,12 +493,19 @@ function defineEmitterImplementation(
   }
   const base = baseOrConfig as EmitterConfig<AttributeSchema, ParameterSchema> &
     Partial<EmitterDefinition<AttributeSchema, ParameterSchema>>;
+  const normalizedQuality =
+    overrides === undefined
+      ? mergeEmitterQuality(undefined, base.quality)
+      : mergeEmitterQuality(base.quality, overrides.quality);
   const config =
     overrides === undefined
-      ? base
+      ? ({
+          ...withoutUndefined({ ...base, quality: undefined }),
+          ...(normalizedQuality === undefined ? {} : { quality: normalizedQuality }),
+        } as EmitterConfig<AttributeSchema, ParameterSchema>)
       : ({
           ...base,
-          ...withoutUndefined(overrides),
+          ...withoutUndefined({ ...overrides, quality: undefined }),
           attributes: {
             ...(base.attributes ?? {}),
             ...withoutUndefined(overrides.attributes),
@@ -483,6 +517,7 @@ function defineEmitterImplementation(
             ...(base.parameters ?? {}),
             ...withoutUndefined(overrides.parameters),
           },
+          ...(normalizedQuality === undefined ? {} : { quality: normalizedQuality }),
           render: mergeModuleList<RenderModule>(base.render, overrides.render, 'render'),
           update: mergeModuleList<UpdateModule>(base.update, overrides.update, 'update'),
         } as EmitterConfig<AttributeSchema, ParameterSchema>);
@@ -510,6 +545,45 @@ function defineEmitterImplementation(
     ...collectEmitterLifecycleDiagnostics(normalizedConfig),
     ...collectEmitterModuleLabelDiagnostics(normalizedConfig),
     ...collectParameterDeclarationDiagnostics(normalizedConfig.parameters),
+    ...(normalizedConfig.bounds &&
+    (!Number.isFinite(normalizedConfig.bounds.radius) || normalizedConfig.bounds.radius < 0)
+      ? [
+          {
+            code: 'NACHI_BOUNDS_INVALID',
+            message: 'Emitter bounds radius must be a non-negative finite number.',
+            path: 'bounds.radius',
+            phase: 'compile' as const,
+            severity: 'error' as const,
+          },
+        ]
+      : []),
+    ...(normalizedConfig.bounds?.center?.some((component) => !Number.isFinite(component))
+      ? [
+          {
+            code: 'NACHI_BOUNDS_INVALID',
+            message: 'Emitter bounds center must contain finite components.',
+            path: 'bounds.center',
+            phase: 'compile' as const,
+            severity: 'error' as const,
+          },
+        ]
+      : []),
+    ...Object.entries(normalizedConfig.quality ?? {}).flatMap(([tier, quality]) =>
+      ['capacityScale', 'spawnRateScale'].flatMap((key) => {
+        const value = quality?.[key as 'capacityScale' | 'spawnRateScale'];
+        return value !== undefined && (!Number.isFinite(value) || value < 0 || value > 1)
+          ? [
+              {
+                code: 'NACHI_QUALITY_SCALE_INVALID',
+                message: `${key} must be a finite number in [0, 1].`,
+                path: `quality.${tier}.${key}`,
+                phase: 'compile' as const,
+                severity: 'error' as const,
+              },
+            ]
+          : [];
+      }),
+    ),
   ];
   if (diagnostics.some(({ severity }) => severity === 'error')) {
     throw new VfxDiagnosticError(diagnostics);
@@ -1021,6 +1095,34 @@ export function defineEffect<
   }
   Object.assign(composed, explicit);
   diagnostics.push(...collectParameterDeclarationDiagnostics(composed));
+  const distance = config.scalability?.culling?.distance;
+  if (
+    distance &&
+    (!Number.isFinite(distance.fadeEnd) ||
+      distance.fadeEnd < 0 ||
+      (distance.fadeStart !== undefined &&
+        (!Number.isFinite(distance.fadeStart) ||
+          distance.fadeStart < 0 ||
+          distance.fadeStart > distance.fadeEnd)))
+  ) {
+    diagnostics.push({
+      code: 'NACHI_CULL_DISTANCE_INVALID',
+      message: 'Culling fadeStart/fadeEnd must be finite, non-negative, and fadeStart <= fadeEnd.',
+      path: 'scalability.culling.distance',
+      phase: 'compile',
+      severity: 'error',
+    });
+  }
+  const priority = config.scalability?.significance?.priority;
+  if (priority !== undefined && !Number.isFinite(priority)) {
+    diagnostics.push({
+      code: 'NACHI_SIGNIFICANCE_PRIORITY_INVALID',
+      message: 'Effect significance priority must be finite.',
+      path: 'scalability.significance.priority',
+      phase: 'compile',
+      severity: 'error',
+    });
+  }
   if (diagnostics.some(({ severity }) => severity === 'error')) {
     throw new VfxDiagnosticError(diagnostics);
   }

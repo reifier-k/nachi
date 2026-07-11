@@ -15,6 +15,19 @@ import { packedComponentIndex, resolvePackedAttributeAddress } from './attribute
 import { VfxDiagnosticError } from './diagnostics.js';
 import { collectEmitterModules } from './emitter-modules.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
+import {
+  applyEmitterQualityTier,
+  mergeBoundingSpheres,
+  qualityStructuralKey,
+  resolveEmitterQuality,
+  selectDeviceQualityTier,
+  significanceScore,
+  sphereIntersectsFrustum,
+  transformBoundingSphere,
+  type BoundingSphere,
+  type DeviceQualityProfile,
+  type QualityTierSelection,
+} from './scalability.js';
 import type {
   AttributeType,
   DefinitionParameterValue,
@@ -24,6 +37,8 @@ import type {
   EffectEventCallback,
   EffectEventSummary,
   EffectInstanceState,
+  EffectScalabilityStatus,
+  EffectScalabilityConfig,
   EffectSpawnOptions,
   EffectTransformSource,
   EmitterDefinition,
@@ -32,6 +47,7 @@ import type {
   ParameterSchema,
   PositionInput,
   RotationInput,
+  QualityTier,
   UserParameterKeys,
   VfxDiagnostic,
 } from './types.js';
@@ -39,6 +55,7 @@ import type {
 const DEFAULT_MAX_SUB_STEPS = 8;
 const DEFAULT_MAX_POOL_SIZE = 16;
 const DEFAULT_PREWARM_STEP_SECONDS = 1 / 60;
+const BUDGET_HYSTERESIS_SCORE = 0.05;
 const TIME_EPSILON = 1e-10;
 export const SPAWN_ORDER_WRAP_WARNING_THRESHOLD = 0x8000_0000;
 
@@ -64,6 +81,8 @@ export interface VfxRuntimeRenderer {
   releaseKernels?(kernels: BuiltEmitterKernels): void;
   setUniformValue?(uniform: KernelUniformNode, path: ParameterPath, value: unknown): void;
   setInstanceCount?(kernels: BuiltEmitterKernels, count: number): void;
+  /** Hides materialized draw objects when a fully culled instance skips rendering. */
+  setVisibility?(kernels: BuiltEmitterKernels, visible: boolean): void;
   /** Applies VFXSystem's stable far-to-near emitter order to backend draw objects. */
   setRenderOrder?(kernels: BuiltEmitterKernels, order: number): void;
   submitCompute(kernel: KernelComputeNode): Promise<void> | void;
@@ -79,18 +98,36 @@ export interface VfxFixedTimeStepOptions {
 }
 
 export interface VfxSystemOptions {
-  /** Read exact GPU alive count every N compactions; omitted keeps conservative draining. */
+  /**
+   * Read exact GPU alive count every N compactions. Omission uses maximum-lifetime estimates for
+   * completion and scaled logical capacity; WebGL2 still performs its required full readback.
+   */
   readonly aliveCountReadbackInterval?: number;
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
   /** Maximum released resource bundles retained per effect definition. Defaults to 16. */
   readonly maxPoolSize?: number;
   readonly now?: () => number;
   readonly prewarmStepSeconds?: number;
+  /** Defaults to epic for backward compatibility; pass auto to use device heuristics. */
+  readonly qualityTier?: QualityTier | 'auto';
+  /**
+   * Optional navigator.gpu snapshot used for synchronous automatic tier selection. Without it,
+   * auto selection can inspect backend limits but not optional features, so it tops out at medium.
+   */
+  readonly deviceProfile?: DeviceQualityProfile;
+  readonly significanceBudget?: VfxSignificanceBudget;
   /** Module/render compiler registrations supplied by optional packages. */
   readonly registry?: KernelModuleRegistry;
 }
 
+export interface VfxSignificanceBudget {
+  readonly maxActiveInstances?: number;
+  readonly maxParticles?: number;
+}
+
 export interface VfxCameraState {
+  /** Clip-space depth convention used by projectionMatrix. Defaults to WebGPU. */
+  readonly coordinateSystem?: 'webgl' | 'webgpu';
   /** World-to-view matrix in column-major order. */
   readonly viewMatrix: readonly number[];
   /** View-to-clip WebGPU projection matrix (NDC z in [0, 1]) in column-major order. */
@@ -101,6 +138,7 @@ export interface VfxCameraState {
 
 const IDENTITY_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 const DEFAULT_CAMERA_STATE: VfxCameraState = {
+  coordinateSystem: 'webgpu',
   projectionMatrix: IDENTITY_MATRIX,
   viewMatrix: IDENTITY_MATRIX,
   viewportSize: [1, 1],
@@ -121,7 +159,13 @@ export function sortEmittersBackToFront<T>(
     -(viewMatrix[2]! * x + viewMatrix[6]! * y + viewMatrix[10]! * z + viewMatrix[14]!);
   return [...entries].sort((left, right) => {
     const difference = depth(right) - depth(left);
-    return difference === 0 ? left.stableKey.localeCompare(right.stableKey) : difference;
+    return difference === 0
+      ? left.stableKey < right.stableKey
+        ? -1
+        : left.stableKey > right.stableKey
+          ? 1
+          : 0
+      : difference;
   });
 }
 
@@ -136,7 +180,15 @@ function validateCameraState(camera: VfxCameraState): VfxCameraState {
   if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
     throw new RangeError('viewportSize must contain positive finite dimensions.');
   }
+  if (
+    camera.coordinateSystem !== undefined &&
+    camera.coordinateSystem !== 'webgl' &&
+    camera.coordinateSystem !== 'webgpu'
+  ) {
+    throw new RangeError('coordinateSystem must be "webgl" or "webgpu".');
+  }
   return {
+    coordinateSystem: camera.coordinateSystem ?? 'webgpu',
     projectionMatrix: matrix(camera.projectionMatrix, 'projectionMatrix'),
     viewMatrix: matrix(camera.viewMatrix, 'viewMatrix'),
     viewportSize: [width, height],
@@ -435,6 +487,7 @@ type RuntimeEffectDefinition = {
   readonly elements: EffectElements;
   readonly kind: 'effect';
   readonly parameters?: ParameterSchema;
+  readonly scalability?: EffectScalabilityConfig;
 };
 
 type AdvanceContext = {
@@ -680,6 +733,7 @@ function validateSpawnParameterOverrides(
 }
 
 type SpawnAccumulator = { burstCycles: number; remainder: number };
+type LogicalSpawnBatch = { readonly count: number; readonly expiresAt: number };
 
 class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly controller: EmitterLifecycleController;
@@ -706,9 +760,15 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly #lastEventTotal = new Map<string, number>();
   #pendingDistance = 0;
   #pendingGpuSpawnRequested = 0;
+  #logicalAliveEstimate = 0;
+  readonly #logicalSpawnBatches: LogicalSpawnBatch[] = [];
+  #simulationTime = 0;
   #spawnOrderRequestTotal = 0;
   #spawnOrderWrapWarned = false;
   #spawnGeneration = 0;
+  #capacityScale = 1;
+  #spawnRateScale = 1;
+  #spawnSuppressed = false;
   #transform: readonly number[];
 
   constructor(
@@ -725,6 +785,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     eventInputs: readonly EventInputBinding[] = [],
     onEventAggregate: (summary: EffectEventSummary) => void = () => undefined,
     reusedKernels?: BuiltEmitterKernels,
+    qualityTier: QualityTier = 'epic',
   ) {
     this.program = program;
     this.#renderer = renderer;
@@ -738,6 +799,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.controller = new EmitterLifecycleController(definition.lifecycle);
     this.kernels =
       reusedKernels ?? program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
+    this.setQualityTier(qualityTier);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', transform);
     for (const [path, value] of Object.entries(parameters)) {
@@ -821,8 +883,43 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     ];
   }
 
+  get boundingSphere(): BoundingSphere {
+    const bounds = this.definition.bounds ?? { center: [0, 0, 0] as const, radius: 1_000 };
+    return transformBoundingSphere(
+      { center: bounds.center ?? [0, 0, 0], radius: bounds.radius },
+      this.#transform,
+    );
+  }
+
+  get estimatedParticleCost(): number {
+    return Math.max(0, Math.floor(this.definition.capacity * this.#capacityScale));
+  }
+
   setRenderOrder(order: number): void {
     this.#renderer.setRenderOrder?.(this.kernels, order);
+  }
+
+  setQualityTier(tier: QualityTier): void {
+    const quality = resolveEmitterQuality(this.definition, tier);
+    this.#capacityScale = quality.capacityScale;
+    this.#spawnRateScale = quality.spawnRateScale;
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.logicalCapacity',
+      this.estimatedParticleCost,
+    );
+  }
+
+  setScalability(spawnSuppressed: boolean, fade: number): void {
+    this.#spawnSuppressed = spawnSuppressed;
+    this.#renderer.setVisibility?.(this.kernels, fade > 0);
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'System.visibility',
+      Math.min(1, Math.max(0, fade)),
+    );
   }
 
   beginFinalEventDrain(): void {
@@ -947,6 +1044,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           await this.#renderer.submitCompute(this.kernels.update);
           updated = true;
           this.#emitterAge += step;
+          this.#simulationTime += step;
           setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.age', this.#emitterAge);
           setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.localTime', this.#emitterAge);
           if (command.phase === 'drain') {
@@ -962,6 +1060,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       this.#setFrameUniforms(deltaSeconds, context, this.controller.loopIndex);
       await this.#renderer.submitCompute(this.kernels.update);
       this.#emitterAge += deltaSeconds;
+      this.#simulationTime += deltaSeconds;
       this.#drainRemaining = Math.max(0, this.#drainRemaining - deltaSeconds);
       await this.#compactAlive();
     }
@@ -971,7 +1070,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     let count = 0;
     for (const module of this.program.spawn.modules) {
       if (module.type !== 'core/burst') continue;
-      count += this.#burstCount(module);
+      count += Math.floor(this.#burstCount(module) * this.#spawnRateScale);
       const accumulator = this.#accumulator(module);
       accumulator.burstCycles = 1;
     }
@@ -984,13 +1083,13 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     for (const module of this.program.spawn.modules) {
       const accumulator = this.#accumulator(module);
       if (module.type === 'core/rate') {
-        const rate = (module.config as { rate: number }).rate;
+        const rate = (module.config as { rate: number }).rate * this.#spawnRateScale;
         const exact = accumulator.remainder + rate * deltaSeconds;
         const emitted = Math.floor(exact + TIME_EPSILON);
         accumulator.remainder = exact - emitted;
         count += emitted;
       } else if (module.type === 'core/per-distance') {
-        const rate = (module.config as { rate: number }).rate;
+        const rate = (module.config as { rate: number }).rate * this.#spawnRateScale;
         const exact = accumulator.remainder + rate * distance;
         const emitted = Math.floor(exact + TIME_EPSILON);
         accumulator.remainder = exact - emitted;
@@ -1003,7 +1102,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           accumulator.burstCycles < cycles &&
           accumulator.burstCycles * interval <= nextAge + TIME_EPSILON
         ) {
-          count += this.#burstCount(module);
+          count += Math.floor(this.#burstCount(module) * this.#spawnRateScale);
           accumulator.burstCycles += 1;
         }
       }
@@ -1054,12 +1153,24 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   }
 
   async #dispatchSpawn(requestedCount: number): Promise<void> {
-    if (requestedCount <= 0) return;
+    if (requestedCount <= 0 || this.#spawnSuppressed) return;
     // Never encode more spawn invocations than physical slots. The GPU overflow counter handles
     // lower free-list availability; this clamp also makes malformed/extreme requests safe.
-    const dispatchCount = Math.min(requestedCount, this.definition.capacity);
+    const logicalCapacity = Math.floor(this.definition.capacity * this.#capacityScale);
+    this.#expireLogicalSpawnBatches();
+    // Full-quality behavior remains the physical allocator contract. In particular, an opt-in
+    // alive readback from an earlier frame must never reject a valid request at physical capacity.
+    const logicalAvailability =
+      logicalCapacity === this.definition.capacity
+        ? this.definition.capacity
+        : Math.max(0, logicalCapacity - this.#logicalAliveEstimate);
+    const dispatchCount = Math.min(requestedCount, this.definition.capacity, logicalAvailability);
+    if (dispatchCount <= 0) return;
+    this.#recordLogicalSpawn(dispatchCount);
     const cpuOverflow = Math.max(0, requestedCount - dispatchCount);
-    if (cpuOverflow > 0) this.#reportOverflow(requestedCount, cpuOverflow);
+    if (cpuOverflow > 0 && logicalCapacity === this.definition.capacity) {
+      this.#reportOverflow(requestedCount, cpuOverflow);
+    }
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.spawnCount', dispatchCount);
     if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
       const { finalizeSpawn, prepareSpawn, spawnDispatch } = this.kernels;
@@ -1083,6 +1194,32 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       }
     } else {
       await this.#renderer.submitCompute(this.kernels.spawn);
+    }
+  }
+
+  #expireLogicalSpawnBatches(): void {
+    while ((this.#logicalSpawnBatches[0]?.expiresAt ?? Infinity) <= this.#simulationTime) {
+      const batch = this.#logicalSpawnBatches.shift()!;
+      this.#logicalAliveEstimate = Math.max(0, this.#logicalAliveEstimate - batch.count);
+    }
+  }
+
+  #recordLogicalSpawn(count: number): void {
+    this.#logicalAliveEstimate += count;
+    this.#logicalSpawnBatches.push({
+      count,
+      expiresAt: this.#simulationTime + this.#maxLifetime,
+    });
+  }
+
+  #resetLogicalAliveEstimate(count: number): void {
+    this.#logicalAliveEstimate = count;
+    this.#logicalSpawnBatches.length = 0;
+    if (count > 0) {
+      this.#logicalSpawnBatches.push({
+        count,
+        expiresAt: this.#simulationTime + this.#maxLifetime,
+      });
     }
   }
 
@@ -1121,6 +1258,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       ) {
         const counters = new Uint32Array(await this.#renderer.readStorage(this.kernels.aliveCount));
         this.#exactAliveCount = counters[this.kernels.counterOffsets.aliveCount] ?? 0;
+        this.#resetLogicalAliveEstimate(this.#exactAliveCount);
         this.#exactAliveSequence = this.#compactSequence;
         const overflowCount = counters[this.kernels.counterOffsets.spawnOverflow] ?? 0;
         const overflow = (overflowCount - this.#lastOverflowCount) >>> 0;
@@ -1182,6 +1320,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         if ((flags[packedComponentIndex(particle, aliveAddress, 0)] ?? 0) !== 0) count += 1;
       }
       this.#exactAliveCount = count;
+      this.#resetLogicalAliveEstimate(count);
       this.#exactAliveSequence = this.#compactSequence;
       this.#renderer.setInstanceCount?.(this.kernels, count);
     }
@@ -1224,6 +1363,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
 type ReleasableEffectInstance = {
   readonly definition: RuntimeEffectDefinition;
   readonly id: string;
+  readonly poolKey: string;
   detachEmitterKernels(): ReadonlyMap<string, BuiltEmitterKernels>;
   recordDiagnostic(diagnostic: VfxDiagnostic): void;
   recordReleaseDiagnostic(diagnostic: VfxDiagnostic): void;
@@ -1236,11 +1376,26 @@ export class VfxEffectInstance<
 > implements EffectInstance<Definition> {
   readonly clock: EffectClock;
   readonly #diagnostics: VfxDiagnostic[] = [];
-  readonly #diagnosticCodes = new Set<string>();
+  readonly #diagnosticKeys = new Set<string>();
   readonly #emitters = new Map<string, RuntimeEmitter>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
   readonly #parameterDefinitions: ParameterSchema;
+  readonly #priority: number;
+  #scalability: EffectScalabilityStatus = {
+    action: 'full',
+    fade: 1,
+    reasons: [],
+    score: 0,
+    significance: {
+      distance: 0,
+      distanceScore: 1,
+      priority: 0,
+      priorityScore: 0,
+      screenOccupancy: 1,
+      screenScore: 2,
+    },
+  };
   #state: EffectInstanceState = 'active';
   #eventFrame = 0;
   #completionCandidateFrame: number | undefined;
@@ -1252,13 +1407,16 @@ export class VfxEffectInstance<
   constructor(
     readonly definition: Definition,
     readonly id: string,
+    readonly poolKey: string,
     timeScale: number,
     parameterDefinitions: ParameterSchema,
     onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void,
+    priority = 0,
   ) {
     this.clock = new EffectClock(timeScale);
     this.#parameterDefinitions = parameterDefinitions;
     this.#onRelease = onRelease;
+    this.#priority = priority;
   }
 
   get diagnostics(): readonly VfxDiagnostic[] {
@@ -1273,6 +1431,10 @@ export class VfxEffectInstance<
     return this.#state;
   }
 
+  get scalability(): EffectScalabilityStatus {
+    return this.#scalability;
+  }
+
   get timeScale(): number {
     return this.clock.timeScale;
   }
@@ -1283,6 +1445,67 @@ export class VfxEffectInstance<
 
   addEmitter(key: string, emitter: RuntimeEmitter): void {
     this.#emitters.set(key, emitter);
+  }
+
+  get boundingSphere(): BoundingSphere {
+    return mergeBoundingSpheres(
+      [...this.#emitters.values()].map((emitter) => emitter.boundingSphere),
+    );
+  }
+
+  get estimatedParticleCost(): number {
+    return [...this.#emitters.values()].reduce(
+      (total, emitter) => total + emitter.estimatedParticleCost,
+      0,
+    );
+  }
+
+  evaluateScalability(camera: VfxCameraState, cameraConfigured: boolean): EffectScalabilityStatus {
+    const sphere = this.boundingSphere;
+    const configuredPriority = this.definition.scalability?.significance?.priority ?? 0;
+    const significance = significanceScore({
+      camera,
+      priority: configuredPriority + this.#priority,
+      sphere,
+    });
+    const culling = this.definition.scalability?.culling;
+    const reasons: string[] = [];
+    let fade = 1;
+    if (culling?.distance) {
+      const { fadeEnd } = culling.distance;
+      const fadeStart = culling.distance.fadeStart ?? fadeEnd;
+      if (significance.distance >= fadeEnd) {
+        fade = 0;
+        reasons.push('distance');
+      } else if (significance.distance > fadeStart) {
+        fade = 1 - (significance.distance - fadeStart) / (fadeEnd - fadeStart);
+        reasons.push('distance-fade');
+      }
+    }
+    if ((culling?.frustum ?? culling !== undefined) && cameraConfigured) {
+      if (!sphereIntersectsFrustum(sphere, camera)) {
+        fade = 0;
+        reasons.push('frustum');
+      }
+    }
+    return {
+      action: fade <= 0 ? 'culled' : 'full',
+      fade,
+      reasons,
+      score: significance.score,
+      significance,
+    };
+  }
+
+  applyScalability(status: EffectScalabilityStatus): void {
+    this.#scalability = status;
+    for (const emitter of this.#emitters.values()) {
+      emitter.setScalability(status.action === 'spawn-suppressed', status.fade);
+    }
+  }
+
+  setQualityTier(tier: QualityTier): void {
+    for (const emitter of this.#emitters.values()) emitter.setQualityTier(tier);
   }
 
   /** @internal Supplies stable emitter keys to VFXSystem's coarse transparency sort. */
@@ -1420,9 +1643,9 @@ export class VfxEffectInstance<
     this.#diagnostics.push(diagnostic);
   }
 
-  recordDiagnosticOnce(diagnostic: VfxDiagnostic): void {
-    if (this.#state === 'released' || this.#diagnosticCodes.has(diagnostic.code)) return;
-    this.#diagnosticCodes.add(diagnostic.code);
+  recordDiagnosticOnce(diagnostic: VfxDiagnostic, key = diagnostic.code): void {
+    if (this.#state === 'released' || this.#diagnosticKeys.has(key)) return;
+    this.#diagnosticKeys.add(key);
     this.#diagnostics.push(diagnostic);
   }
 
@@ -1505,20 +1728,23 @@ function effectParameters(
 
 export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #aliveCountReadbackInterval: number | undefined;
-  readonly #compiledEffects = new WeakMap<RuntimeEffectDefinition, CompiledEffect>();
-  readonly #effectPools = new WeakMap<RuntimeEffectDefinition, EffectResourcePool>();
+  readonly #compiledEffects = new WeakMap<RuntimeEffectDefinition, Map<string, CompiledEffect>>();
+  readonly #effectPools = new WeakMap<RuntimeEffectDefinition, Map<string, EffectResourcePool>>();
   readonly #fixedStep: FixedStepAccumulator | undefined;
   readonly #instances = new Map<string, VfxEffectInstance<RuntimeEffectDefinition>>();
   readonly #now: () => number;
   readonly #maxPoolSize: number;
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
+  readonly #significanceBudget: Required<VfxSignificanceBudget>;
+  readonly #budgetAdmittedInstances = new Set<string>();
   #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
   #cameraConfigured = false;
   #compilationCount = 0;
   #deviceLossDiagnostic?: VfxDiagnostic;
   #instanceSequence = 0;
   #lastTimestamp?: number;
+  #qualitySelection: QualityTierSelection;
   #systemTime = 0;
   #updateQueue: Promise<void> = Promise.resolve();
   #updateInFlight = false;
@@ -1530,6 +1756,33 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   ) {
     this.#aliveCountReadbackInterval = options.aliveCountReadbackInterval;
     this.#registry = options.registry;
+    const runtimeRenderer = asRuntimeRenderer(renderer);
+    const automaticSelection = selectDeviceQualityTier(
+      options.deviceProfile ?? {
+        backend: runtimeRenderer?.kernelAdapter.capabilities.backend ?? 'webgl2',
+        features: [],
+        limits: runtimeRenderer?.kernelAdapter.deviceLimits ?? {},
+      },
+    );
+    const configuredTier = options.qualityTier ?? 'epic';
+    this.#qualitySelection =
+      configuredTier !== 'auto'
+        ? {
+            ...automaticSelection,
+            reasons: [`VFXSystem qualityTier selected ${configuredTier}.`],
+            source: 'override',
+            tier: configuredTier,
+          }
+        : automaticSelection;
+    this.#significanceBudget = {
+      maxActiveInstances: options.significanceBudget?.maxActiveInstances ?? Number.MAX_SAFE_INTEGER,
+      maxParticles: options.significanceBudget?.maxParticles ?? Number.MAX_SAFE_INTEGER,
+    };
+    for (const [name, value] of Object.entries(this.#significanceBudget)) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new RangeError(`significanceBudget.${name} must be a non-negative safe integer.`);
+      }
+    }
     this.#maxPoolSize = options.maxPoolSize ?? DEFAULT_MAX_POOL_SIZE;
     if (!Number.isSafeInteger(this.#maxPoolSize) || this.#maxPoolSize < 0) {
       throw new RangeError('maxPoolSize must be a non-negative safe integer.');
@@ -1554,7 +1807,6 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     }
     this.#now = options.now ?? (() => globalThis.performance?.now() ?? Date.now());
 
-    const runtimeRenderer = asRuntimeRenderer(renderer);
     if (runtimeRenderer?.deviceLost) {
       void runtimeRenderer.deviceLost.then(
         (info) => this.#handleDeviceLoss(info),
@@ -1575,11 +1827,52 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     return this.#instances.size;
   }
 
+  get qualitySelection(): QualityTierSelection {
+    return this.#qualitySelection;
+  }
+
+  setQualityTier(tier: QualityTier): void {
+    if (!['low', 'medium', 'high', 'epic'].includes(tier)) {
+      throw new RangeError(`Unknown quality tier ${String(tier)}.`);
+    }
+    const previous = this.#qualitySelection.tier;
+    if (previous === tier) return;
+    this.#qualitySelection = {
+      ...this.#qualitySelection,
+      reasons: [`Runtime quality override selected ${tier}.`],
+      source: 'override',
+      tier,
+    };
+    for (const instance of this.#instances.values()) {
+      instance.setQualityTier(tier);
+      if (
+        this.#qualityPoolKey(instance.definition, previous) !==
+        this.#qualityPoolKey(instance.definition, tier)
+      ) {
+        instance.recordDiagnosticOnce(
+          runtimeDiagnostic(
+            'NACHI_QUALITY_RESTART_REQUIRED',
+            `Quality ${previous} -> ${tier} changed a compiled soft/lit/sorted gate. Runtime spawn/capacity scales changed immediately; compiled rendering changes on the next spawn.`,
+            'VFXSystem.qualityTier',
+            'warning',
+          ),
+          `NACHI_QUALITY_RESTART_REQUIRED:${tier}`,
+        );
+      }
+    }
+  }
+
   getPooledInstanceCount<
     const Elements extends EffectElements,
     const Parameters extends ParameterSchema,
   >(definition: EffectDefinition<Elements, Parameters>): number {
-    return this.#effectPools.get(definition as RuntimeEffectDefinition)?.resources.length ?? 0;
+    return (
+      this.#effectPools
+        .get(definition as RuntimeEffectDefinition)
+        ?.get(
+          this.#qualityPoolKey(definition as RuntimeEffectDefinition, this.#qualitySelection.tier),
+        )?.resources.length ?? 0
+    );
   }
 
   get time(): number {
@@ -1596,6 +1889,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         instance.recordDiagnosticOnce(reverseZDiagnostic);
       }
     }
+    this.#updateScalability();
     this.#updateTransparencyOrder();
   }
 
@@ -1608,12 +1902,21 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   ): VfxEffectInstance<EffectDefinition<Elements, Parameters>> {
     const id = `nachi-effect-${++this.#instanceSequence}`;
     const parameterDefinitions = (definition.parameters ?? {}) as ParameterSchema;
+    if (options.priority !== undefined && !Number.isFinite(options.priority)) {
+      throw new RangeError('EffectSpawnOptions.priority must be finite.');
+    }
+    const poolKey = this.#qualityPoolKey(
+      definition as RuntimeEffectDefinition,
+      this.#qualitySelection.tier,
+    );
     const instance = new VfxEffectInstance<EffectDefinition<Elements, Parameters>>(
       definition,
       id,
+      poolKey,
       options.timeScale ?? 1,
       parameterDefinitions,
       (releasedInstance, poolable) => this.#releaseInstance(releasedInstance, poolable),
+      options.priority ?? 0,
     );
     this.#instances.set(id, instance);
 
@@ -1635,8 +1938,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         throw new Error('VFXSystem renderer must provide kernelAdapter and submitCompute().');
       }
       const materializationRenderer = runtimeRenderer;
-      const compiled = this.#compile(definition);
-      pooled = this.#takePooledResources(definition);
+      const compiled = this.#compile(definition, this.#qualitySelection.tier);
+      pooled = this.#takePooledResources(definition, poolKey);
       const usesSceneDepth = compiled.emitters.some(({ program }) =>
         program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth'),
       );
@@ -1696,6 +1999,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
                 }),
           (summary) => instance.emitEventSummary(summary),
           pooled?.kernelsByEmitter.get(entry.key),
+          this.#qualitySelection.tier,
         );
         runtimeEmitter.setCamera(this.#cameraState);
         instance.addEmitter(entry.key, runtimeEmitter);
@@ -1720,6 +2024,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
             ];
       for (const diagnostic of diagnostics) instance.markError(diagnostic);
     }
+    this.#updateScalability();
     return instance;
   }
 
@@ -1742,8 +2047,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           }
           instance.syncAttachment();
         }
+        this.#updateScalability();
         this.#updateTransparencyOrder();
         for (const instance of this.#instances.values()) {
+          if (instance.scalability.action === 'culled') continue;
           await this.#advanceInstance(instance, () =>
             instance.initialize(this.#systemTime, this.#prewarmStepSeconds),
           );
@@ -1752,8 +2059,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         for (const step of steps) {
           this.#systemTime += step;
           for (const instance of this.#instances.values()) instance.syncAttachment();
+          this.#updateScalability();
           this.#updateTransparencyOrder();
           for (const instance of this.#instances.values()) {
+            if (instance.scalability.action === 'culled') continue;
             await this.#advanceInstance(instance, () =>
               instance.advance(step, this.#systemTime, this.#prewarmStepSeconds),
             );
@@ -1766,6 +2075,78 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const scheduled = this.#updateQueue.then(run, run);
     this.#updateQueue = scheduled.catch(() => undefined);
     return scheduled;
+  }
+
+  #updateScalability(): void {
+    const evaluated = [...this.#instances.values()]
+      .filter((instance) => instance.state === 'active')
+      .map((instance) => {
+        if (!this.#cameraConfigured && instance.definition.scalability) {
+          instance.recordDiagnosticOnce(
+            runtimeDiagnostic(
+              'NACHI_SCALABILITY_CAMERA_UNSET',
+              'Distance/frustum/significance evaluation is using the identity camera because VFXSystem.setCamera() was not called.',
+              'System.viewMatrix',
+              'warning',
+            ),
+          );
+        }
+        return {
+          instance,
+          status: instance.evaluateScalability(this.#cameraState, this.#cameraConfigured),
+        };
+      });
+    const candidates = evaluated
+      .filter(({ status }) => status.action !== 'culled')
+      .sort((left, right) => {
+        const leftScore =
+          left.status.score +
+          (this.#budgetAdmittedInstances.has(left.instance.id) ? BUDGET_HYSTERESIS_SCORE : 0);
+        const rightScore =
+          right.status.score +
+          (this.#budgetAdmittedInstances.has(right.instance.id) ? BUDGET_HYSTERESIS_SCORE : 0);
+        const difference = rightScore - leftScore;
+        return difference === 0
+          ? left.instance.id < right.instance.id
+            ? -1
+            : left.instance.id > right.instance.id
+              ? 1
+              : 0
+          : difference;
+      });
+    let activeInstances = 0;
+    let particles = 0;
+    const budgeted = new Map<string, EffectScalabilityStatus>();
+    const nextBudgetAdmittedInstances = new Set<string>();
+    for (const { instance, status } of candidates) {
+      if (activeInstances >= this.#significanceBudget.maxActiveInstances) {
+        budgeted.set(instance.id, {
+          ...status,
+          action: 'culled',
+          fade: 0,
+          reasons: [...status.reasons, 'significance-instance-budget'],
+        });
+        continue;
+      }
+      activeInstances += 1;
+      nextBudgetAdmittedInstances.add(instance.id);
+      const cost = instance.estimatedParticleCost;
+      if (particles + cost > this.#significanceBudget.maxParticles) {
+        budgeted.set(instance.id, {
+          ...status,
+          action: 'spawn-suppressed',
+          reasons: [...status.reasons, 'significance-particle-budget'],
+        });
+        continue;
+      }
+      particles += cost;
+      budgeted.set(instance.id, status);
+    }
+    for (const { instance, status } of evaluated) {
+      instance.applyScalability(budgeted.get(instance.id) ?? status);
+    }
+    this.#budgetAdmittedInstances.clear();
+    for (const id of nextBudgetAdmittedInstances) this.#budgetAdmittedInstances.add(id);
   }
 
   #updateTransparencyOrder(): void {
@@ -1796,8 +2177,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     for (const [rank, entry] of ordered.entries()) entry.value.setRenderOrder(1_000 + rank);
   }
 
-  #compile(definition: RuntimeEffectDefinition): CompiledEffect {
-    const cached = this.#compiledEffects.get(definition);
+  #compile(definition: RuntimeEffectDefinition, tier: QualityTier): CompiledEffect {
+    const cacheKey = this.#qualityPoolKey(definition, tier);
+    const cache = this.#compiledEffects.get(definition);
+    const cached = cache?.get(cacheKey);
     if (cached) return cached;
     const emitterDefinitions = Object.entries(definition.elements).filter(
       (entry): entry is [string, EmitterDefinition] => entry[1].kind === 'emitter',
@@ -1822,7 +2205,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       }
     }
     const emitters = emitterDefinitions
-      .map(([key, emitter]) => {
+      .map(([key, authoredDefinition]) => {
+        const emitter = applyEmitterQualityTier(authoredDefinition, tier);
         return {
           definition: emitter,
           key,
@@ -1904,14 +2288,26 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       ...emitters.map(({ key }) => eventDepth(key, new Set([key]))),
     );
     const compiled = { emitters, eventDrainFrames, eventLinks };
-    this.#compiledEffects.set(definition, compiled);
+    const nextCache = cache ?? new Map<string, CompiledEffect>();
+    nextCache.set(cacheKey, compiled);
+    this.#compiledEffects.set(definition, nextCache);
     this.#compilationCount += 1;
     return compiled;
   }
 
-  #takePooledResources(definition: RuntimeEffectDefinition): PooledEffectResources | undefined {
-    const pool = this.#effectPools.get(definition);
+  #takePooledResources(
+    definition: RuntimeEffectDefinition,
+    poolKey: string,
+  ): PooledEffectResources | undefined {
+    const pool = this.#effectPools.get(definition)?.get(poolKey);
     return pool?.resources.pop();
+  }
+
+  #qualityPoolKey(definition: RuntimeEffectDefinition, tier: QualityTier): string {
+    return Object.entries(definition.elements)
+      .filter((entry): entry is [string, EmitterDefinition] => entry[1].kind === 'emitter')
+      .map(([key, emitter]) => `${key}:${qualityStructuralKey(emitter, tier)}`)
+      .join('|');
   }
 
   #releaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
@@ -1928,7 +2324,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   #retainOrReleaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
     const definition = instance.definition;
-    const pool = this.#effectPools.get(definition) ?? { resources: [] };
+    const pools = this.#effectPools.get(definition) ?? new Map<string, EffectResourcePool>();
+    const pool = pools.get(instance.poolKey) ?? { resources: [] };
     if (!poolable || this.#maxPoolSize === 0 || pool.resources.length >= this.#maxPoolSize) {
       if (poolable && pool.resources.length >= this.#maxPoolSize && this.#maxPoolSize > 0) {
         instance.recordReleaseDiagnostic({
@@ -1945,7 +2342,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const kernelsByEmitter = instance.takeEmitterKernelsForPooling();
     if (kernelsByEmitter.size === 0) return;
     pool.resources.push({ kernelsByEmitter });
-    this.#effectPools.set(definition, pool);
+    pools.set(instance.poolKey, pool);
+    this.#effectPools.set(definition, pools);
   }
 
   #measuredDelta(): number {

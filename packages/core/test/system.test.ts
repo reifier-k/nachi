@@ -1727,3 +1727,198 @@ describe('VFXSystem runtime scheduler', () => {
     );
   });
 });
+
+describe('M11 VFXSystem scalability scheduling', () => {
+  const camera = {
+    projectionMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    viewMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    viewportSize: [320, 180] as const,
+  };
+
+  it('fades by distance, pauses update/local time while culled, and resumes deterministically', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          bounds: { center: [0.2, -0.1, 0], radius: 0.25 },
+          capacity: 32,
+          init: [lifetime(2)],
+          lifecycle: { duration: 10, loopCount: 'infinite' },
+          render: computeRender,
+          spawn: rate(10),
+        }),
+      },
+      scalability: {
+        culling: { distance: { fadeEnd: 6, fadeStart: 4 }, frustum: false },
+      },
+    });
+    const instance = system.spawn(definition, { position: [0, 0, 5] });
+    expect(instance.scalability.action).toBe('full');
+    expect(instance.scalability.fade).toBeGreaterThan(0.35);
+    expect(instance.scalability.fade).toBeLessThan(0.65);
+    await system.update(0.1);
+    const visibleTime = instance.localTime;
+    const submissions = renderer.submissions.length;
+    instance.setTransform([0, 0, 7]);
+    await system.update(0.5);
+    expect(instance.scalability).toMatchObject({ action: 'culled', fade: 0 });
+    expect(instance.scalability.reasons).toContain('distance');
+    expect(instance.localTime).toBe(visibleTime);
+    expect(renderer.submissions).toHaveLength(submissions);
+    instance.setTransform([0, 0, 1]);
+    await system.update(0.1);
+    expect(instance.scalability.action).toBe('full');
+    expect(instance.localTime).toBeCloseTo(visibleTime + 0.1);
+  });
+
+  it('keeps the higher deterministic significance score inside the instance budget', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      significanceBudget: { maxActiveInstances: 1, maxParticles: 100 },
+    });
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          bounds: { center: [0.15, -0.2, 0.4], radius: 0.2 },
+          capacity: 10,
+          render: computeRender,
+          spawn: burst({ count: 1 }),
+        }),
+      },
+      scalability: { significance: { priority: 0 } },
+    });
+    const low = system.spawn(definition, { position: [0, 0, 0.5], priority: 0 });
+    const high = system.spawn(definition, { position: [0, 0, 0.5], priority: 2 });
+    expect(high.scalability.action).toBe('full');
+    expect(low.scalability.action).toBe('culled');
+    expect(low.scalability.reasons).toContain('significance-instance-budget');
+    expect(high.scalability.score).toBeGreaterThan(low.scalability.score);
+  });
+
+  it('keeps the admitted instance through a narrow score crossing and switches outside the band', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      significanceBudget: { maxActiveInstances: 1, maxParticles: 100 },
+    });
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          bounds: { radius: 0.01 },
+          capacity: 1,
+          render: computeRender,
+          spawn: burst({ count: 0 }),
+        }),
+      },
+      scalability: { significance: { priority: 0 } },
+    });
+    const admitted = system.spawn(definition, { position: [0, 0, 2] });
+    const challenger = system.spawn(definition, { position: [0, 0, 1.9] });
+    expect(challenger.scalability.score).toBeGreaterThan(admitted.scalability.score);
+    expect(admitted.scalability.action).toBe('full');
+    expect(challenger.scalability.action).toBe('culled');
+
+    challenger.setTransform([0, 0, 0.1]);
+    await system.update(0);
+    expect(challenger.scalability.action).toBe('full');
+    expect(admitted.scalability.action).toBe('culled');
+  });
+
+  it('enforces scaled logical capacity without readback and expires conservative births by lifetime', async () => {
+    const definition = (particleLifetime: number) =>
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 8,
+            init: [lifetime(particleLifetime)],
+            lifecycle: { duration: 10, loopCount: 'infinite' },
+            quality: { low: { capacityScale: 0.5, spawnRateScale: 1 } },
+            render: computeRender,
+            spawn: rate(8),
+          }),
+        },
+      });
+
+    const conservativeRenderer = new FakeRuntimeRenderer();
+    const conservative = new VFXSystem(conservativeRenderer, undefined, { qualityTier: 'low' });
+    conservative.spawn(definition(10));
+    await conservative.update(0.5);
+    await conservative.update(0.5);
+    expect(
+      conservativeRenderer.submissions.filter((name) => name === 'NachiEmitterSpawn'),
+    ).toHaveLength(1);
+
+    const expiringRenderer = new FakeRuntimeRenderer();
+    const expiring = new VFXSystem(expiringRenderer, undefined, { qualityTier: 'low' });
+    expiring.spawn(definition(0.5));
+    await expiring.update(0.5);
+    await expiring.update(0.5);
+    expect(
+      expiringRenderer.submissions.filter((name) => name === 'NachiEmitterSpawn'),
+    ).toHaveLength(2);
+  });
+
+  it('does not apply stale alive readback as a CPU clamp at physical capacity', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 3 });
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 4,
+            init: [lifetime(10)],
+            lifecycle: { duration: 1 },
+            render: computeRender,
+            spawn: burst({ count: 1, cycles: 3, interval: 0.1 }),
+          }),
+        },
+      }),
+    );
+    await system.update(0);
+    const emitter = instance.getEmitter('particles')!;
+    const counters = new Uint32Array(32);
+    counters[emitter.kernels.counterOffsets.aliveCount] = 4;
+    renderer.storageValues.set(emitter.kernels.aliveCount, counters);
+    await system.update(0.1);
+    await system.update(0.1);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(3);
+  });
+
+  it('applies uniform quality scales live and isolates structural variants by spawn/pool key', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, { qualityTier: 'epic' });
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 16,
+          quality: { low: { capacityScale: 0.125, spawnRateScale: 0.25 } },
+          render: billboard({ blending: 'alpha', lit: true, soft: true, sorted: true }),
+          spawn: burst({ count: 8 }),
+        }),
+      },
+    });
+    const epic = system.spawn(definition);
+    expect(epic.getEmitter('particles')?.program.draws[0]).toMatchObject({
+      fragment: { lit: expect.any(Object), soft: expect.any(Object) },
+      indirect: { physicalIndex: 'sorted-indices' },
+    });
+    system.setQualityTier('low');
+    expect(epic.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_QUALITY_RESTART_REQUIRED' }),
+    );
+    const low = system.spawn(definition);
+    const lowDraw = low.getEmitter('particles')?.program.draws[0];
+    expect(lowDraw).toMatchObject({
+      indirect: { physicalIndex: 'alive-indices' },
+    });
+    expect(lowDraw?.kind === 'billboard' && 'lit' in lowDraw.fragment).toBe(false);
+    expect(lowDraw?.kind === 'billboard' && 'soft' in lowDraw.fragment).toBe(false);
+    expect(system.compilationCount).toBe(2);
+
+    system.setQualityTier('epic');
+    system.setQualityTier('low');
+    expect(
+      epic.diagnostics.filter(({ code }) => code === 'NACHI_QUALITY_RESTART_REQUIRED'),
+    ).toHaveLength(2);
+  });
+});

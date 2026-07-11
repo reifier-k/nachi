@@ -1,5 +1,6 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
+  applyEmitterQualityTier,
   billboard,
   bakeSdf,
   burst,
@@ -32,6 +33,7 @@ import type { EffectInstanceState } from '@nachi/core';
 import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
 import { materializeThreeRibbonDraw } from '@nachi/trails/three';
 import * as THREE from 'three/webgpu';
+import { context } from 'three/tsl';
 
 import {
   createThreeKernelAdapter,
@@ -54,6 +56,79 @@ import {
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
+  it('keeps the M11 WebGL2 scale probes within burst and transform-feedback limits', () => {
+    const adapter = createThreeKernelAdapter({
+      backend: 'webgl2',
+      maxTransformFeedbackSeparateAttribs: 4,
+    });
+    const programs = [
+      compileEmitter(
+        applyEmitterQualityTier(
+          defineEmitter({
+            bounds: { center: [0.13, -0.09, 0], radius: 0.4 },
+            capacity: 8,
+            lifecycle: { duration: 20 },
+            quality: { low: { capacityScale: 0.5, spawnRateScale: 1 } },
+            render: billboard({ blending: 'alpha', lit: true, soft: true, sorted: true }),
+            spawn: burst({ count: 8 }),
+          }),
+          'low',
+        ),
+      ),
+      compileEmitter(
+        defineEmitter({
+          capacity: 8,
+          quality: { low: { capacityScale: 1, spawnRateScale: 0.25 } },
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 8 }),
+        }),
+      ),
+    ];
+
+    for (const program of programs) {
+      expect(program.spawn.modules.map(({ type }) => type)).toEqual(['core/burst']);
+      expect(program.meta.backendBudgets.webgl2.initializeVaryingCount).toBe(3);
+      expect(() => program.buildKernels(adapter)).not.toThrow();
+    }
+  });
+
+  it('isolates identical WebGL2 emitter transform-feedback resources by shader identity', () => {
+    const adapter = createThreeKernelAdapter({ backend: 'webgl2' });
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 8,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 8 }),
+      }),
+    );
+    const first = program.buildKernels(adapter);
+    const second = program.buildKernels(adapter);
+    const storageName = (kernels: typeof first) =>
+      (kernels.storages.alive as { name?: string } | undefined)?.name;
+    const renderer = {
+      backend: { capabilities: { getUniformBufferLimit: () => 64 } },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+    };
+    const NodeBuilder = THREE.GLSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const shader = (kernel: unknown) => {
+      const builder = new NodeBuilder(kernel, renderer);
+      builder.build();
+      return builder.computeShader;
+    };
+
+    expect(storageName(first)).toMatch(/^NachiParticles_.*_WebGL2_\d+$/);
+    expect(storageName(second)).toMatch(/^NachiParticles_.*_WebGL2_\d+$/);
+    expect(storageName(first)).not.toBe(storageName(second));
+    expect(shader(first.initialize)).not.toBe(shader(second.initialize));
+    expect(shader(first.spawn)).not.toBe(shader(second.spawn));
+    expect(shader(first.update)).not.toBe(shader(second.update));
+  });
+
   it('materializes a bounded PointLight pool and projection-box decal', async () => {
     const lightProgram = compileEmitter(
       defineEmitter({
@@ -64,13 +139,27 @@ describe('three kernel adapter', () => {
         spawn: burst({ count: 12 }),
       }),
     );
-    const lightKernels = lightProgram.buildKernels(createThreeKernelAdapter());
+    const lightAdapter = createThreeKernelAdapter();
+    const lightKernels = lightProgram.buildKernels(lightAdapter);
     const lightDraw = materializeThreeLightDraw(lightProgram, lightKernels);
     expect(lightDraw.lights).toHaveLength(3);
     expect(lightDraw.lights.every(({ visible }) => visible)).toBe(true);
     expect(lightDraw.lights.every(({ intensity }) => intensity === 0)).toBe(true);
     expect(lightDraw.selectionBuffers).toHaveLength(2);
     expect(lightDraw.selectionKernels).toHaveLength(2);
+    const lightRuntime = createThreeRuntimeRenderer(
+      {
+        async computeAsync() {},
+        async getArrayBufferAsync() {
+          return new ArrayBuffer(0);
+        },
+      } as unknown as THREE.WebGPURenderer,
+      lightAdapter,
+    );
+    lightRuntime.setVisibility?.(lightKernels, false);
+    expect(lightDraw.group.visible).toBe(false);
+    lightRuntime.setVisibility?.(lightKernels, true);
+    expect(lightDraw.group.visible).toBe(true);
     expectTypeOf<Parameters<typeof lightDraw.update>[1]>().toEqualTypeOf<
       EffectInstanceState | undefined
     >();
@@ -140,6 +229,7 @@ describe('three kernel adapter', () => {
     expect(program.draws[0]).toMatchObject({ kind: 'ribbon', requiresBackend: 'webgpu' });
     expect(draw.prepareKernel).toBeDefined();
     expect(draw.mesh.geometry.getIndirect()).toBe(draw.indirect);
+    expect(draw.mesh.material.opacityNode).not.toBeNull();
     expect(() =>
       materializeThreeRibbonDraw(program, {
         ...kernels,
@@ -622,6 +712,30 @@ describe('three kernel adapter', () => {
 
     expect((indirect.array as Uint32Array)[instanceCountOffset]).toBe(0);
     expect(indirect.updateRanges).toContainEqual({ count: 1, start: instanceCountOffset });
+  });
+
+  it('applies culling visibility both before and after draw materialization', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 2,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 2 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const renderer = {
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return new ArrayBuffer(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    runtime.setVisibility?.(kernels, false);
+    const mesh = materializeThreeSpriteDraw(program, kernels);
+    expect(mesh.visible).toBe(false);
+    runtime.setVisibility?.(kernels, true);
+    expect(mesh.visible).toBe(true);
   });
 
   it('keeps the first materialize-to-render indirect record fully defined', () => {

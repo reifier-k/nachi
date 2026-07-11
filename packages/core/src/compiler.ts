@@ -70,6 +70,7 @@ import type {
 
 export const DEFAULT_LUT_RESOLUTION = 256;
 export const DEFAULT_WORKGROUP_SIZE = 64;
+let webgl2KernelResourceSequence = 0;
 /** Measured peak magnitude of Three r185's centered snoise scalar. */
 export const TURBULENCE_SIMPLEX_AMPLITUDE = 0.286;
 /** Measured peak magnitude of the centered finite-difference simplex potential curl. */
@@ -1610,11 +1611,13 @@ function uniformDescriptions(
     describe('System.projectionMatrix', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
     describe('System.viewMatrix', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
     describe('System.viewportSize', [1, 1], 'vec2'),
+    describe('System.visibility', 1, 'f32'),
     describe('Emitter.age', 0, 'f32'),
     describe('Emitter.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
     describe('Emitter.eventReadBank', 1, 'u32'),
     describe('Emitter.eventWriteBank', 0, 'u32'),
     describe('Emitter.localTime', 0, 'f32'),
+    describe('Emitter.logicalCapacity', 0, 'u32'),
     describe('Emitter.loopIndex', 0, 'u32'),
     describe('Emitter.seed', options.emitterSeed ?? 0, 'u32'),
     describe('Emitter.spawnCount', 0, 'u32'),
@@ -2664,6 +2667,21 @@ function createBuildKernels(
   return (adapter, options = {}) => {
     const buildDiagnostics = [...program.diagnostics];
     const backend = adapter.capabilities.backend;
+    // Three r185 caches WebGL fallback ProgrammableStage objects by shader source, while each
+    // stage retains the transform-feedback attribute nodes from its first materialization. Embed
+    // an algebraic no-op identity in each WebGL2 kernel so otherwise-identical emitter programs
+    // cannot reuse a stage bound to another instance's dual buffers.
+    const webgl2ResourceIdentity =
+      backend === 'webgl2' ? ++webgl2KernelResourceSequence : undefined;
+    const resourceSuffix =
+      webgl2ResourceIdentity === undefined ? '' : `_WebGL2_${webgl2ResourceIdentity}`;
+    const resourceName = (name: string) => `${name}${resourceSuffix}`;
+    const kernelInstanceIndex = (): KernelNode => {
+      const index = adapter.uint(adapter.instanceIndex);
+      if (webgl2ResourceIdentity === undefined) return index;
+      const identity = adapter.uint(adapter.constant(webgl2ResourceIdentity, 'u32'));
+      return index.bitXor(identity).bitXor(identity);
+    };
     if (backend === 'webgl2') {
       if (program.events.length > 0 || (options.eventInputs?.length ?? 0) > 0) {
         buildDiagnostics.push({
@@ -2889,7 +2907,7 @@ function createBuildKernels(
     const storageByIndex = program.attributeSchema.storageArrays.map((storage) =>
       adapter
         .instancedArray(storage.length, storage.type)
-        .setName(`NachiParticles_${storage.name}`),
+        .setName(resourceName(`NachiParticles_${storage.name}`)),
     );
     const storages: Record<string, KernelStorageNode> = {};
     for (const storage of program.attributeSchema.storageArrays) {
@@ -2928,7 +2946,7 @@ function createBuildKernels(
       : undefined;
     const lifecycleBase = adapter.instancedArray(stateLayout.wordCount, 'uint');
     const lifecycleStorage = (gpuLifecycle ? lifecycleBase.toAtomic() : lifecycleBase).setName(
-      'NachiLifecycleState',
+      resourceName('NachiLifecycleState'),
     );
     const counterOffsets = {
       aliveCount: stateLayout.fields.aliveCount.offsetWords,
@@ -3035,6 +3053,16 @@ function createBuildKernels(
       for (let component = 0; component < attribute.components; component += 1) {
         lanes[component]!.assign(sources[component]!);
       }
+    };
+    const isolateWebglComputeStage = (): void => {
+      if (webgl2ResourceIdentity === undefined) return;
+      const rawIndex = adapter.uint(adapter.instanceIndex);
+      const isolatedIndex = kernelInstanceIndex();
+      // The self-store is semantically neutral, but keeps the per-materialization identity in the
+      // emitted GLSL even when WebGL lowers indexed storage access to the current vertex varying.
+      adapter.branch(isolatedIndex.equal(rawIndex), () => {
+        writeAttribute('alive', attributeNode('alive', rawIndex), rawIndex);
+      });
     };
     const eventStateElement = (resources: EventQueueResources, offset: KernelNodeInput) =>
       resources.state.element(adapter.uint(offset));
@@ -3223,6 +3251,8 @@ function createBuildKernels(
 
     const initialize = adapter
       .fn(() => {
+        isolateWebglComputeStage();
+        const particleIndex = kernelInstanceIndex();
         for (const attribute of program.attributeSchema.attributes) {
           const components = attribute.components;
           const resetValue =
@@ -3234,25 +3264,21 @@ function createBuildKernels(
           writeAttribute(
             attribute.name,
             adapter.constant(resetValue, attribute.logicalType),
-            adapter.instanceIndex,
+            particleIndex,
           );
         }
-        writeAttribute('alive', adapter.constant(false, 'bool'));
-        writeAttribute('spawnGeneration', adapter.constant(0, 'u32'));
+        writeAttribute('alive', adapter.constant(false, 'bool'), particleIndex);
+        writeAttribute('spawnGeneration', adapter.constant(0, 'u32'), particleIndex);
         if (hasSpawnOrder) {
-          writeAttribute('spawnOrder', adapter.constant(0, 'u32'));
+          writeAttribute('spawnOrder', adapter.constant(0, 'u32'), particleIndex);
           writeLifecycle(
             stateLayout.fields.birthIndices.offsetWords,
             adapter.uint(0xffff_ffff),
-            adapter.instanceIndex,
+            particleIndex,
           );
         }
-        writeLifecycle(
-          stateLayout.fields.freeList.offsetWords,
-          adapter.uint(adapter.instanceIndex),
-          adapter.instanceIndex,
-        );
-        adapter.branch(adapter.instanceIndex.equal(adapter.uint(0)), () => {
+        writeLifecycle(stateLayout.fields.freeList.offsetWords, particleIndex, particleIndex);
+        adapter.branch(particleIndex.equal(adapter.uint(0)), () => {
           writeLifecycle(counterOffsets.freeCount, adapter.uint(capacity));
           writeLifecycle(counterOffsets.aliveCount, adapter.uint(0));
           writeLifecycle(counterOffsets.spawnSuccess, adapter.uint(0));
@@ -3278,16 +3304,14 @@ function createBuildKernels(
     // free/alive counters, so submitting both paths can make allocator counters inconsistent.
     const init = adapter
       .fn(() => {
-        if (hasSpawnOrder) writeAttribute('spawnOrder', adapter.uint(adapter.instanceIndex));
+        isolateWebglComputeStage();
+        const particleIndex = kernelInstanceIndex();
+        if (hasSpawnOrder) writeAttribute('spawnOrder', particleIndex);
         if (hasSpawnOrder) {
-          writeLifecycle(
-            stateLayout.fields.birthIndices.offsetWords,
-            adapter.uint(adapter.instanceIndex),
-            adapter.instanceIndex,
-          );
+          writeLifecycle(stateLayout.fields.birthIndices.offsetWords, particleIndex, particleIndex);
         }
-        for (const module of initModules) buildModule(module, adapter.instanceIndex);
-        writeAttribute('alive', adapter.constant(true, 'bool'));
+        for (const module of initModules) buildModule(module, particleIndex);
+        writeAttribute('alive', adapter.constant(true, 'bool'), particleIndex);
       })
       .compute(program.attributeSchema.capacity, [program.kernels.init.workgroupSize])
       .setName(program.kernels.init.name);
@@ -3309,7 +3333,8 @@ function createBuildKernels(
 
     const update = adapter
       .fn(() => {
-        const particleIndex = adapter.instanceIndex;
+        isolateWebglComputeStage();
+        const particleIndex = kernelInstanceIndex();
         adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(1)), () => {
           if (ageModule) {
             buildModule(ageModule, particleIndex);
@@ -3343,15 +3368,24 @@ function createBuildKernels(
       .setName(program.kernels.update.name);
 
     const spawnBody = (): void => {
-      const invocation = adapter.instanceIndex;
+      isolateWebglComputeStage();
+      const invocation = kernelInstanceIndex();
       const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
       adapter.branch(invocation.lessThan(requested), () => {
         if (gpuLifecycle) {
-          const available = adapter.atomicLoad(counter(counterOffsets.freeCount));
+          const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
+          const occupiedCount = adapter.uint(capacity).sub(freeCount);
+          const logicalCapacity = adapter.uint(uniformNode('Emitter.logicalCapacity'));
+          const logicalRemaining = adapter.select(
+            occupiedCount.lessThan(logicalCapacity),
+            logicalCapacity.sub(occupiedCount),
+            adapter.uint(0),
+          );
+          const available = freeCount.clamp(adapter.uint(0), logicalRemaining);
           adapter.branch(
             invocation.lessThan(available),
             () => {
-              const freeSlot = available.sub(adapter.uint(1)).sub(invocation);
+              const freeSlot = freeCount.sub(adapter.uint(1)).sub(invocation);
               const particleIndex = readLifecycle(
                 stateLayout.fields.freeList.offsetWords,
                 freeSlot,
@@ -3432,7 +3466,17 @@ function createBuildKernels(
           adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
           const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
           const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
-          const reservation = requested.clamp(adapter.uint(0), freeCount);
+          const occupiedCount = adapter.uint(capacity).sub(freeCount);
+          const logicalCapacity = adapter.uint(uniformNode('Emitter.logicalCapacity'));
+          const logicalRemaining = adapter.select(
+            occupiedCount.lessThan(logicalCapacity),
+            logicalCapacity.sub(occupiedCount),
+            adapter.uint(0),
+          );
+          const reservation = requested.clamp(
+            adapter.uint(0),
+            freeCount.clamp(adapter.uint(0), logicalRemaining),
+          );
           if (hasSpawnOrder) {
             const spawnBase = adapter.atomicAdd(
               counter(stateLayout.fields.nextSpawnOrder.offsetWords),
@@ -3615,7 +3659,17 @@ function createBuildKernels(
           adapter.atomicStore(counter(counterOffsets.spawnSuccess), adapter.uint(0));
           const count = readCount();
           const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
-          const reservation = count.clamp(adapter.uint(0), freeCount);
+          const occupiedCount = adapter.uint(capacity).sub(freeCount);
+          const logicalCapacity = adapter.uint(uniformNode('Emitter.logicalCapacity'));
+          const logicalRemaining = adapter.select(
+            occupiedCount.lessThan(logicalCapacity),
+            logicalCapacity.sub(occupiedCount),
+            adapter.uint(0),
+          );
+          const reservation = count.clamp(
+            adapter.uint(0),
+            freeCount.clamp(adapter.uint(0), logicalRemaining),
+          );
           if (hasSpawnOrder) {
             const spawnBase = adapter.atomicAdd(
               counter(stateLayout.fields.nextSpawnOrder.offsetWords),
@@ -3643,11 +3697,19 @@ function createBuildKernels(
         .fn(() => {
           const invocation = adapter.instanceIndex;
           adapter.branch(invocation.lessThan(readCount()), () => {
-            const available = adapter.atomicLoad(counter(counterOffsets.freeCount));
+            const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
+            const occupiedCount = adapter.uint(capacity).sub(freeCount);
+            const logicalCapacity = adapter.uint(uniformNode('Emitter.logicalCapacity'));
+            const logicalRemaining = adapter.select(
+              occupiedCount.lessThan(logicalCapacity),
+              logicalCapacity.sub(occupiedCount),
+              adapter.uint(0),
+            );
+            const available = freeCount.clamp(adapter.uint(0), logicalRemaining);
             adapter.branch(
               invocation.lessThan(available),
               () => {
-                const freeSlot = available.sub(adapter.uint(1)).sub(invocation);
+                const freeSlot = freeCount.sub(adapter.uint(1)).sub(invocation);
                 const particleIndex = readLifecycle(
                   stateLayout.fields.freeList.offsetWords,
                   freeSlot,

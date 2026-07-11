@@ -37,6 +37,7 @@ import {
   timeline,
 } from '../src/index.js';
 import { cloneTimelineFxMaterial } from '../src/authoring.js';
+import { timelineCoreOptions } from '../src/runtime.js';
 
 function mesh(duration = 1) {
   return meshFxElement(
@@ -187,6 +188,15 @@ describe('@nachi/timeline authoring', () => {
 });
 
 describe('@nachi/timeline runtime', () => {
+  it('keeps timeline children outside the core significance budget', () => {
+    expect(
+      timelineCoreOptions({
+        qualityTier: 'high',
+        significanceBudget: { maxActiveInstances: 0, maxParticles: 0 },
+      }),
+    ).toEqual({ qualityTier: 'high' });
+  });
+
   it('keeps updates healthy after releasing an attached instance', async () => {
     const scene = new THREE.Scene();
     const effect = defineEffect({

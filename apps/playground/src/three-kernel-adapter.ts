@@ -406,6 +406,7 @@ const indirectAttributesByAdapter = new WeakMap<
 >();
 const drawObjectsByKernels = new WeakMap<BuiltEmitterKernels, Set<THREE.Object3D>>();
 const renderOrderByKernels = new WeakMap<BuiltEmitterKernels, number>();
+const visibilityByKernels = new WeakMap<BuiltEmitterKernels, boolean>();
 
 function registerDrawObject(kernels: BuiltEmitterKernels, object: THREE.Object3D): void {
   let objects = drawObjectsByKernels.get(kernels);
@@ -415,6 +416,7 @@ function registerDrawObject(kernels: BuiltEmitterKernels, object: THREE.Object3D
   }
   objects.add(object);
   object.renderOrder = renderOrderByKernels.get(kernels) ?? object.renderOrder;
+  object.visible = visibilityByKernels.get(kernels) ?? true;
 }
 
 function materializeInstancedArray(length: number, type: TslStorageType): KernelStorageNode {
@@ -709,6 +711,10 @@ export function createThreeRuntimeRenderer(
     setRenderOrder: (kernels: BuiltEmitterKernels, order: number) => {
       renderOrderByKernels.set(kernels, order);
       for (const object of drawObjectsByKernels.get(kernels) ?? []) object.renderOrder = order;
+    },
+    setVisibility: (kernels: BuiltEmitterKernels, visible: boolean) => {
+      visibilityByKernels.set(kernels, visible);
+      for (const object of drawObjectsByKernels.get(kernels) ?? []) object.visible = visible;
     },
     ...(setInstanceCount === undefined ? {} : { setInstanceCount }),
     submitCompute: (kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0]) => {
@@ -1033,7 +1039,9 @@ export function materializeThreeSpriteDraw(
   material.rotationNode = rotationNode as never;
   material.scaleNode = scaleNode as never;
   material.colorNode = fragmentColor.rgb as never;
-  material.opacityNode = fragmentColor.a.mul(softFade) as never;
+  material.opacityNode = fragmentColor.a
+    .mul(softFade)
+    .mul(asNode(kernels.uniforms['System.visibility']!)) as never;
   if (draw.fragment.lit) {
     const tangentRotation = asNode(varying(rotationNode as never));
     let tangentNormal = asNode(vec3(0, 0, 1));
@@ -1180,7 +1188,9 @@ export function materializeThreeMeshDraw(
   });
   material.positionNode = localPosition.add(particlePosition) as never;
   material.colorNode = fragmentColor.rgb as never;
-  material.opacityNode = fragmentColor.a as never;
+  material.opacityNode = fragmentColor.a.mul(
+    asNode(kernels.uniforms['System.visibility']!),
+  ) as never;
 
   const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
   primeIndirectIndexCount(indirect, draw.indirect.drawArgumentsOffsetBytes, indexCount);
@@ -1341,6 +1351,7 @@ export function materializeThreeLightDraw(
   );
   const group = new THREE.Group();
   group.name = 'NachiPointLightPool';
+  registerDrawObject(kernels, group);
   const lights = Array.from({ length: draw.maxLights }, (_, index) => {
     const light = new THREE.PointLight(0xffffff, 0, 0, 2);
     light.name = `NachiPointLight${index}`;
@@ -1522,7 +1533,7 @@ export function materializeThreeDecalDraw(
   const localVertex = asNode(positionGeometry).mul(size);
   material.positionNode = rotateByQuaternion(localVertex, quaternion).add(center) as never;
   material.colorNode = fragmentColor.rgb as never;
-  material.opacityNode = opacity as never;
+  material.opacityNode = opacity.mul(asNode(kernels.uniforms['System.visibility']!)) as never;
   const geometry = new THREE.BoxGeometry(1, 1, 1);
   const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
   primeIndirectIndexCount(

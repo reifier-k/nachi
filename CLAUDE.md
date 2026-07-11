@@ -58,6 +58,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m10-sort/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m10-sort/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m10-lit/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-ultimate/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m11-scale/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m11-scale/?backend=webgl
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
@@ -83,6 +85,12 @@ adapter keeps MeshStandard physical lighting and substitutes only the Sprite pos
 tangent-space normal maps are rotated into the camera-facing view basis before assignment to
 Three r185's view-space `normalNode`. Normal textures must use `NoColorSpace`. Keep the unlit
 SpriteNodeMaterial path as the invariant control in renderer changes.
+
+M11 scalability is declared on emitter `quality` tiers plus effect `scalability`. Runtime
+spawn/capacity/fade changes do not recompile; soft/lit/sorted gates do. `setQualityTier()` preserves
+live structural state and emits `NACHI_QUALITY_RESTART_REQUIRED` when the next spawn must use a new
+compile/pool variant. Fully culled effects pause local time and GPU simulation. Significance budget
+decisions and their distance/screen/priority components are exposed on `instance.scalability`.
 
 ## Three-layer verification
 
