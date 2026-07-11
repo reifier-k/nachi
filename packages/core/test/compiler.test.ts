@@ -22,6 +22,7 @@ import {
   gravity,
   killVolume,
   KernelModuleRegistry,
+  CURL_SIMPLEX_DERIVATIVE_AMPLITUDE,
   TURBULENCE_SIMPLEX_AMPLITUDE,
   linearForce,
   lifetime,
@@ -607,6 +608,34 @@ describe('emitter kernel compiler', () => {
     // The legacy all-slots Init kernel and the M2 free-list Spawn kernel build the same streams.
     expect(numericBitXors).toHaveLength(6);
     expect(new Set(numericBitXors).size).toBe(3);
+  });
+
+  it('assigns independent range sample offsets to every M4 force config field', () => {
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [
+          pointAttractor({
+            falloff: range(1, 2),
+            position: range([0, 0, 0] as const, [1, 2, 3] as const),
+            radius: range(2, 3),
+            strength: range(3, 4),
+          }),
+        ],
+      }),
+    );
+    const numericBitXors: number[] = [];
+    const capture = () => new CaptureBitXorNode(numericBitXors);
+
+    expect(() =>
+      program.buildKernels({
+        ...fakeAdapter(),
+        instanceIndex: capture(),
+        uint: capture,
+      }),
+    ).not.toThrow();
+    expect(numericBitXors).toHaveLength(6);
+    expect(new Set(numericBitXors).size).toBe(6);
   });
 
   it('derives deterministic random uniform reads from nested range generators', () => {
@@ -2158,6 +2187,40 @@ describe('emitter kernel compiler', () => {
     expect(module.access?.reads).toContain('Particles.position');
   });
 
+  it('keeps simplex curl deterministic by avoiding random-stream manifest inputs', () => {
+    const module = curlNoise({ frequency: 1, strength: 1 });
+    expect(module.access?.reads).not.toContain('Emitter.seed');
+    expect(module.access?.reads).not.toContain('Particles.spawnGeneration');
+    expect(module.access?.reads).toContain('Particles.position');
+  });
+
+  it('diagnoses statically degenerate M4 behavior configs', () => {
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [
+          vortex({ axis: [0, 0, 0], strength: 1 }),
+          curlNoise({ frequency: 0, strength: 1 }),
+          turbulence({ frequency: -1, strength: 1 }),
+          pointAttractor({ position: [0, 0, 0], radius: -1, strength: 1 }),
+          killVolume({ mode: 'inside', normal: [0, 0, 0], shape: 'plane' }),
+          killVolume({ mode: 'inside', radius: -1, shape: 'sphere' }),
+          killVolume({ mode: 'inside', shape: 'box', size: [1, 0, 1] }),
+        ],
+      }),
+    );
+
+    expect(program.diagnostics.map(({ code }) => code)).toEqual([
+      'NACHI_VORTEX_AXIS_INVALID',
+      'NACHI_FORCE_FREQUENCY_INVALID',
+      'NACHI_FORCE_FREQUENCY_INVALID',
+      'NACHI_POINT_ATTRACTOR_RADIUS_INVALID',
+      'NACHI_KILL_VOLUME_NORMAL_INVALID',
+      'NACHI_KILL_VOLUME_RADIUS_INVALID',
+      'NACHI_KILL_VOLUME_SIZE_INVALID',
+    ]);
+  });
+
   it('supports an optional inward acceleration in the vortex config', () => {
     expect(vortex({ axis: [0, 1, 0], inwardStrength: 0.5, strength: 2 }).config).toEqual({
       axis: [0, 1, 0],
@@ -2191,6 +2254,10 @@ describe('emitter kernel compiler', () => {
 
   it('uses the measured simplex amplitude correction constant', () => {
     expect(TURBULENCE_SIMPLEX_AMPLITUDE).toBe(0.286);
+  });
+
+  it('uses the measured simplex-curl derivative correction constant', () => {
+    expect(CURL_SIMPLEX_DERIVATIVE_AMPLITUDE).toBe(6);
   });
 
   it('creates a serializable vector-field reference module', () => {

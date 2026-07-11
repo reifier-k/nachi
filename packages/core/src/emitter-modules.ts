@@ -175,3 +175,109 @@ export function collectEmitterLifecycleDiagnostics(
   }
   return diagnostics;
 }
+
+function staticScalarMinimum(value: unknown): number | undefined {
+  if (typeof value === 'number') return value;
+  if (typeof value !== 'object' || value === null || !('kind' in value)) return undefined;
+  if (value.kind === 'range' && 'min' in value && typeof value.min === 'number') return value.min;
+  if (value.kind === 'parameter' && 'fallback' in value && typeof value.fallback === 'number') {
+    return value.fallback;
+  }
+  return undefined;
+}
+
+function isFiniteVector(value: unknown, length: number): value is readonly number[] {
+  return (
+    Array.isArray(value) &&
+    value.length === length &&
+    value.every((component) => typeof component === 'number' && Number.isFinite(component))
+  );
+}
+
+/** Compile-time diagnostics for statically degenerate M4 behavior configurations. */
+export function collectEmitterBehaviorConfigDiagnostics(
+  config: EmitterConfig<AttributeSchema, ParameterSchema>,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const { module, path } of collectEmitterModules(config)) {
+    const moduleConfig = module.config as Record<string, unknown>;
+    if (module.type === 'core/vortex') {
+      const axis = moduleConfig.axis;
+      if (!isFiniteVector(axis, 3) || Math.hypot(...axis) === 0) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_VORTEX_AXIS_INVALID',
+            'Vortex axis must be a finite non-zero vec3.',
+            `${path}.config.axis`,
+          ),
+        );
+      }
+    }
+
+    if (module.type === 'core/curl-noise' || module.type === 'core/turbulence') {
+      const frequency = staticScalarMinimum(moduleConfig.frequency);
+      if (frequency !== undefined && (!Number.isFinite(frequency) || frequency <= 0)) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_FORCE_FREQUENCY_INVALID',
+            `${module.type} frequency must remain positive and finite.`,
+            `${path}.config.frequency`,
+          ),
+        );
+      }
+    }
+
+    if (module.type === 'core/point-attractor') {
+      const radius = staticScalarMinimum(moduleConfig.radius);
+      if (radius !== undefined && (!Number.isFinite(radius) || radius < 0)) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_POINT_ATTRACTOR_RADIUS_INVALID',
+            'Point-attractor radius must be a non-negative finite number.',
+            `${path}.config.radius`,
+          ),
+        );
+      }
+    }
+
+    if (module.type !== 'core/kill-volume') continue;
+    if (moduleConfig.shape === 'plane') {
+      const normal = moduleConfig.normal;
+      if (!isFiniteVector(normal, 3) || Math.hypot(...normal) === 0) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_KILL_VOLUME_NORMAL_INVALID',
+            'Kill-volume plane normal must be a finite non-zero vec3.',
+            `${path}.config.normal`,
+          ),
+        );
+      }
+    } else if (moduleConfig.shape === 'sphere') {
+      const radius = staticScalarMinimum(moduleConfig.radius);
+      if (radius !== undefined && (!Number.isFinite(radius) || radius < 0)) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_KILL_VOLUME_RADIUS_INVALID',
+            'Kill-volume sphere radius must be a non-negative finite number.',
+            `${path}.config.radius`,
+          ),
+        );
+      }
+    } else if (moduleConfig.shape === 'box') {
+      const size = moduleConfig.size;
+      if (
+        Array.isArray(size) &&
+        (!isFiniteVector(size, 3) || size.some((component) => component <= 0))
+      ) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_KILL_VOLUME_SIZE_INVALID',
+            'Kill-volume box size must be a finite vec3 with positive components.',
+            `${path}.config.size`,
+          ),
+        );
+      }
+    }
+  }
+  return diagnostics;
+}

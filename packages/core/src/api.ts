@@ -378,7 +378,12 @@ export function velocityOverLife(value: CurveGenerator<number>): UpdateModule {
     'core/velocity-over-life',
     { value },
     {
-      reads: ['Particles.normalizedAge', 'Particles.velocity'],
+      reads: [
+        'Emitter.deltaTime',
+        'Particles.lifetime',
+        'Particles.normalizedAge',
+        'Particles.velocity',
+      ],
       writes: ['Particles.velocity'],
     },
   );

@@ -6,6 +6,7 @@ import {
 import { VfxDiagnosticError } from './diagnostics.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
+  collectEmitterBehaviorConfigDiagnostics,
   collectEmitterLifecycleDiagnostics,
   collectEmitterModuleLabelDiagnostics,
   collectEmitterModules,
@@ -57,6 +58,9 @@ export const DEFAULT_LUT_RESOLUTION = 256;
 export const DEFAULT_WORKGROUP_SIZE = 64;
 /** Measured peak magnitude of Three r185's centered snoise scalar. */
 export const TURBULENCE_SIMPLEX_AMPLITUDE = 0.286;
+/** Measured peak magnitude of the centered finite-difference simplex potential curl. */
+export const CURL_SIMPLEX_DERIVATIVE_AMPLITUDE = 6;
+export const CURL_NOISE_FINITE_DIFFERENCE = 0.1;
 /** Calibrated by spike-depth for a visible but localized intersection transition. */
 export const DEFAULT_SOFT_PARTICLE_FADE_DISTANCE = 0.035;
 
@@ -2304,6 +2308,7 @@ export function compileEmitter<
   const registry = options.registry ?? createCoreKernelModuleRegistry();
   const untypedDefinition = definition as EmitterDefinition<AttributeSchema, ParameterSchema>;
   diagnostics.push(...collectEmitterLifecycleDiagnostics(untypedDefinition));
+  diagnostics.push(...collectEmitterBehaviorConfigDiagnostics(untypedDefinition));
   diagnostics.push(...collectEmitterModuleLabelDiagnostics(untypedDefinition));
   diagnostics.push(...collectParameterDeclarationDiagnostics(untypedDefinition.parameters));
   diagnostics.push(...validateRenderModuleLimit(untypedDefinition));
@@ -2754,25 +2759,42 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     build(context) {
       const config = context.module.config as { frequency: unknown; strength: unknown };
       const position = context.attribute('position');
-      const frequency = context.value(config.frequency, 'f32');
-      const field = context.adapter.vec3(
-        context.adapter
-          .sin(position.y.mul(frequency))
-          .sub(context.adapter.cos(position.z.mul(frequency))),
-        context.adapter
-          .sin(position.z.mul(frequency))
-          .sub(context.adapter.cos(position.x.mul(frequency))),
-        context.adapter
-          .sin(position.x.mul(frequency))
-          .sub(context.adapter.cos(position.y.mul(frequency))),
-      );
+      const frequency = context.value(config.frequency, 'f32', 1);
+      const base = context.adapter.vec3(position.x, position.y, position.z).mul(frequency);
+      const epsilon = CURL_NOISE_FINITE_DIFFERENCE;
+      const potential = (sample: KernelNode) =>
+        context.adapter.vec3(
+          context.adapter.simplexNoise(sample).sub(0.5),
+          context.adapter
+            .simplexNoise(sample.add(context.adapter.vec3(31.416, -47.853, 12.793)))
+            .sub(0.5),
+          context.adapter
+            .simplexNoise(sample.add(context.adapter.vec3(-19.271, 73.157, 41.039)))
+            .sub(0.5),
+        );
+      const dx = context.adapter.vec3(epsilon, 0, 0);
+      const dy = context.adapter.vec3(0, epsilon, 0);
+      const dz = context.adapter.vec3(0, 0, epsilon);
+      const x0 = potential(base.sub(dx));
+      const x1 = potential(base.add(dx));
+      const y0 = potential(base.sub(dy));
+      const y1 = potential(base.add(dy));
+      const z0 = potential(base.sub(dz));
+      const z1 = potential(base.add(dz));
+      const field = context.adapter
+        .vec3(
+          y1.z.sub(y0.z).sub(z1.y).add(z0.y),
+          z1.x.sub(z0.x).sub(x1.z).add(x0.z),
+          x1.y.sub(x0.y).sub(y1.x).add(y0.x),
+        )
+        .mul(1 / (2 * epsilon * CURL_SIMPLEX_DERIVATIVE_AMPLITUDE));
       context.write(
         'velocity',
         context
           .attribute('velocity')
           .add(
             field
-              .mul(context.value(config.strength, 'f32'))
+              .mul(context.value(config.strength, 'f32', 2))
               .mul(context.uniform('Emitter.deltaTime')),
           ),
       );
@@ -2789,7 +2811,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     build(context) {
       const config = context.module.config as VortexOptions;
       const basis = normalizedBasis(config.axis);
-      const center = context.value(config.center ?? [0, 0, 0], 'vec3');
+      const center = context.value(config.center ?? [0, 0, 0], 'vec3', 1);
       const position = context.attribute('position');
       const transform = context.uniform('Emitter.transform');
       const samplePosition =
@@ -2825,8 +2847,10 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       );
       const tangential = tangentDirection
         .div(radialLength)
-        .mul(context.value(config.strength, 'f32'));
-      const inward = radial.div(radialLength).mul(context.value(config.inwardStrength ?? 0, 'f32'));
+        .mul(context.value(config.strength, 'f32', 4));
+      const inward = radial
+        .div(radialLength)
+        .mul(context.value(config.inwardStrength ?? 0, 'f32', 5));
       const localAcceleration = tangential.sub(inward);
       const acceleration =
         config.space === 'emitter'
@@ -2855,7 +2879,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     build(context) {
       const config = context.module.config as PointAttractorOptions;
-      const target = context.value(config.position, 'vec3');
+      const target = context.value(config.position, 'vec3', 1);
       const position = context.attribute('position');
       const transform = context.uniform('Emitter.transform');
       const samplePosition =
@@ -2876,8 +2900,8 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .sqrt()
         .clamp(0.000001, 1e20);
       const magnitude = context
-        .value(config.strength, 'f32')
-        .div(distance.pow(context.value(config.falloff ?? 2, 'f32')));
+        .value(config.strength, 'f32', 4)
+        .div(distance.pow(context.value(config.falloff ?? 2, 'f32', 5)));
       const localAcceleration = outward.div(distance).mul(magnitude).mul(-1);
       const acceleration =
         config.space === 'emitter'
@@ -2897,7 +2921,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         );
       };
       if (config.radius === undefined) apply();
-      else context.adapter.branch(distance.lessThan(context.value(config.radius, 'f32')), apply);
+      else context.adapter.branch(distance.lessThan(context.value(config.radius, 'f32', 6)), apply);
     },
     stage: 'update',
     type: 'core/point-attractor',
@@ -2912,6 +2936,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const force = context.value(
         (context.module.config as { force: ValueInput<Vec3> }).force,
         'vec3',
+        1,
       );
       context.write(
         'velocity',
@@ -2932,7 +2957,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const position = context.attribute('position');
       const base = context.adapter
         .vec3(position.x, position.y, position.z)
-        .mul(context.value(config.frequency, 'f32'));
+        .mul(context.value(config.frequency, 'f32', 1));
       const octaves = Math.max(1, Math.min(4, Math.floor(config.octaves ?? 3)));
       let amplitude = 1;
       let amplitudeSum = 0;
@@ -2969,7 +2994,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .sqrt();
       const acceleration = normalizedField
         .div(fieldLength.clamp(1, 1e20))
-        .mul(context.value(config.strength, 'f32'));
+        .mul(context.value(config.strength, 'f32', 2));
       context.write(
         'velocity',
         context.attribute('velocity').add(acceleration.mul(context.uniform('Emitter.deltaTime'))),
@@ -2998,7 +3023,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
           .attribute('velocity')
           .add(
             sampled
-              .mul(context.value(config.strength, 'f32'))
+              .mul(context.value(config.strength, 'f32', 1))
               .mul(context.uniform('Emitter.deltaTime')),
           ),
       );
@@ -3091,12 +3116,31 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Particles.normalizedAge', 'Particles.velocity'],
+      reads: [
+        'Emitter.deltaTime',
+        'Particles.lifetime',
+        'Particles.normalizedAge',
+        'Particles.velocity',
+      ],
       writes: ['Particles.velocity'],
     },
     build(context) {
       if (!context.module.lutId) throw new Error('velocityOverLife LUT is missing.');
-      const scale = context.sampleLut(context.module.lutId, context.attribute('normalizedAge')).r;
+      const normalizedAge = context.attribute('normalizedAge');
+      const previousAge = normalizedAge
+        .sub(
+          context
+            .uniform('Emitter.deltaTime')
+            .div(context.attribute('lifetime').clamp(0.000001, 1e20)),
+        )
+        .clamp(0, 1);
+      const currentScale = context.sampleLut(context.module.lutId, normalizedAge).r;
+      const previousScale = context.sampleLut(context.module.lutId, previousAge).r;
+      const scale = context.adapter.select(
+        previousScale.mul(previousScale).greaterThanEqual(1e-12),
+        currentScale.div(previousScale),
+        currentScale,
+      );
       context.write('velocity', context.attribute('velocity').mul(scale));
     },
     stage: 'update',
@@ -3116,21 +3160,21 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz;
       let inside: KernelNode;
       if (config.shape === 'sphere') {
-        const center = context.value(config.center ?? [0, 0, 0], 'vec3');
+        const center = context.value(config.center ?? [0, 0, 0], 'vec3', 1);
         const delta = context.adapter.vec3(
           local.x.sub(center.x),
           local.y.sub(center.y),
           local.z.sub(center.z),
         );
-        const radius = context.value(config.radius, 'f32');
+        const radius = context.value(config.radius, 'f32', 4);
         inside = delta.x
           .mul(delta.x)
           .add(delta.y.mul(delta.y))
           .add(delta.z.mul(delta.z))
           .lessThanEqual(radius.mul(radius));
       } else if (config.shape === 'box') {
-        const center = context.value(config.center ?? [0, 0, 0], 'vec3');
-        const halfSize = context.value(config.size, 'vec3').mul(0.5);
+        const center = context.value(config.center ?? [0, 0, 0], 'vec3', 1);
+        const halfSize = context.value(config.size, 'vec3', 4).mul(0.5);
         const delta = context.adapter.vec3(
           local.x.sub(center.x),
           local.y.sub(center.y),
@@ -3147,7 +3191,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
           .mul(basis.up[0])
           .add(local.y.mul(basis.up[1]))
           .add(local.z.mul(basis.up[2]));
-        inside = signed.lessThanEqual(context.value(config.offset ?? 0, 'f32'));
+        inside = signed.lessThanEqual(context.value(config.offset ?? 0, 'f32', 1));
       }
       context.adapter.branch(config.mode === 'inside' ? inside : inside.not(), () => {
         context.write('alive', context.adapter.constant(false, 'bool'));

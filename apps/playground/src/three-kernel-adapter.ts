@@ -84,6 +84,7 @@ export type ThreeGeometryResolver = (reference: GeometryRef) => THREE.BufferGeom
 export interface ThreeVectorFieldResource {
   readonly boundsMax: Vec3;
   readonly boundsMin: Vec3;
+  readonly resolution: readonly [number, number, number];
   readonly texture: THREE.Data3DTexture;
 }
 export type ThreeVectorFieldResolver = (
@@ -120,9 +121,17 @@ export function createThreeVectorFieldResource(
   const filter = linearFloat32Filtering ? THREE.LinearFilter : THREE.NearestFilter;
   texture.minFilter = filter;
   texture.magFilter = filter;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.wrapR = THREE.RepeatWrapping;
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
-  return { boundsMax: field.boundsMax, boundsMin: field.boundsMin, texture };
+  return {
+    boundsMax: field.boundsMax,
+    boundsMin: field.boundsMin,
+    resolution: field.resolution,
+    texture,
+  };
 }
 
 export function createThreeVectorFieldResolver(
@@ -303,7 +312,14 @@ export function createThreeKernelAdapter(
       const normalized = position
         .sub(asNode(vec3(...field.boundsMin)))
         .div(asNode(vec3(...extent)));
-      const coordinates = tiling ? asNode(fract(normalized as never)) : normalized.clamp(0, 1);
+      const cornerCoordinates = tiling ? normalized : normalized.clamp(0, 1);
+      const texelScale = field.resolution.map(
+        (dimension) => (dimension - 1) / dimension,
+      ) as unknown as Vec3;
+      const texelOffset = field.resolution.map((dimension) => 0.5 / dimension) as unknown as Vec3;
+      const coordinates = cornerCoordinates
+        .mul(asNode(vec3(...texelScale)))
+        .add(asNode(vec3(...texelOffset)));
       return asNode(texture3D(field.texture).sample(coordinates as never)).xyz;
     },
     select: (condition, whenTrue, whenFalse) =>

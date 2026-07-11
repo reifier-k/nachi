@@ -3,6 +3,7 @@ import {
   billboard,
   burst,
   curve,
+  curlNoise,
   defineEffect,
   defineEmitter,
   defineParameter,
@@ -38,6 +39,7 @@ import './m3-sprites.css';
 const STEP = 1 / 60;
 const SIMPLEX_EFFECTIVE_AMPLITUDE = 0.286;
 const TURBULENCE_STRENGTH = 2;
+const CURL_STRENGTH = 2;
 const root = document.documentElement;
 const query = new URLSearchParams(location.search);
 const headless = query.get('headless') === '1';
@@ -160,7 +162,9 @@ async function run(): Promise<void> {
     kind: 'asset-ref',
     uri: 'procedural://m4-behaviors/vortex.fga',
   } as const;
-  const parsedField = parseFga('2 2 1 -1 -1 -1 1 1 1 1 -1 0 1 1 0 -1 -1 0 -1 1 0');
+  const parsedField = parseFga(
+    '2 2 2 -1 -1 -1 1 1 1 ' + '1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24',
+  );
   const resolveVectorField = createThreeVectorFieldResolver(
     new Map([[fieldRef.uri, createThreeVectorFieldResource(parsedField, linearFloat32Filtering)]]),
   );
@@ -349,24 +353,129 @@ async function run(): Promise<void> {
     );
   }
 
-  const fieldRun = await spawn(
+  const curlCenters: readonly Vec3[] = [
+    [0.2, -0.3, 0.4],
+    [-0.7, 0.5, 0.1],
+    [0.9, 0.2, -0.6],
+  ];
+  const curlDifference = 0.04;
+  const curlSamplePositions = curlCenters.flatMap((center) =>
+    ([0, 1, 2] as const).flatMap((axis) =>
+      ([-1, 1] as const).map(
+        (direction) =>
+          center.map((value, index) =>
+            index === axis ? value + direction * curlDifference : value,
+          ) as unknown as Vec3,
+      ),
+    ),
+  );
+  const runCurlSamples = async () => {
+    const system = new VFXSystem(runtimeRenderer, undefined, {
+      aliveCountReadbackInterval: 1,
+      fixedTimeStep: { maxSubSteps: 64, stepSeconds: STEP },
+    });
+    const views = curlSamplePositions.map((position, index) => {
+      const instance = system.spawn(
+        particleEffect({
+          capacity: 1,
+          update: [curlNoise({ frequency: 1.3, strength: CURL_STRENGTH })],
+        }),
+        { position, seed: 100 + index },
+      ) as RuntimeInstance;
+      return emitter(instance);
+    });
+    await system.update(0);
+    await system.update(STEP);
+    const values = new Float32Array(views.length * 3);
+    for (const [index, view] of views.entries()) {
+      const velocity = (await readLogicalAttribute(
+        renderer,
+        view.program,
+        view.kernels,
+        'velocity',
+      )) as Float32Array;
+      values.set(velocity.subarray(0, 3), index * 3);
+    }
+    return values;
+  };
+  const curlA = await runCurlSamples();
+  const curlB = await runCurlSamples();
+  let curlMaximumAcceleration = 0;
+  for (let sample = 0; sample < curlA.length / 3; sample += 1) {
+    curlMaximumAcceleration = Math.max(
+      curlMaximumAcceleration,
+      vectorLength(curlA, sample * 3) / STEP,
+    );
+  }
+  const curlDivergences = curlCenters.map((_center, centerIndex) => {
+    const offset = centerIndex * 18;
+    return (
+      ((curlA[offset + 3] ?? 0) - (curlA[offset] ?? 0)) / (2 * curlDifference * STEP) +
+      ((curlA[offset + 10] ?? 0) - (curlA[offset + 7] ?? 0)) / (2 * curlDifference * STEP) +
+      ((curlA[offset + 17] ?? 0) - (curlA[offset + 14] ?? 0)) / (2 * curlDifference * STEP)
+    );
+  });
+  const curlMaximumDivergence = Math.max(...curlDivergences.map(Math.abs));
+
+  const fieldSamples: readonly {
+    readonly expected: Vec3;
+    readonly position: Vec3;
+    readonly tiling?: boolean;
+  }[] = [
+    { expected: [1, 2, 3], position: [-1, -1, -1] },
+    { expected: [4, 5, 6], position: [1, -1, -1] },
+    { expected: [7, 8, 9], position: [-1, 1, -1] },
+    { expected: [10, 11, 12], position: [1, 1, -1] },
+    { expected: [13, 14, 15], position: [-1, -1, 1] },
+    { expected: [16, 17, 18], position: [1, -1, 1] },
+    { expected: [19, 20, 21], position: [-1, 1, 1] },
+    { expected: [22, 23, 24], position: [1, 1, 1] },
     {
-      capacity: 8,
-      positionRadius: 0.9,
-      update: [vectorField({ field: fieldRef, strength: 1.5 })],
+      expected: linearFloat32Filtering ? [3.25, 4.25, 5.25] : [4, 5, 6],
+      position: [1.5, -1, -1],
+      tiling: true,
     },
-    17,
-  );
-  await fieldRun.system.update(STEP);
-  const fieldVelocity = (await readLogicalAttribute(
-    renderer,
-    fieldRun.view.program,
-    fieldRun.view.kernels,
-    'velocity',
-  )) as Float32Array;
-  const fieldMaximumSpeed = Math.max(
-    ...Array.from({ length: 8 }, (_, particle) => vectorLength(fieldVelocity, particle * 3)),
-  );
+  ];
+  const fieldSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { stepSeconds: STEP },
+  });
+  const fieldViews = fieldSamples.map(({ position, tiling }, index) => {
+    const instance = fieldSystem.spawn(
+      particleEffect({
+        capacity: 1,
+        update: [
+          vectorField({
+            field: fieldRef,
+            strength: 1,
+            ...(tiling === undefined ? {} : { tiling }),
+          }),
+        ],
+      }),
+      { position, seed: 200 + index },
+    ) as RuntimeInstance;
+    return emitter(instance);
+  });
+  await fieldSystem.update(0);
+  await fieldSystem.update(STEP);
+  const fieldMeasured: Vec3[] = [];
+  let fieldError = 0;
+  for (const [index, view] of fieldViews.entries()) {
+    const velocity = (await readLogicalAttribute(
+      renderer,
+      view.program,
+      view.kernels,
+      'velocity',
+    )) as Float32Array;
+    const measured = [velocity[0] ?? 0, velocity[1] ?? 0, velocity[2] ?? 0] as Vec3;
+    fieldMeasured.push(measured);
+    for (let axis = 0; axis < 3; axis += 1) {
+      fieldError = Math.max(
+        fieldError,
+        Math.abs((measured[axis] ?? 0) - (fieldSamples[index]?.expected[axis] ?? 0) * STEP),
+      );
+    }
+  }
 
   const orientRun = await spawn(
     {
@@ -429,6 +538,40 @@ async function run(): Promise<void> {
     Math.abs(vectorLength(curveVelocity, 0) - speedExpected),
   );
 
+  const runVelocityPartition = async (stepSeconds: number) => {
+    const system = new VFXSystem(runtimeRenderer, undefined, {
+      aliveCountReadbackInterval: 1,
+      fixedTimeStep: { maxSubSteps: 64, stepSeconds },
+    });
+    const instance = system.spawn(
+      particleEffect({
+        capacity: 1,
+        lifetimeSeconds: 2,
+        speed: 2,
+        update: [velocityOverLife(curve([0, 1], [1, 0.25]))],
+      }),
+      { seed: 300 },
+    ) as RuntimeInstance;
+    const view = emitter(instance);
+    await system.update(0);
+    await system.update(0.5);
+    const velocity = (await readLogicalAttribute(
+      renderer,
+      view.program,
+      view.kernels,
+      'velocity',
+    )) as Float32Array;
+    return vectorLength(velocity, 0);
+  };
+  const velocityAt60Hz = await runVelocityPartition(1 / 60);
+  const velocityAt30Hz = await runVelocityPartition(1 / 30);
+  const partitionExpectedSpeed = 2 * (1 - 0.75 * (0.5 / 2));
+  const partitionError = Math.max(
+    Math.abs(velocityAt60Hz - velocityAt30Hz),
+    Math.abs(velocityAt60Hz - partitionExpectedSpeed),
+    Math.abs(velocityAt30Hz - partitionExpectedSpeed),
+  );
+
   const killRun = await spawn(
     {
       capacity: 6,
@@ -445,11 +588,16 @@ async function run(): Promise<void> {
 
   const validation = {
     consoleClean: consoleMessages.length === 0,
-    vectorField: fieldMaximumSpeed > 0.001,
+    curlNoise:
+      bytesEqual(curlA, curlB) &&
+      curlMaximumAcceleration > 0.01 &&
+      curlMaximumAcceleration <= CURL_STRENGTH * 1.001 &&
+      curlMaximumDivergence < CURL_STRENGTH * 0.5,
+    vectorField: fieldError < 0.00002,
     orientToVelocity: orientationError < 0.002,
     killVolume: aliveBefore === 6 && aliveAfter === 0,
     linearForce: linearError < 0.00001,
-    overLifeCurves: curveError < 0.002,
+    overLifeCurves: curveError < 0.002 && partitionError < 0.002,
     pointAttractor: distanceAfter < distanceBefore - 0.001,
     turbulence:
       bytesEqual(turbulenceA, turbulenceB) &&
@@ -459,16 +607,27 @@ async function run(): Promise<void> {
   };
   const result = {
     consoleMessages,
+    curlNoise: {
+      bitIdentical: bytesEqual(curlA, curlB),
+      divergences: curlDivergences,
+      maximumAcceleration: curlMaximumAcceleration,
+      maximumDivergence: curlMaximumDivergence,
+      strengthUpperBound: CURL_STRENGTH,
+    },
     killVolume: { aliveAfter, aliveBefore },
     linearForce: { error: linearError, expectedVelocity, measuredVelocity: [...linearVelocity] },
     mode: headless ? 'headless' : 'visual',
     ok: Object.values(validation).every(Boolean),
     overLife: {
       error: curveError,
+      partitionError,
+      partitionExpectedSpeed,
       rotation: rotations[0],
       rotationExpected,
       speed: vectorLength(curveVelocity, 0),
       speedExpected,
+      velocityAt30Hz,
+      velocityAt60Hz,
     },
     orientToVelocity: {
       error: orientationError,
@@ -495,7 +654,12 @@ async function run(): Promise<void> {
     vectorField: {
       boundsMax: parsedField.boundsMax,
       boundsMin: parsedField.boundsMin,
-      maximumSpeed: fieldMaximumSpeed,
+      error: fieldError,
+      samples: fieldSamples.map((sample, index) => ({
+        ...sample,
+        expectedVelocity: sample.expected.map((value) => value * STEP),
+        measuredVelocity: fieldMeasured[index],
+      })),
       resolution: parsedField.resolution,
       sampleCount: parsedField.vectors.length / 3,
     },

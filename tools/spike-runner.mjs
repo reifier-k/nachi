@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { chromium } from 'playwright';
@@ -13,6 +13,7 @@ const ADAPTER_FLAGS = {
 function parseArguments(arguments_) {
   const positional = [];
   let adapter = 'swiftshader';
+  let updateScreenshots = false;
 
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -21,6 +22,8 @@ function parseArguments(arguments_) {
       index += 1;
     } else if (argument?.startsWith('--adapter=')) {
       adapter = argument.slice('--adapter='.length);
+    } else if (argument === '--update-screenshots') {
+      updateScreenshots = true;
     } else if (argument?.startsWith('-')) {
       throw new Error(`Unknown option: ${argument}`);
     } else if (argument !== undefined) {
@@ -30,7 +33,7 @@ function parseArguments(arguments_) {
 
   if (positional.length > 1 || !Object.hasOwn(ADAPTER_FLAGS, adapter)) {
     throw new Error(
-      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default] (requires `pnpm dev` to be running)',
+      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default] [--update-screenshots] (requires `pnpm dev` to be running)',
     );
   }
 
@@ -40,13 +43,69 @@ function parseArguments(arguments_) {
   }
   url.searchParams.set('headless', '1');
 
-  return { adapter, url: url.toString() };
+  return { adapter, updateScreenshots, url: url.toString() };
+}
+
+async function comparePngPixels(page, baseline, actual) {
+  return page.evaluate(
+    async ({ actualBase64, baselineBase64 }) => {
+      const decode = async (base64) => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${base64}`;
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        if (!context) throw new Error('Could not create screenshot comparison context.');
+        context.drawImage(image, 0, 0);
+        return {
+          data: context.getImageData(0, 0, canvas.width, canvas.height).data,
+          height: canvas.height,
+          width: canvas.width,
+        };
+      };
+      const left = await decode(baselineBase64);
+      const right = await decode(actualBase64);
+      if (left.width !== right.width || left.height !== right.height) {
+        return {
+          changedPixelRatio: 1,
+          changedPixels: Math.max(left.data.length, right.data.length) / 4,
+          dimensionsMatch: false,
+          pixelCount: Math.max(left.data.length, right.data.length) / 4,
+        };
+      }
+      let changedPixels = 0;
+      for (let offset = 0; offset < left.data.length; offset += 4) {
+        if (
+          left.data[offset] !== right.data[offset] ||
+          left.data[offset + 1] !== right.data[offset + 1] ||
+          left.data[offset + 2] !== right.data[offset + 2] ||
+          left.data[offset + 3] !== right.data[offset + 3]
+        ) {
+          changedPixels += 1;
+        }
+      }
+      const pixelCount = left.data.length / 4;
+      return {
+        changedPixelRatio: changedPixels / pixelCount,
+        changedPixels,
+        dimensionsMatch: true,
+        pixelCount,
+      };
+    },
+    { actualBase64: actual.toString('base64'), baselineBase64: baseline.toString('base64') },
+  );
 }
 
 const diagnostics = { console: [], pageErrors: [] };
 let browser;
 let webgpuAdapterInfo;
-let target = { adapter: 'swiftshader', url: `${DEFAULT_URL}?headless=1` };
+let target = {
+  adapter: 'swiftshader',
+  updateScreenshots: false,
+  url: `${DEFAULT_URL}?headless=1`,
+};
 let outcome;
 
 try {
@@ -96,6 +155,8 @@ try {
 
   const result = JSON.parse(harnessState.result);
   const artifactScreenshots = {};
+  const screenshotComparisons = {};
+  let screenshotsOk = true;
   if (harnessState.artifactScreenshots) {
     const specifications = JSON.parse(harnessState.artifactScreenshots);
     if (!Array.isArray(specifications)) {
@@ -118,7 +179,34 @@ try {
         );
       }
       const outputPath = path.join(artifactDirectory, filename);
-      await page.locator(selector).screenshot({ path: outputPath, type: 'png' });
+      const actual = await page.locator(selector).screenshot({ type: 'png' });
+      let baseline;
+      try {
+        baseline = await readFile(outputPath);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      if (target.updateScreenshots || baseline === undefined) {
+        await writeFile(outputPath, actual);
+        screenshotComparisons[filename] = {
+          baseline: baseline === undefined ? 'created' : 'updated',
+          ok: true,
+          threshold: 0.005,
+        };
+      } else {
+        const comparison = await comparePngPixels(page, baseline, actual);
+        const ok = comparison.dimensionsMatch && comparison.changedPixelRatio < 0.005;
+        screenshotComparisons[filename] = { ...comparison, ok, threshold: 0.005 };
+        screenshotsOk &&= ok;
+        if (!ok) {
+          const actualPath = path.join(
+            artifactDirectory,
+            `${filename.slice(0, -'.png'.length)}-actual.png`,
+          );
+          await writeFile(actualPath, actual);
+          screenshotComparisons[filename].actual = actualPath;
+        }
+      }
       artifactScreenshots[filename] = outputPath;
     }
   }
@@ -128,12 +216,13 @@ try {
   const performanceResult = harnessState.performance ? JSON.parse(harnessState.performance) : null;
   outcome = {
     ...result,
-    ok: harnessState.status === 'complete' && result.ok === true,
+    ok: harnessState.status === 'complete' && result.ok === true && screenshotsOk,
     url: target.url,
     requestedAdapter: target.adapter,
     webgpuAdapterInfo,
     backend: harnessState.backend,
     artifactScreenshots,
+    screenshotComparisons,
     performance: performanceResult,
     diagnostics,
   };

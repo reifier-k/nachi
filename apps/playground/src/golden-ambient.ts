@@ -16,7 +16,6 @@ import {
   positionSphere,
   range,
   rate,
-  rotationOverLife,
   sizeOverLife,
   turbulence,
   velocityCone,
@@ -96,6 +95,7 @@ const leafRef: GeometryRef = {
   uri: 'procedural://golden-ambient/leaf-quad',
 };
 
+// ROADMAP golden #4: M4スコープ=ループ+挙動（カリング/significance/大量インスタンスはM11で拡張）。
 const goldenAmbient = defineEffect({
   elements: {
     fireflies: defineEmitter({
@@ -135,7 +135,6 @@ const goldenAmbient = defineEffect({
         drag(0.46),
         vortex({ axis: [0, 1, 0], center: [0.4, 1, 0], strength: 0.3 }),
         orientToVelocity(),
-        rotationOverLife(curve([0, 0], [0.45, Math.PI * 2], [1, Math.PI * 5])),
         colorOverLife(gradient([0.68, 0.3, 0.06, 0.95], [0.22, 0.08, 0.018, 0.8])),
         killVolume({ mode: 'inside', normal: [0, 1, 0], offset: -1.9, shape: 'plane' }),
       ],
@@ -302,7 +301,7 @@ async function run(): Promise<void> {
       renderer,
       runtime.leafView.program,
       runtime.leafView.kernels,
-      'spriteRotation',
+      'rotation',
     )) as Float32Array,
     leafSpawnGeneration: (await readLogicalAttribute(
       renderer,
@@ -317,7 +316,7 @@ async function run(): Promise<void> {
   const leafAliveHistory: number[] = [];
   const leafTracks: {
     generation: number;
-    rotation: number[];
+    rotation: number[][];
     slot: number;
     y: number[];
   }[] = [];
@@ -347,7 +346,9 @@ async function run(): Promise<void> {
     if (trackedLeaf >= 0 && state.leafAlive[trackedLeaf] !== 0) {
       const track = leafTracks.at(-1);
       track?.y.push(state.leafPosition[trackedLeaf * 3 + 1] ?? Number.NaN);
-      track?.rotation.push(state.leafRotation[trackedLeaf] ?? Number.NaN);
+      track?.rotation.push(
+        Array.from(state.leafRotation.subarray(trackedLeaf * 4, trackedLeaf * 4 + 4)),
+      );
     }
     if (sample === 11) deterministicReference = state;
   }
@@ -410,10 +411,17 @@ async function run(): Promise<void> {
   const eligibleLeafTracks = leafTracks.filter(({ y }) => y.length >= 2);
   const trackFallsAndRotates = (track: (typeof eligibleLeafTracks)[number]) =>
     track.y.every((value, index) => index === 0 || value < (track.y[index - 1] ?? value)) &&
-    track.rotation.every(
-      (value, index) => index === 0 || value > (track.rotation[index - 1] ?? value),
-    ) &&
-    (track.rotation.at(-1) ?? 0) - (track.rotation[0] ?? 0) > 0.01;
+    track.rotation.every((quaternion) => quaternion.every(Number.isFinite)) &&
+    Math.max(
+      0,
+      ...track.rotation
+        .slice(1)
+        .map((quaternion) =>
+          Math.hypot(
+            ...quaternion.map((value, axis) => value - (track.rotation[0]?.[axis] ?? value)),
+          ),
+        ),
+    ) > 0.01;
   const leavesFallAndRotate =
     eligibleLeafTracks.length > 0 && eligibleLeafTracks.every(trackFallsAndRotates);
   const validation = {

@@ -44,6 +44,10 @@ describe('three kernel adapter', () => {
     expect(resource.texture.image).toMatchObject({ width: 2, height: 1, depth: 1 });
     expect(resource.texture.minFilter).toBe(THREE.NearestFilter);
     expect(resource.texture.magFilter).toBe(THREE.NearestFilter);
+    expect(resource.texture.wrapS).toBe(THREE.RepeatWrapping);
+    expect(resource.texture.wrapT).toBe(THREE.RepeatWrapping);
+    expect(resource.texture.wrapR).toBe(THREE.RepeatWrapping);
+    expect(resource.resolution).toEqual([2, 1, 1]);
     expect([...data]).toEqual([1, 2, 3, 1, -1, -2, -3, 1]);
   });
 

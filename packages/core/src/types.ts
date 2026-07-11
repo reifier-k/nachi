@@ -414,7 +414,7 @@ export type KillVolumeOptions =
       readonly shape: 'sphere';
     })
   | (KillVolumeBaseOptions & {
-      /** Local-space plane normal. The inside half-space has dot(normal, p) <= offset. */
+      /** Local-space plane normal, normalized before testing. The inside half-space has dot(normalize(normal), p) <= offset. */
       readonly normal: Vec3;
       readonly offset?: ValueInput<number>;
       readonly shape: 'plane';

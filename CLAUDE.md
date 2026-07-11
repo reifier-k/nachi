@@ -31,11 +31,15 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgpu\&sc
 node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m3-sprites/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-explosion/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m4-behaviors/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/golden-ambient/?backend=webgpu
+node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
 ```
 
 `webgpu-probe` serves its own localhost page. `spike-runner` adds `headless=1` and reads `data-spike-result` plus the `nachi.perf-baseline` record in `data-perf-result`. Screenshot regression defaults to WebGL2 because headless WebGPU cannot present a canvas.
+For pages that publish artifact screenshots, existing PNGs pass when the exact changed-pixel ratio is below `0.5%`; use `--update-screenshots` to intentionally re-record the baselines.
 
 ## Three-layer verification
 
