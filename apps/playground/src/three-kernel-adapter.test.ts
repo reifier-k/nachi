@@ -11,9 +11,11 @@ import {
   lifetime,
   meshRenderer,
   pointAttractor,
+  parseFga,
   positionSphere,
   rotationOverLife,
   turbulence,
+  vectorField,
   velocityOverLife,
   vortex,
 } from '@nachi/core';
@@ -24,12 +26,72 @@ import {
   createThreeGeometryResolver,
   createThreeSpriteGeometry,
   createThreeTextureResolver,
+  createThreeVectorFieldResolver,
+  createThreeVectorFieldResource,
   directionEulerAngles,
   materializeThreeMeshDraw,
   materializeThreeSpriteDraw,
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
+  it('materializes parsed FGA data as a bounds-aware Three.js 3D texture', () => {
+    const parsed = parseFga('2 1 1 -1 -2 -3 1 2 3 1 2 3 -1 -2 -3');
+    const resource = createThreeVectorFieldResource(parsed);
+    const data = resource.texture.image.data as Float32Array;
+
+    expect(resource.boundsMin).toEqual([-1, -2, -3]);
+    expect(resource.boundsMax).toEqual([1, 2, 3]);
+    expect(resource.texture.image).toMatchObject({ width: 2, height: 1, depth: 1 });
+    expect([...data]).toEqual([1, 2, 3, 1, -1, -2, -3, 1]);
+  });
+
+  it('resolves a FieldRef and builds the vector-field texture sample graph', () => {
+    const reference = {
+      assetType: 'vector-field',
+      kind: 'asset-ref',
+      uri: 'procedural://test/vortex.fga',
+    } as const;
+    const resource = createThreeVectorFieldResource(parseFga('1 1 1 -1 -1 -1 1 1 1 0.5 0 -0.5'));
+    const adapter = createThreeKernelAdapter({
+      resolveVectorField: createThreeVectorFieldResolver(new Map([[reference.uri, resource]])),
+    });
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+        update: [vectorField({ field: reference, strength: 2, tiling: true })],
+      }),
+    );
+
+    expect(() => program.buildKernels(adapter)).not.toThrow();
+    expect(() => adapter.sampleVectorField(reference, adapter.vec3(0, 0, 0), true)).not.toThrow();
+  });
+
+  it('rejects an unresolved required vector-field reference during materialization', () => {
+    const reference = {
+      assetType: 'vector-field',
+      kind: 'asset-ref',
+      uri: 'missing.fga',
+    } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+        update: [vectorField({ field: reference, strength: 1 })],
+      }),
+    );
+
+    const adapter = createThreeKernelAdapter();
+    program.buildKernels(adapter);
+    expect(() => adapter.sampleVectorField(reference, adapter.vec3(0, 0, 0), false)).toThrow(
+      'No vector-field resolver supplied for resource "missing.fga".',
+    );
+  });
+
   it('materializes all M4 behavior modules as Three.js TSL graphs', () => {
     const program = compileEmitter(
       defineEmitter({

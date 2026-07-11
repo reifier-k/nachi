@@ -16,14 +16,17 @@ import {
   defineEmitter,
   defineParameter,
   drag,
+  faceCamera,
   flipbook,
   gradient,
   gravity,
   killVolume,
   KernelModuleRegistry,
+  TURBULENCE_SIMPLEX_AMPLITUDE,
   linearForce,
   lifetime,
   meshRenderer,
+  orientToVelocity,
   parameter,
   perDistance,
   pointAttractor,
@@ -38,6 +41,7 @@ import {
   turbulence,
   velocityOverLife,
   velocityCone,
+  vectorField,
   vortex,
 } from '../src/index.js';
 import type {
@@ -352,6 +356,7 @@ function fakeAdapter(): KernelTslAdapter {
     atomicAdd: node,
     atomicLoad: node,
     atomicStore: () => undefined,
+    atan2: node,
     branch: (_condition, whenTrue) => whenTrue(),
     constant: (value) => new FakeNode(value),
     cos: node,
@@ -364,6 +369,15 @@ function fakeAdapter(): KernelTslAdapter {
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     inverse: node,
     sampleTexture: node,
+    sampleVectorField: (_field, position) => {
+      markAccessRead(position);
+      return node();
+    },
+    select: (_condition, whenTrue, whenFalse) => {
+      markAccessRead(whenTrue);
+      markAccessRead(whenFalse);
+      return node();
+    },
     simplexNoise: node,
     sin: node,
     uniform: (value) => new FakeNode(value),
@@ -1946,6 +1960,11 @@ describe('emitter kernel compiler', () => {
         pointAttractor({ position: [0, 0, 0], strength: 1 }),
         linearForce({ force: [1, 0, 0] }),
         turbulence({ frequency: 0.5, octaves: 2, strength: 1 }),
+        vectorField({
+          field: { assetType: 'vector-field', kind: 'asset-ref', uri: 'field.fga' },
+          strength: 1,
+        }),
+        orientToVelocity(),
         sizeOverLife(curve([0, 0], [1, 1])),
         rotationOverLife(curve([0, 0], [1, Math.PI])),
         velocityOverLife(curve([0, 1], [1, 0])),
@@ -1971,6 +1990,7 @@ describe('emitter kernel compiler', () => {
       'core/gravity': gravity(-9.8).access,
       'core/kill-volume': killVolume({ mode: 'inside', radius: 1, shape: 'sphere' }).access,
       'core/linear-force': linearForce({ force: [1, 2, 3] }).access,
+      'core/orient-to-velocity': orientToVelocity().access,
       'core/lifetime': lifetime(1).access,
       'core/point-attractor': pointAttractor({ position: [0, 0, 0], strength: 1 }).access,
       'core/position-sphere': positionSphere({ radius: 1 }).access,
@@ -1978,6 +1998,10 @@ describe('emitter kernel compiler', () => {
       'core/size-over-life': sizeOverLife(curve([0, 0], [1, 1])).access,
       'core/turbulence': turbulence({ frequency: 1, strength: 1 }).access,
       'core/velocity-over-life': velocityOverLife(curve([0, 1], [1, 0])).access,
+      'core/vector-field': vectorField({
+        field: { assetType: 'vector-field', kind: 'asset-ref', uri: 'field.fga' },
+        strength: 1,
+      }).access,
       'core/velocity-cone': velocityCone({ angle: 30, direction: [0, 1, 0], speed: 1 }).access,
       'core/vortex': vortex({ axis: [0, 1, 0], strength: 1 }).access,
     };
@@ -2014,6 +2038,14 @@ describe('emitter kernel compiler', () => {
       ['core/point-attractor', { falloff: 2, position: [0, 0, 0], strength: 1 }],
       ['core/linear-force', { force: [1, 2, 3] }],
       ['core/turbulence', { frequency: 1, octaves: 3, strength: 0.2 }],
+      [
+        'core/vector-field',
+        {
+          field: { assetType: 'vector-field', kind: 'asset-ref', uri: 'field.fga' },
+          strength: 1,
+        },
+      ],
+      ['core/orient-to-velocity', {}],
       ['core/size-over-life', { value: curve([0, 0], [1, 1]) }, 'size-lut'],
       ['core/rotation-over-life', { value: curve([0, 0], [1, 1]) }, 'rotation-lut'],
       ['core/velocity-over-life', { value: curve([0, 1], [1, 0]) }, 'velocity-lut'],
@@ -2140,5 +2172,49 @@ describe('emitter kernel compiler', () => {
     expect(attraction.access).toEqual(repulsion.access);
     expect(attraction.config).toMatchObject({ strength: 2 });
     expect(repulsion.config).toMatchObject({ strength: -2 });
+  });
+
+  it('serializes emitter-space vortex coordinates without changing the stable module type', () => {
+    expect(
+      vortex({ axis: [0, 1, 0], center: [1, 2, 3], space: 'emitter', strength: 2 }),
+    ).toMatchObject({
+      config: { center: [1, 2, 3], space: 'emitter' },
+      type: 'core/vortex',
+    });
+  });
+
+  it('serializes emitter-space point attractors and declares transform access', () => {
+    const module = pointAttractor({ position: [0, 0, 0], space: 'emitter', strength: 1 });
+    expect(module.config).toMatchObject({ space: 'emitter' });
+    expect(module.access?.reads).toContain('Emitter.transform');
+  });
+
+  it('uses the measured simplex amplitude correction constant', () => {
+    expect(TURBULENCE_SIMPLEX_AMPLITUDE).toBe(0.286);
+  });
+
+  it('creates a serializable vector-field reference module', () => {
+    const field = { assetType: 'vector-field', kind: 'asset-ref', uri: 'wind.fga' } as const;
+    expect(vectorField({ field, strength: 3, tiling: true })).toMatchObject({
+      config: { field, strength: 3, tiling: true },
+      stage: 'update',
+      type: 'core/vector-field',
+    });
+  });
+
+  it('makes camera-facing billboard alignment explicit without a simulation module', () => {
+    const module = faceCamera({ blending: 'additive' });
+    expect(module).toMatchObject({
+      config: { alignment: { mode: 'camera-facing' }, blending: 'additive' },
+      stage: 'render',
+      type: 'core/billboard',
+    });
+  });
+
+  it('declares both orientation outputs and zero-speed preservation reads', () => {
+    expect(orientToVelocity().access).toEqual({
+      reads: ['Particles.rotation', 'Particles.spriteRotation', 'Particles.velocity'],
+      writes: ['Particles.rotation', 'Particles.spriteRotation'],
+    });
   });
 });

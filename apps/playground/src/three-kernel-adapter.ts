@@ -4,13 +4,16 @@ import type {
   CompiledDrawIndirectDescription,
   CompiledEmitterProgram,
   GeometryRef,
+  FieldRef,
   KernelNode,
   KernelIndirectStorageNode,
   KernelStorageNode,
   KernelTslAdapter,
   KernelUniformNode,
   ParameterPath,
+  ParsedVectorField,
   TextureRef,
+  Vec3,
   TslStorageType,
   VfxDeviceLossInfo,
   VfxRuntimeRenderer,
@@ -43,10 +46,12 @@ import {
   mx_atan2,
   positionGeometry,
   rotate,
+  select,
   sin,
   screenUV,
   storage,
   texture,
+  texture3D,
   uv,
   uint,
   uniform,
@@ -63,6 +68,7 @@ export interface ThreeKernelAdapterOptions {
   readonly linearFloat32Filtering?: boolean;
   readonly maxStorageBuffersPerShaderStage?: number;
   readonly maxTransformFeedbackSeparateAttribs?: number;
+  readonly resolveVectorField?: ThreeVectorFieldResolver;
 }
 
 export interface ThreeSpriteMaterializationOptions {
@@ -75,6 +81,14 @@ export interface ThreeMeshMaterializationOptions {
 
 export type ThreeTextureResolver = (reference: TextureRef) => THREE.Texture | undefined;
 export type ThreeGeometryResolver = (reference: GeometryRef) => THREE.BufferGeometry | undefined;
+export interface ThreeVectorFieldResource {
+  readonly boundsMax: Vec3;
+  readonly boundsMin: Vec3;
+  readonly texture: THREE.Data3DTexture;
+}
+export type ThreeVectorFieldResolver = (
+  reference: FieldRef,
+) => ThreeVectorFieldResource | undefined;
 
 export function createThreeTextureResolver(
   textures: ReadonlyMap<string, THREE.Texture>,
@@ -86,6 +100,31 @@ export function createThreeGeometryResolver(
   geometries: ReadonlyMap<string, THREE.BufferGeometry>,
 ): ThreeGeometryResolver {
   return (reference) => geometries.get(reference.uri);
+}
+
+export function createThreeVectorFieldResource(field: ParsedVectorField): ThreeVectorFieldResource {
+  const [width, height, depth] = field.resolution;
+  const rgba = new Float32Array(width * height * depth * 4);
+  for (let sample = 0; sample < field.vectors.length / 3; sample += 1) {
+    rgba[sample * 4] = field.vectors[sample * 3] ?? 0;
+    rgba[sample * 4 + 1] = field.vectors[sample * 3 + 1] ?? 0;
+    rgba[sample * 4 + 2] = field.vectors[sample * 3 + 2] ?? 0;
+    rgba[sample * 4 + 3] = 1;
+  }
+  const texture = new THREE.Data3DTexture(rgba, width, height, depth);
+  texture.format = THREE.RGBAFormat;
+  texture.type = THREE.FloatType;
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return { boundsMax: field.boundsMax, boundsMin: field.boundsMin, texture };
+}
+
+export function createThreeVectorFieldResolver(
+  fields: ReadonlyMap<string, ThreeVectorFieldResource>,
+): ThreeVectorFieldResolver {
+  return (reference) => fields.get(reference.uri);
 }
 
 function asNode(value: unknown): KernelNode {
@@ -221,6 +260,7 @@ export function createThreeKernelAdapter(
     atomicStore: (target, value) => {
       atomicStore(target as never, value as never);
     },
+    atan2: (y, x) => asNode(mx_atan2(y as never, x as never)),
     branch: (condition, whenTrue, whenFalse) => {
       const branch = If(condition as never, () => {
         whenTrue();
@@ -248,6 +288,22 @@ export function createThreeKernelAdapter(
     },
     inverse: (value) => asNode(inverse(value as never)),
     sampleTexture: (value, uv) => asNode(texture(value as THREE.Texture, uv as never)),
+    sampleVectorField: (reference, position, tiling) => {
+      const field = options.resolveVectorField?.(reference);
+      if (!field) {
+        throw new Error(`No vector-field resolver supplied for resource "${reference.uri}".`);
+      }
+      const extent = field.boundsMax.map(
+        (value, axis) => value - (field.boundsMin[axis] ?? value),
+      ) as unknown as Vec3;
+      const normalized = position
+        .sub(asNode(vec3(...field.boundsMin)))
+        .div(asNode(vec3(...extent)));
+      const coordinates = tiling ? asNode(fract(normalized as never)) : normalized.clamp(0, 1);
+      return asNode(texture3D(field.texture).sample(coordinates as never)).xyz;
+    },
+    select: (condition, whenTrue, whenFalse) =>
+      asNode(select(condition as never, whenTrue as never, whenFalse as never)),
     simplexNoise: (position) => asNode(snoise(position as never)),
     sin: (value) => asNode(sin(value as never)),
     uniform: (value, type) =>

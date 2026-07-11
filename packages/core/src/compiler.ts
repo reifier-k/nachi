@@ -22,6 +22,7 @@ import type {
   EmitterDefinition,
   EmitterLifecycle,
   EmptyParameterSchema,
+  FieldRef,
   GeometryRef,
   GradientGenerator,
   InitModule,
@@ -46,6 +47,7 @@ import type {
   Vec3,
   Vec4,
   VfxDiagnostic,
+  VectorFieldOptions,
   VortexOptions,
   PointAttractorOptions,
   KillVolumeOptions,
@@ -53,6 +55,8 @@ import type {
 
 export const DEFAULT_LUT_RESOLUTION = 256;
 export const DEFAULT_WORKGROUP_SIZE = 64;
+/** Measured peak magnitude of Three r185's centered snoise scalar. */
+export const TURBULENCE_SIMPLEX_AMPLITUDE = 0.286;
 /** Calibrated by spike-depth for a visible but localized intersection transition. */
 export const DEFAULT_SOFT_PARTICLE_FADE_DISTANCE = 0.035;
 
@@ -268,6 +272,7 @@ export interface KernelTslAdapter {
   atomicAdd(target: KernelNode, value: KernelNodeInput, returnValue?: boolean): KernelNode;
   atomicLoad(target: KernelNode): KernelNode;
   atomicStore(target: KernelNode, value: KernelNodeInput): void;
+  atan2(y: KernelNodeInput, x: KernelNodeInput): KernelNode;
   branch(condition: KernelNode, whenTrue: () => void, whenFalse?: () => void): void;
   constant(value: unknown, type: AttributeType): KernelNode;
   cos(value: KernelNodeInput): KernelNode;
@@ -277,6 +282,8 @@ export interface KernelTslAdapter {
   indirectArray(values: Uint32Array): KernelIndirectStorageNode;
   inverse(value: KernelNode): KernelNode;
   sampleTexture(texture: unknown, uv: KernelNode): KernelNode;
+  sampleVectorField(field: FieldRef, position: KernelNode, tiling: boolean): KernelNode;
+  select(condition: KernelNode, whenTrue: KernelNodeInput, whenFalse: KernelNodeInput): KernelNode;
   simplexNoise(position: KernelNode): KernelNode;
   sin(value: KernelNodeInput): KernelNode;
   uniform(value: unknown, type: TslStorageType): KernelUniformNode;
@@ -2776,7 +2783,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
       writes: ['Particles.velocity'],
     },
     build(context) {
@@ -2784,10 +2791,17 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const basis = normalizedBasis(config.axis);
       const center = context.value(config.center ?? [0, 0, 0], 'vec3');
       const position = context.attribute('position');
+      const transform = context.uniform('Emitter.transform');
+      const samplePosition =
+        config.space === 'emitter'
+          ? context.adapter
+              .inverse(transform)
+              .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz
+          : position;
       const offset = context.adapter.vec3(
-        position.x.sub(center.x),
-        position.y.sub(center.y),
-        position.z.sub(center.z),
+        samplePosition.x.sub(center.x),
+        samplePosition.y.sub(center.y),
+        samplePosition.z.sub(center.z),
       );
       const axial = offset.x
         .mul(basis.up[0])
@@ -2813,7 +2827,18 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .div(radialLength)
         .mul(context.value(config.strength, 'f32'));
       const inward = radial.div(radialLength).mul(context.value(config.inwardStrength ?? 0, 'f32'));
-      const acceleration = tangential.sub(inward);
+      const localAcceleration = tangential.sub(inward);
+      const acceleration =
+        config.space === 'emitter'
+          ? transform.mul(
+              context.adapter.vec4(
+                localAcceleration.x,
+                localAcceleration.y,
+                localAcceleration.z,
+                0,
+              ),
+            ).xyz
+          : localAcceleration;
       context.write(
         'velocity',
         context.attribute('velocity').add(acceleration.mul(context.uniform('Emitter.deltaTime'))),
@@ -2825,17 +2850,24 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
       writes: ['Particles.velocity'],
     },
     build(context) {
       const config = context.module.config as PointAttractorOptions;
       const target = context.value(config.position, 'vec3');
       const position = context.attribute('position');
+      const transform = context.uniform('Emitter.transform');
+      const samplePosition =
+        config.space === 'emitter'
+          ? context.adapter
+              .inverse(transform)
+              .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz
+          : position;
       const outward = context.adapter.vec3(
-        position.x.sub(target.x),
-        position.y.sub(target.y),
-        position.z.sub(target.z),
+        samplePosition.x.sub(target.x),
+        samplePosition.y.sub(target.y),
+        samplePosition.z.sub(target.z),
       );
       const distance = outward.x
         .mul(outward.x)
@@ -2846,7 +2878,18 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const magnitude = context
         .value(config.strength, 'f32')
         .div(distance.pow(context.value(config.falloff ?? 2, 'f32')));
-      const acceleration = outward.div(distance).mul(magnitude).mul(-1);
+      const localAcceleration = outward.div(distance).mul(magnitude).mul(-1);
+      const acceleration =
+        config.space === 'emitter'
+          ? transform.mul(
+              context.adapter.vec4(
+                localAcceleration.x,
+                localAcceleration.y,
+                localAcceleration.z,
+                0,
+              ),
+            ).xyz
+          : localAcceleration;
       const apply = () => {
         context.write(
           'velocity',
@@ -2892,6 +2935,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .mul(context.value(config.frequency, 'f32'));
       const octaves = Math.max(1, Math.min(4, Math.floor(config.octaves ?? 3)));
       let amplitude = 1;
+      let amplitudeSum = 0;
       let frequency = 1;
       let x = context.adapter.constant(0, 'f32');
       let y = context.adapter.constant(0, 'f32');
@@ -2911,10 +2955,21 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
             .sub(0.5)
             .mul(amplitude),
         );
+        amplitudeSum += amplitude;
         amplitude *= 0.5;
         frequency *= 2;
       }
-      const acceleration = context.adapter.vec3(x, y, z).mul(context.value(config.strength, 'f32'));
+      const normalizedField = context.adapter
+        .vec3(x, y, z)
+        .mul(1 / (TURBULENCE_SIMPLEX_AMPLITUDE * amplitudeSum));
+      const fieldLength = normalizedField.x
+        .mul(normalizedField.x)
+        .add(normalizedField.y.mul(normalizedField.y))
+        .add(normalizedField.z.mul(normalizedField.z))
+        .sqrt();
+      const acceleration = normalizedField
+        .div(fieldLength.clamp(1, 1e20))
+        .mul(context.value(config.strength, 'f32'));
       context.write(
         'velocity',
         context.attribute('velocity').add(acceleration.mul(context.uniform('Emitter.deltaTime'))),
@@ -2922,6 +2977,84 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/turbulence',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as VectorFieldOptions;
+      const position = context.attribute('position');
+      const sampled = context.adapter.sampleVectorField(
+        config.field,
+        context.adapter.vec3(position.x, position.y, position.z),
+        config.tiling ?? false,
+      );
+      context.write(
+        'velocity',
+        context
+          .attribute('velocity')
+          .add(
+            sampled
+              .mul(context.value(config.strength, 'f32'))
+              .mul(context.uniform('Emitter.deltaTime')),
+          ),
+      );
+    },
+    stage: 'update',
+    type: 'core/vector-field',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Particles.rotation', 'Particles.spriteRotation', 'Particles.velocity'],
+      writes: ['Particles.rotation', 'Particles.spriteRotation'],
+    },
+    build(context) {
+      const velocity = context.attribute('velocity');
+      const speed = velocity.x
+        .mul(velocity.x)
+        .add(velocity.y.mul(velocity.y))
+        .add(velocity.z.mul(velocity.z))
+        .sqrt();
+      const safeSpeed = speed.clamp(0.000001, 1e20);
+      const direction = context.adapter.vec3(
+        velocity.x.div(safeSpeed),
+        velocity.y.div(safeSpeed),
+        velocity.z.div(safeSpeed),
+      );
+      const quaternion = context.adapter.vec4(
+        direction.z,
+        0,
+        direction.x.mul(-1),
+        direction.y.add(1),
+      );
+      const quaternionLength = quaternion.x
+        .mul(quaternion.x)
+        .add(quaternion.y.mul(quaternion.y))
+        .add(quaternion.z.mul(quaternion.z))
+        .add(quaternion.w.mul(quaternion.w))
+        .sqrt();
+      const alignedQuaternion = context.adapter.select(
+        quaternionLength.lessThan(0.000001),
+        context.adapter.vec4(1, 0, 0, 0),
+        quaternion.div(quaternionLength.clamp(0.000001, 1e20)),
+      );
+      const moving = speed.greaterThanEqual(0.000001);
+      context.write(
+        'rotation',
+        context.adapter.select(moving, alignedQuaternion, context.attribute('rotation')),
+      );
+      const angle = context.adapter.atan2(velocity.x.mul(-1), velocity.y);
+      context.write(
+        'spriteRotation',
+        context.adapter.select(moving, angle, context.attribute('spriteRotation')),
+      );
+    },
+    stage: 'update',
+    type: 'core/orient-to-velocity',
     version: 1,
   });
   registry.register({
@@ -3076,6 +3209,8 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/point-attractor',
       'core/linear-force',
       'core/turbulence',
+      'core/vector-field',
+      'core/orient-to-velocity',
       'core/size-over-life',
       'core/rotation-over-life',
       'core/velocity-over-life',

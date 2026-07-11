@@ -355,6 +355,8 @@ export interface VortexOptions {
   readonly center?: ValueInput<Vec3>;
   /** Optional acceleration towards the vortex axis. */
   readonly inwardStrength?: ValueInput<number>;
+  /** Coordinate space for axis and center. Defaults to world. */
+  readonly space?: 'emitter' | 'world';
   readonly strength: ValueInput<number>;
 }
 
@@ -364,6 +366,8 @@ export interface PointAttractorOptions {
   readonly position: ValueInput<Vec3>;
   /** Optional world-space influence radius. */
   readonly radius?: ValueInput<number>;
+  /** Coordinate space for position. Defaults to world. */
+  readonly space?: 'emitter' | 'world';
   /** Positive values attract and negative values repel. */
   readonly strength: ValueInput<number>;
 }
@@ -377,6 +381,21 @@ export interface TurbulenceOptions {
   /** Fractal simplex octave count, clamped to 1-4. Defaults to 3. */
   readonly octaves?: number;
   readonly strength: ValueInput<number>;
+}
+
+export interface VectorFieldOptions {
+  readonly field: FieldRef;
+  readonly strength: ValueInput<number>;
+  /** Repeats the field outside its declared bounds instead of clamping. */
+  readonly tiling?: boolean;
+}
+
+export interface ParsedVectorField {
+  readonly boundsMax: Vec3;
+  readonly boundsMin: Vec3;
+  readonly resolution: readonly [number, number, number];
+  /** X-major, then Y, then Z vec3 samples. */
+  readonly vectors: Float32Array;
 }
 
 interface KillVolumeBaseOptions {
@@ -411,6 +430,7 @@ export interface AssetRef<AssetType extends string = string> {
 
 export type TextureRef = AssetRef<'texture'>;
 export type GeometryRef = AssetRef<'geometry'>;
+export type FieldRef = AssetRef<'vector-field'>;
 
 /** Playback reads Particles.normalizedAge; without a lifetime writer it remains on frame 0. */
 export interface FlipbookDefinition {

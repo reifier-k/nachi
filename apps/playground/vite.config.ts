@@ -6,6 +6,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         goldenExplosion: 'golden-explosion/index.html',
+        goldenAmbient: 'golden-ambient/index.html',
         playground: 'index.html',
         m1Kernel: 'm1-kernel/index.html',
         m2Runtime: 'm2-runtime/index.html',

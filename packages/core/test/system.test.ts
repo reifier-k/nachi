@@ -12,6 +12,7 @@ import {
   defineEmitter,
   defineParameter,
   lifetime,
+  killVolume,
   perDistance,
   packedComponentIndex,
   rate,
@@ -166,6 +167,7 @@ function fakeAdapter(): KernelTslAdapter {
     atomicAdd: node,
     atomicLoad: node,
     atomicStore: () => undefined,
+    atan2: node,
     branch: (_condition, whenTrue) => whenTrue(),
     constant: (value) => new FakeNode(value),
     cos: node,
@@ -178,6 +180,8 @@ function fakeAdapter(): KernelTslAdapter {
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     inverse: node,
     sampleTexture: node,
+    sampleVectorField: node,
+    select: node,
     simplexNoise: node,
     sin: node,
     uniform: (value) => new FakeNode(value),
@@ -910,6 +914,60 @@ describe('VFXSystem runtime scheduler', () => {
     const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
     await system.update(100);
     expect(instance.state).toBe('active');
+  });
+
+  it('allows lifetime-less particles to rely on an explicit kill-volume recovery path', async () => {
+    const emitter = defineEmitter({
+      capacity: 2,
+      render: computeRender,
+      spawn: burst({ count: 2 }),
+      update: [killVolume({ mode: 'inside', normal: [0, 1, 0], offset: -1, shape: 'plane' })],
+    });
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await expect(system.update(0)).resolves.toBeUndefined();
+    expect(instance.state).toBe('active');
+    expect(instance.getEmitter('particles')?.program.attributeSchema.byName.alive).toBeDefined();
+  });
+
+  it('keeps a lifetime-less rate emitter capped while full-capacity requests are suppressed', async () => {
+    const base = new FakeRuntimeRenderer();
+    let aliveOffset = 0;
+    let overflowOffset = 0;
+    let readCount = 0;
+    const renderer: VfxRuntimeRenderer = {
+      kernelAdapter: base.kernelAdapter,
+      readStorage: () => {
+        const counters = new Uint32Array(Math.max(aliveOffset, overflowOffset) + 1);
+        counters[aliveOffset] = 2;
+        counters[overflowOffset] = readCount === 0 ? 0 : readCount;
+        readCount += 1;
+        return Promise.resolve(counters.buffer);
+      },
+      submitCompute: (kernel) => base.submitCompute(kernel),
+      submitComputeIndirect: (kernel) => base.submitCompute(kernel),
+    };
+    const emitter = defineEmitter({
+      capacity: 2,
+      integration: 'none',
+      lifecycle: { duration: 10, loopCount: 'infinite' },
+      render: computeRender,
+      spawn: rate({ rate: 100 }),
+    });
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    const offsets = instance.getEmitter('particles')?.kernels.counterOffsets;
+    aliveOffset = offsets?.aliveCount ?? 0;
+    overflowOffset = offsets?.spawnOverflow ?? 0;
+
+    await system.update(0);
+    await system.update(0.1);
+
+    expect(instance.getEmitter('particles')?.aliveCount).toBe(2);
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_SPAWN_CAPACITY_EXCEEDED' }),
+    );
   });
 
   it('treats a non-core lifetime writer as conservatively unbounded', async () => {

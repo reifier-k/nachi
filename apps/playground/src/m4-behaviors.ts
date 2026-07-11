@@ -9,13 +9,16 @@ import {
   killVolume,
   lifetime,
   linearForce,
+  orientToVelocity,
   parameter,
+  parseFga,
   pointAttractor,
   positionSphere,
   rotationOverLife,
   turbulence,
   velocityCone,
   velocityOverLife,
+  vectorField,
   vortex,
 } from '@nachi/core';
 import type { UpdateModule, Vec3, VfxEmitterRuntimeView } from '@nachi/core';
@@ -25,12 +28,16 @@ import { createPerformanceMonitor } from './perf';
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
+  createThreeVectorFieldResolver,
+  createThreeVectorFieldResource,
   readLogicalAttribute,
 } from './three-kernel-adapter';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m3-sprites.css';
 
 const STEP = 1 / 60;
+const SIMPLEX_EFFECTIVE_AMPLITUDE = 0.286;
+const TURBULENCE_STRENGTH = 2;
 const root = document.documentElement;
 const query = new URLSearchParams(location.search);
 const headless = query.get('headless') === '1';
@@ -55,6 +62,7 @@ root.dataset.spikeStatus = 'initializing';
 
 type RuntimeInstance = {
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+  setTransform(position: Vec3): void;
 };
 
 type BackendLike = {
@@ -146,6 +154,16 @@ async function run(): Promise<void> {
   root.dataset.rendererStatus = 'ready';
   root.dataset.spikeStatus = 'running';
 
+  const fieldRef = {
+    assetType: 'vector-field',
+    kind: 'asset-ref',
+    uri: 'procedural://m4-behaviors/vortex.fga',
+  } as const;
+  const parsedField = parseFga('2 2 1 -1 -1 -1 1 1 1 1 -1 0 1 1 0 -1 -1 0 -1 1 0');
+  const resolveVectorField = createThreeVectorFieldResolver(
+    new Map([[fieldRef.uri, createThreeVectorFieldResource(parsedField)]]),
+  );
+
   const kernelAdapter = createThreeKernelAdapter({
     backend: 'webgpu',
     linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
@@ -154,6 +172,7 @@ async function run(): Promise<void> {
       : {
           maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage,
         }),
+    resolveVectorField,
   });
   const runtimeRenderer = createThreeRuntimeRenderer(renderer, kernelAdapter, backend.device?.lost);
   const performanceMonitor = createPerformanceMonitor(renderer, {
@@ -177,7 +196,7 @@ async function run(): Promise<void> {
     }) as RuntimeInstance;
     const view = emitter(instance);
     await system.update(0);
-    return { system, view };
+    return { instance, system, view };
   };
 
   const vortexRun = await spawn(
@@ -202,15 +221,14 @@ async function run(): Promise<void> {
     vortexRun.view.kernels,
     'velocity',
   )) as Float32Array;
-  let angularMomentum = 0;
+  let signedAngularMomentum = 0;
   for (let index = 0; index < 12; index += 1) {
     const offset = index * 3;
-    angularMomentum += Math.abs(
-      (vortexPosition[offset] ?? 0) * (vortexVelocity[offset + 2] ?? 0) -
-        (vortexPosition[offset + 2] ?? 0) * (vortexVelocity[offset] ?? 0),
-    );
+    signedAngularMomentum +=
+      (vortexPosition[offset + 2] ?? 0) * (vortexVelocity[offset] ?? 0) -
+      (vortexPosition[offset] ?? 0) * (vortexVelocity[offset + 2] ?? 0);
   }
-  angularMomentum /= 12;
+  signedAngularMomentum /= 12;
 
   const attractorRun = await spawn(
     {
@@ -218,9 +236,17 @@ async function run(): Promise<void> {
       integration: 'euler',
       positionRadius: 2,
       surfaceOnly: true,
-      update: [pointAttractor({ falloff: 0, position: [0, 0, 0], strength: 30 })],
+      update: [
+        pointAttractor({
+          falloff: 0,
+          position: [0, 0, 0],
+          space: 'emitter',
+          strength: 30,
+        }),
+      ],
     },
     12,
+    [4, 0, 0],
   );
   const attractorBefore = (await readLogicalAttribute(
     renderer,
@@ -228,6 +254,7 @@ async function run(): Promise<void> {
     attractorRun.view.kernels,
     'position',
   )) as Float32Array;
+  attractorRun.instance.setTransform([5, 0, 0]);
   await attractorRun.system.update(STEP);
   const attractorAfter = (await readLogicalAttribute(
     renderer,
@@ -235,13 +262,20 @@ async function run(): Promise<void> {
     attractorRun.view.kernels,
     'position',
   )) as Float32Array;
-  const meanDistance = (values: Float32Array) => {
+  const meanDistance = (values: Float32Array, center: Vec3) => {
     let total = 0;
-    for (let index = 0; index < 8; index += 1) total += vectorLength(values, index * 3);
+    for (let index = 0; index < 8; index += 1) {
+      const offset = index * 3;
+      total += Math.hypot(
+        (values[offset] ?? 0) - center[0],
+        (values[offset + 1] ?? 0) - center[1],
+        (values[offset + 2] ?? 0) - center[2],
+      );
+    }
     return total / 8;
   };
-  const distanceBefore = meanDistance(attractorBefore);
-  const distanceAfter = meanDistance(attractorAfter);
+  const distanceBefore = meanDistance(attractorBefore, [5, 0, 0]);
+  const distanceAfter = meanDistance(attractorAfter, [5, 0, 0]);
 
   const acceleration: Vec3 = [1.5, -3, 0.75];
   const linearSystem = new VFXSystem(runtimeRenderer, undefined, {
@@ -289,7 +323,7 @@ async function run(): Promise<void> {
       {
         capacity: 16,
         positionRadius: 1.5,
-        update: [turbulence({ frequency: 1.7, octaves: 3, strength: 2 })],
+        update: [turbulence({ frequency: 1.7, octaves: 3, strength: TURBULENCE_STRENGTH })],
       },
       14,
     );
@@ -306,6 +340,63 @@ async function run(): Promise<void> {
   const turbulenceMean = turbulenceA.reduce((sum, value) => sum + value, 0) / turbulenceA.length;
   const turbulenceVariance =
     turbulenceA.reduce((sum, value) => sum + (value - turbulenceMean) ** 2, 0) / turbulenceA.length;
+  let turbulenceMaximumAcceleration = 0;
+  for (let particle = 0; particle < turbulenceA.length / 3; particle += 1) {
+    turbulenceMaximumAcceleration = Math.max(
+      turbulenceMaximumAcceleration,
+      vectorLength(turbulenceA, particle * 3) / STEP,
+    );
+  }
+
+  const fieldRun = await spawn(
+    {
+      capacity: 8,
+      positionRadius: 0.9,
+      update: [vectorField({ field: fieldRef, strength: 1.5 })],
+    },
+    17,
+  );
+  await fieldRun.system.update(STEP);
+  const fieldVelocity = (await readLogicalAttribute(
+    renderer,
+    fieldRun.view.program,
+    fieldRun.view.kernels,
+    'velocity',
+  )) as Float32Array;
+  const fieldMaximumSpeed = Math.max(
+    ...Array.from({ length: 8 }, (_, particle) => vectorLength(fieldVelocity, particle * 3)),
+  );
+
+  const orientRun = await spawn(
+    {
+      capacity: 1,
+      direction: [1, 0, 0],
+      speed: 2,
+      update: [orientToVelocity()],
+    },
+    18,
+  );
+  await orientRun.system.update(STEP);
+  const orientation = (await readLogicalAttribute(
+    renderer,
+    orientRun.view.program,
+    orientRun.view.kernels,
+    'rotation',
+  )) as Float32Array;
+  const spriteOrientation = (await readLogicalAttribute(
+    renderer,
+    orientRun.view.program,
+    orientRun.view.kernels,
+    'spriteRotation',
+  )) as Float32Array;
+  const halfSqrt = Math.SQRT1_2;
+  const orientationError = Math.max(
+    Math.abs(orientation[0] ?? 0),
+    Math.abs(orientation[1] ?? 0),
+    Math.abs((orientation[2] ?? 0) + halfSqrt),
+    Math.abs((orientation[3] ?? 0) - halfSqrt),
+    Math.abs((spriteOrientation[0] ?? 0) + Math.PI / 2),
+  );
 
   const curveRun = await spawn(
     {
@@ -353,12 +444,17 @@ async function run(): Promise<void> {
 
   const validation = {
     consoleClean: consoleMessages.length === 0,
+    vectorField: fieldMaximumSpeed > 0.001,
+    orientToVelocity: orientationError < 0.002,
     killVolume: aliveBefore === 6 && aliveAfter === 0,
     linearForce: linearError < 0.00001,
     overLifeCurves: curveError < 0.002,
     pointAttractor: distanceAfter < distanceBefore - 0.001,
-    turbulence: bytesEqual(turbulenceA, turbulenceB) && turbulenceVariance > 1e-8,
-    vortex: angularMomentum > 0.001,
+    turbulence:
+      bytesEqual(turbulenceA, turbulenceB) &&
+      turbulenceVariance > 1e-8 &&
+      turbulenceMaximumAcceleration <= TURBULENCE_STRENGTH * 1.001,
+    vortex: signedAngularMomentum > 0.001,
   };
   const result = {
     consoleMessages,
@@ -373,13 +469,41 @@ async function run(): Promise<void> {
       speed: vectorLength(curveVelocity, 0),
       speedExpected,
     },
-    pointAttractor: { distanceAfter, distanceBefore },
+    orientToVelocity: {
+      error: orientationError,
+      expectedQuaternion: [0, 0, -halfSqrt, halfSqrt],
+      expectedSpriteRotation: -Math.PI / 2,
+      measuredQuaternion: [...orientation],
+      measuredSpriteRotation: spriteOrientation[0],
+    },
+    pointAttractor: {
+      distanceAfter,
+      distanceBefore,
+      emitterCenterAfterMove: [5, 0, 0],
+      emitterCenterAtSpawn: [4, 0, 0],
+      space: 'emitter',
+    },
     turbulence: {
       bitIdentical: bytesEqual(turbulenceA, turbulenceB),
+      correction: 1 / SIMPLEX_EFFECTIVE_AMPLITUDE,
+      effectiveSimplexAmplitude: SIMPLEX_EFFECTIVE_AMPLITUDE,
+      maximumAcceleration: turbulenceMaximumAcceleration,
+      strengthUpperBound: TURBULENCE_STRENGTH,
       variance: turbulenceVariance,
     },
+    vectorField: {
+      boundsMax: parsedField.boundsMax,
+      boundsMin: parsedField.boundsMin,
+      maximumSpeed: fieldMaximumSpeed,
+      resolution: parsedField.resolution,
+      sampleCount: parsedField.vectors.length / 3,
+    },
     validation,
-    vortex: { meanAbsoluteAngularMomentum: angularMomentum },
+    vortex: {
+      axis: [0, 1, 0],
+      expectedRightHandSign: 1,
+      meanSignedAngularMomentum: signedAngularMomentum,
+    },
   };
   await performanceMonitor.resolveGpuTimestamps();
   performanceMonitor.publish();

@@ -61,6 +61,7 @@ import type {
   TslModuleOptions,
   TslParticleBindings,
   UpdateModule,
+  VectorFieldOptions,
   ValueInput,
   Vec2,
   Vec3,
@@ -302,14 +303,14 @@ export function curlNoise(options: CurlNoiseOptions): UpdateModule {
 
 export function vortex(options: VortexOptions): UpdateModule {
   return createModule('update', 'core/vortex', options, {
-    reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+    reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
     writes: ['Particles.velocity'],
   });
 }
 
 export function pointAttractor(options: PointAttractorOptions): UpdateModule {
   return createModule('update', 'core/point-attractor', options, {
-    reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+    reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
     writes: ['Particles.velocity'],
   });
 }
@@ -326,6 +327,25 @@ export function turbulence(options: TurbulenceOptions): UpdateModule {
     reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
     writes: ['Particles.velocity'],
   });
+}
+
+export function vectorField(options: VectorFieldOptions): UpdateModule {
+  return createModule('update', 'core/vector-field', options, {
+    reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
+    writes: ['Particles.velocity'],
+  });
+}
+
+export function orientToVelocity(): UpdateModule {
+  return createModule(
+    'update',
+    'core/orient-to-velocity',
+    {},
+    {
+      reads: ['Particles.rotation', 'Particles.spriteRotation', 'Particles.velocity'],
+      writes: ['Particles.rotation', 'Particles.spriteRotation'],
+    },
+  );
 }
 
 export function sizeOverLife(value: CurveGenerator<number>): UpdateModule {
@@ -421,6 +441,10 @@ export function billboard(options: BillboardOptions): RenderModule {
     ],
     writes: [],
   });
+}
+
+export function faceCamera(options: Omit<BillboardOptions, 'alignment'> = {}): RenderModule {
+  return billboard({ ...options, alignment: { mode: 'camera-facing' } });
 }
 
 export function meshRenderer(options: MeshRendererOptions): RenderModule {
