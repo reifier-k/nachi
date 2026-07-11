@@ -6,6 +6,14 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: '@nachi/timeline',
+        replacement: fileURLToPath(new URL('./packages/timeline/src/index.ts', import.meta.url)),
+      },
+      {
+        find: '@nachi/mesh-fx',
+        replacement: fileURLToPath(new URL('./packages/mesh-fx/src/index.ts', import.meta.url)),
+      },
+      {
         find: '@nachi/trails/three',
         replacement: fileURLToPath(new URL('./packages/trails/src/three.ts', import.meta.url)),
       },

@@ -44,6 +44,9 @@ importers:
       '@nachi/mesh-fx':
         specifier: workspace:*
         version: link:../../packages/mesh-fx
+      '@nachi/timeline':
+        specifier: workspace:*
+        version: link:../../packages/timeline
       '@nachi/trails':
         specifier: workspace:*
         version: link:../../packages/trails
@@ -74,6 +77,22 @@ importers:
       '@nachi/tsl-kit':
         specifier: workspace:*
         version: link:../tsl-kit
+    devDependencies:
+      '@types/three':
+        specifier: 0.185.0
+        version: 0.185.0
+      three:
+        specifier: 0.185.1
+        version: 0.185.1
+
+  packages/timeline:
+    dependencies:
+      '@nachi/core':
+        specifier: workspace:*
+        version: link:../core
+      '@nachi/mesh-fx':
+        specifier: workspace:*
+        version: link:../mesh-fx
     devDependencies:
       '@types/three':
         specifier: 0.185.0

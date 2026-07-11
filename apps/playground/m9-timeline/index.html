@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nachi M9 timeline smoke</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">M9 / composition</p>
+        <h1>Skill slash timeline</h1>
+        <p class="lede">Effect-local sequencing, mesh-fx binding, shake, and hit stop.</p>
+      </header>
+      <section class="stage">
+        <canvas id="timeline-visual" width="480" height="300"></canvas>
+      </section>
+      <dl class="status">
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Mode</dt>
+          <dd>offscreen readback</dd>
+        </div>
+        <div>
+          <dt>Contract</dt>
+          <dd id="contract-value">running</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/m9-timeline.ts"></script>
+  </body>
+</html>

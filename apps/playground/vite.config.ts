@@ -37,6 +37,7 @@ export default defineConfig({
         m8MeshFx: 'm8-meshfx/index.html',
         m8Vat: 'm8-vat/index.html',
         m9Compose: 'm9-compose/index.html',
+        m9Timeline: 'm9-timeline/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },
@@ -44,6 +45,12 @@ export default defineConfig({
   },
   resolve: {
     alias: [
+      {
+        find: '@nachi/timeline',
+        replacement: fileURLToPath(
+          new URL('../../packages/timeline/src/index.ts', import.meta.url),
+        ),
+      },
       {
         find: '@nachi/mesh-fx',
         replacement: fileURLToPath(new URL('../../packages/mesh-fx/src/index.ts', import.meta.url)),

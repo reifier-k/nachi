@@ -684,9 +684,16 @@ export interface HitStopAction {
   readonly timeScale?: number;
 }
 
+export interface MarkerAction {
+  readonly kind: 'marker';
+  readonly name: string;
+  readonly payload?: JsonValue;
+}
+
 export type TimelineAction<Target extends string = string> =
   | CameraShakeAction
   | HitStopAction
+  | MarkerAction
   | PlayAction<Target>
   | StopAction<Target>;
 
@@ -702,13 +709,23 @@ export interface TimelineEntry<Target extends string = string> {
   readonly at: number;
 }
 
+export interface TimelineDefinition<Target extends string = string> {
+  readonly duration?: number;
+  readonly entries: readonly TimelineEntry<Target>[];
+  readonly kind: 'timeline';
+  readonly loop?: boolean | number;
+  readonly speed?: number;
+}
+
 export interface EffectConfig<
   Elements extends EffectElements = EffectElements,
   Parameters extends ParameterSchema = EmptyParameterSchema,
 > {
   readonly elements: Elements;
   readonly parameters?: Parameters;
-  readonly timeline?: readonly TimelineEntry<Extract<keyof Elements, string>>[];
+  readonly timeline?:
+    | TimelineDefinition<Extract<keyof Elements, string>>
+    | readonly TimelineEntry<Extract<keyof Elements, string>>[];
 }
 
 export interface EffectDefinition<

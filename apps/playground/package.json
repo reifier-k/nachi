@@ -12,6 +12,7 @@
   "dependencies": {
     "@nachi/core": "workspace:*",
     "@nachi/mesh-fx": "workspace:*",
+    "@nachi/timeline": "workspace:*",
     "@nachi/trails": "workspace:*",
     "@nachi/tsl-kit": "workspace:*",
     "three": "0.185.1",

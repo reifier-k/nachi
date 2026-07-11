@@ -35,6 +35,7 @@ import type {
   EventModule,
   FlipbookDefinition,
   MeshRendererOptions,
+  MarkerAction,
   GradientGenerator,
   HitStopAction,
   InitModule,
@@ -65,6 +66,7 @@ import type {
   TimelineAction,
   TimelineActionTarget,
   TimelineEntry,
+  TimelineDefinition,
   TslFunctionRef,
   TslFunctionRegistration,
   TslModuleDefinition,
@@ -944,11 +946,22 @@ export function hitStop(durationMs: number, timeScale?: number): HitStopAction {
     : { durationMs, kind: 'hit-stop', timeScale };
 }
 
+export function marker(name: string, payload?: JsonValue): MarkerAction {
+  return payload === undefined ? { kind: 'marker', name } : { kind: 'marker', name, payload };
+}
+
 export function at<const Actions extends readonly TimelineAction[]>(
   time: number,
   ...actions: Actions
 ): TimelineEntry<TimelineActionTarget<Actions[number]>> {
   return { actions, at: time } as TimelineEntry<TimelineActionTarget<Actions[number]>>;
+}
+
+export function timeline<Target extends string>(
+  entries: readonly TimelineEntry<Target>[],
+  options: Omit<TimelineDefinition<Target>, 'entries' | 'kind'> = {},
+): TimelineDefinition<Target> {
+  return { ...options, entries, kind: 'timeline' };
 }
 
 export function defineEffect<

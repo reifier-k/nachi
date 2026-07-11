@@ -1,0 +1,54 @@
+{
+  "name": "@nachi/timeline",
+  "version": "0.0.0",
+  "description": "Deterministic effect-local sequencing, hit stop, camera shake, and mesh-fx composition for nachi",
+  "keywords": [
+    "three.js",
+    "webgpu",
+    "vfx",
+    "timeline",
+    "sequencer"
+  ],
+  "license": "MIT",
+  "sideEffects": false,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachi-vfx/nachi.git",
+    "directory": "packages/timeline"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node ../../tools/check-package-esm.mjs .",
+    "prepublishOnly": "pnpm build",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nachi/core": "workspace:*",
+    "@nachi/mesh-fx": "workspace:*"
+  },
+  "peerDependencies": {
+    "@types/three": ">=0.185.0 <0.186.0",
+    "three": ">=0.185.0 <0.186.0"
+  },
+  "peerDependenciesMeta": {
+    "@types/three": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/three": "0.185.0",
+    "three": "0.185.1"
+  }
+}
