@@ -1,5 +1,9 @@
 export type PostDiagnostic = Readonly<{
-  code: 'NACHI_POST_EXTERNAL_BINDING' | 'NACHI_POST_INVALID_ORDER' | 'NACHI_POST_INVALID_PARAMETER';
+  code:
+    | 'NACHI_POST_EXTERNAL_BINDING'
+    | 'NACHI_POST_INVALID_ORDER'
+    | 'NACHI_POST_INVALID_PARAMETER'
+    | 'NACHI_WBOIT_WEBGL2_UNSUPPORTED';
   message: string;
   path: string;
 }>;
@@ -26,6 +30,14 @@ export function externalBinding(path: string): never {
   throw new PostDiagnosticError({
     code: 'NACHI_POST_EXTERNAL_BINDING',
     message: 'is externally bound and cannot be assigned through PostPipeline controls',
+    path,
+  });
+}
+
+export function wboitWebgl2Unsupported(path: string): never {
+  throw new PostDiagnosticError({
+    code: 'NACHI_WBOIT_WEBGL2_UNSUPPORTED',
+    message: 'per-attachment MRT blending requires native WebGPU',
     path,
   });
 }

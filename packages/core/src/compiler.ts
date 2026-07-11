@@ -499,7 +499,10 @@ export interface BuiltEmitterKernels {
   readonly resetAliveCount?: KernelComputeNode;
   /** Initializes padded depth/index keys from the latest alive compaction. */
   readonly prepareSort?: KernelComputeNode;
-  /** One dispatch per bitonic (k,j) stage; backends may submit the ordered array as one pass. */
+  /**
+   * One dispatch per bitonic (k,j) stage. Backends must submit each stage individually; multiple
+   * dispatches within one compute pass provide no full-workgroup synchronization guarantee.
+   */
   readonly sortPasses?: readonly KernelComputeNode[];
   readonly sortedDepths?: KernelStorageNode;
   readonly sortedIndices?: KernelStorageNode;

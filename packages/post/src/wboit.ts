@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import type Node from 'three/src/nodes/core/Node.js';
 import { depth, float, max, min, mrt, screenUV, texture, vec4 } from 'three/tsl';
 
-import { invalid } from './diagnostics.js';
+import { invalid, wboitWebgl2Unsupported } from './diagnostics.js';
 
 export const WBOIT_ACCUM_ATTACHMENT = 'nachiWboitAccum';
 export const WBOIT_REVEALAGE_ATTACHMENT = 'nachiWboitRevealage';
@@ -90,10 +90,7 @@ function assertNativeWebgpu(renderer: THREE.WebGPURenderer, requested?: 'webgl2'
     backend.isWebGLBackend === true ||
     backend.compatibilityMode === true
   ) {
-    invalid(
-      'wboit.backend',
-      'NACHI_WBOIT_WEBGL2_UNSUPPORTED: per-attachment MRT blending requires native WebGPU',
-    );
+    wboitWebgl2Unsupported('wboit.backend');
   }
 }
 

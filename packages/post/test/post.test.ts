@@ -6,6 +6,7 @@ import {
   compositeWboitLayers,
   createWboitPipeline,
   createPostPipeline,
+  PostDiagnosticError,
   radialBlur,
   screenDistortion,
   wboitWeight,
@@ -50,6 +51,17 @@ describe('@nachi/post authoring', () => {
     expect(forward.color[3]).toBeCloseTo(0.74, 12);
   });
 
+  it('preserves the non-saturating WBOIT depth and revealage terms', () => {
+    const layers = [
+      { alpha: 0.001, color: [1, 0, 0] as const, depth: 0.1 },
+      { alpha: 0.003, color: [0, 0, 1] as const, depth: 0.95 },
+    ];
+    const composite = compositeWboitLayers(layers);
+    expect(wboitWeight(0.001, 0.1)).toBeCloseTo(602.8568, 8);
+    expect(wboitWeight(0.003, 0.95)).toBeCloseTo(19.5112, 8);
+    expect(composite.revealage).toBeCloseTo(0.996003, 12);
+  });
+
   it('allocates RGBA16F accum plus R8 revealage and rejects WebGL2 explicitly', () => {
     const renderer = { backend: { compatibilityMode: false } } as unknown as THREE.WebGPURenderer;
     const pipeline = createWboitPipeline(renderer, new THREE.Scene(), new THREE.Camera(), {
@@ -67,11 +79,18 @@ describe('@nachi/post authoring', () => {
       type: THREE.UnsignedByteType,
     });
     pipeline.dispose();
-    expect(() =>
+    let webglError: unknown;
+    try {
       createWboitPipeline(renderer, new THREE.Scene(), new THREE.Camera(), {
         backend: 'webgl2',
-      }),
-    ).toThrow(/NACHI_WBOIT_WEBGL2_UNSUPPORTED/);
+      });
+    } catch (error) {
+      webglError = error;
+    }
+    expect(webglError).toBeInstanceOf(PostDiagnosticError);
+    expect((webglError as PostDiagnosticError).diagnostic.code).toBe(
+      'NACHI_WBOIT_WEBGL2_UNSUPPORTED',
+    );
   });
   it('provides immutable bloom presets with overrides', () => {
     const soft = bloomPreset('soft');
