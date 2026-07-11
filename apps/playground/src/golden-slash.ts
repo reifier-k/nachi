@@ -39,6 +39,7 @@ import {
   readLogicalAttribute,
 } from './three-kernel-adapter';
 import { createPerformanceMonitor } from './perf';
+import { compactRgba8Readback } from './readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-slash.css';
 
@@ -133,7 +134,12 @@ async function probePointLights(
     await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
     await renderer.resolveTimestampsAsync('render');
     renderer.render(scene, camera);
-    const pixels = await renderer.readRenderTargetPixelsAsync(target, 0, 0, 32, 32);
+    const pixels = compactRgba8Readback(
+      new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, 32, 32)),
+      32,
+      32,
+      true,
+    );
     const duration = await renderer.resolveTimestampsAsync('render');
     gpuRenderMs.push(duration !== undefined && Number.isFinite(duration) ? duration : null);
     nonBlack.push(

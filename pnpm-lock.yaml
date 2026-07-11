@@ -41,6 +41,9 @@ importers:
       '@nachi/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@nachi/mesh-fx':
+        specifier: workspace:*
+        version: link:../../packages/mesh-fx
       '@nachi/trails':
         specifier: workspace:*
         version: link:../../packages/trails
@@ -65,6 +68,19 @@ importers:
         version: 7.3.1(@types/node@24.10.13)
 
   packages/core: {}
+
+  packages/mesh-fx:
+    dependencies:
+      '@nachi/tsl-kit':
+        specifier: workspace:*
+        version: link:../tsl-kit
+    devDependencies:
+      '@types/three':
+        specifier: 0.185.0
+        version: 0.185.0
+      three:
+        specifier: 0.185.1
+        version: 0.185.1
 
   packages/trails:
     dependencies:

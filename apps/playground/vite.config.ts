@@ -18,6 +18,7 @@ export default defineConfig({
         m6Collision: 'm6-collision/index.html',
         m7Ribbons: 'm7-ribbons/index.html',
         m8TslKit: 'm8-tslkit/index.html',
+        m8MeshFx: 'm8-meshfx/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },
@@ -25,6 +26,10 @@ export default defineConfig({
   },
   resolve: {
     alias: [
+      {
+        find: '@nachi/mesh-fx',
+        replacement: fileURLToPath(new URL('../../packages/mesh-fx/src/index.ts', import.meta.url)),
+      },
       {
         find: '@nachi/tsl-kit/math',
         replacement: fileURLToPath(new URL('../../packages/tsl-kit/src/math.ts', import.meta.url)),

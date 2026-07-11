@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#070a16" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M8 Mesh FX Smoke</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="hud">
+        <p class="eyebrow">M8 GPU smoke · mesh-fx</p>
+        <h1>Procedural meshes + fxMaterial</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing…</dd>
+          </div>
+          <div>
+            <dt>Path</dt>
+            <dd>CPU attributes + offscreen RT readback</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <section class="visual-shell">
+        <canvas
+          id="meshfx-visual"
+          width="672"
+          height="96"
+          aria-label="Seven mesh FX readback panels"
+        ></canvas>
+        <div class="labels" aria-hidden="true">
+          <span>slashArc t0</span><span>slashArc t1</span><span>ring</span><span>cylinder</span
+          ><span>cone</span><span>magicCircle</span><span>fresnel edge</span>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/m8-meshfx.ts"></script>
+  </body>
+</html>
