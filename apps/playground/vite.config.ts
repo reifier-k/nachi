@@ -2,6 +2,21 @@ import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
+  plugins: [
+    {
+      name: 'favicon-no-content',
+      configureServer(server) {
+        server.middlewares.use((request, response, next) => {
+          if (request.url !== '/favicon.ico') {
+            next();
+            return;
+          }
+          response.statusCode = 204;
+          response.end();
+        });
+      },
+    },
+  ],
   build: {
     rollupOptions: {
       input: {

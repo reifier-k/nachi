@@ -27,7 +27,7 @@ import {
   polarUV,
   uvFlow,
 } from '@nachi/mesh-fx';
-import { polarUVCpu, uvFlowCpu } from '@nachi/tsl-kit/math';
+import { dissolveCpu, polarUVCpu, uvFlowCpu } from '@nachi/tsl-kit/math';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -47,6 +47,13 @@ const HEIGHT = 400;
 const PROBE_SIZE = 96;
 const STEP = 1 / 60;
 const MAP_WIDTH = 32;
+const DISSOLVE_SIZE = 8;
+const DISSOLVE_LIFE = 0.65;
+const DISSOLVE_THRESHOLD = 0.92 + (0.05 - 0.92) * DISSOLVE_LIFE;
+const DISSOLVE_EDGE_WIDTH = 0.04;
+const ATTRACTOR_STRENGTH = 14;
+const DRAG_COEFFICIENT = 4.2;
+const INITIAL_RADIUS = 1.55;
 const PIXEL_DIFFERENCE_THRESHOLD = 10;
 const root = document.documentElement;
 const query = new URLSearchParams(location.search);
@@ -119,13 +126,19 @@ function angularTexture(): THREE.DataTexture {
 }
 
 function dissolveTexture(): THREE.DataTexture {
-  const texture = new THREE.DataTexture(
-    new Uint8Array([230, 230, 230, 255]),
-    1,
-    1,
-    THREE.RGBAFormat,
-  );
+  const data = new Uint8Array(DISSOLVE_SIZE * DISSOLVE_SIZE * 4);
+  for (let y = 0; y < DISSOLVE_SIZE; y += 1) {
+    for (let x = 0; x < DISSOLVE_SIZE; x += 1) {
+      const noise = (x + y) % 2 === 1 ? 216 : 48;
+      data.set([noise, noise, noise, 255], (y * DISSOLVE_SIZE + x) * 4);
+    }
+  }
+  const texture = new THREE.DataTexture(data, DISSOLVE_SIZE, DISSOLVE_SIZE, THREE.RGBAFormat);
   texture.colorSpace = THREE.NoColorSpace;
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
   texture.needsUpdate = true;
   return texture;
 }
@@ -149,6 +162,12 @@ function beamTexture(): THREE.DataTexture {
 function sampleAngular(uvX: number): Rgb {
   const wrapped = uvX - Math.floor(uvX);
   return irregularTexel(Math.min(MAP_WIDTH - 1, Math.floor(wrapped * MAP_WIDTH)));
+}
+
+function sampleDissolve(uv: readonly [number, number]): number {
+  const x = Math.min(DISSOLVE_SIZE - 1, Math.floor((uv[0] - Math.floor(uv[0])) * DISSOLVE_SIZE));
+  const y = Math.min(DISSOLVE_SIZE - 1, Math.floor((uv[1] - Math.floor(uv[1])) * DISSOLVE_SIZE));
+  return (x + y) % 2 === 1 ? 216 : 48;
 }
 
 function rgb(pixels: Pixels, x: number, row: number, width: number): Rgb {
@@ -215,6 +234,11 @@ function meanRadius(position: Float32Array, alive: Uint32Array): number {
   return total / count;
 }
 
+function analyticConvergenceRadius(time: number): number {
+  const dragPhase = (1 - Math.exp(-DRAG_COEFFICIENT * time)) / DRAG_COEFFICIENT;
+  return INITIAL_RADIUS - (ATTRACTOR_STRENGTH / DRAG_COEFFICIENT) * (time - dragPhase);
+}
+
 function paint(canvas: HTMLCanvasElement, pixels: Pixels): void {
   canvas
     .getContext('2d')
@@ -224,15 +248,15 @@ function paint(canvas: HTMLCanvasElement, pixels: Pixels): void {
 const convergenceDefinition = defineEmitter({
   capacity: 96,
   init: [
-    positionSphere({ radius: 1.55, surfaceOnly: true }),
+    positionSphere({ radius: INITIAL_RADIUS, surfaceOnly: true }),
     velocityCone({ angle: 0, direction: [0, 1, 0], speed: 0 }),
     lifetime(4),
   ],
   render: billboard({ blending: 'additive' }),
   spawn: burst({ count: 80 }),
   update: [
-    pointAttractor({ falloff: 0, position: [0, 0, 0], strength: 14 }),
-    drag(4.2),
+    pointAttractor({ falloff: 0, position: [0, 0, 0], strength: ATTRACTOR_STRENGTH }),
+    drag(DRAG_COEFFICIENT),
     sizeOverLife(curve([0, 0.055], [0.7, 0.035], [1, 0.012])),
     colorOverLife(gradient('#d8fbff', '#56d9ff', '#b64fff')),
   ],
@@ -334,6 +358,11 @@ async function run(): Promise<void> {
   radii.push(await readRadius());
   for (let frame = 0; frame < 12; frame += 1) await convergenceSystem.update(STEP);
   radii.push(await readRadius());
+  const radiusTimes = [0, 12 * STEP, 24 * STEP];
+  const analyticRadii = radiusTimes.map(analyticConvergenceRadius);
+  const radiusRelativeErrors = radii.map(
+    (radius, index) => Math.abs(radius - analyticRadii[index]!) / analyticRadii[index]!,
+  );
 
   const lightSystem = new VFXSystem(runtime, undefined, { fixedTimeStep: { stepSeconds: STEP } });
   const lightInstance = lightSystem.spawn(defineEffect({ elements: { light: lightDefinition } }), {
@@ -389,7 +418,7 @@ async function run(): Promise<void> {
     blending: 'additive',
     dissolve: {
       edgeColor: '#ffffff',
-      edgeWidth: 0.04,
+      edgeWidth: DISSOLVE_EDGE_WIDTH,
       overLife: [
         [0, 0.92],
         [1, 0.05],
@@ -400,7 +429,13 @@ async function run(): Promise<void> {
     uv: polarUV({ rotation: 0.23 }).flow({ speed: [0.21, 0] }),
   });
   magicMaterial.fx.setTime(0.7);
-  magicMaterial.fx.setNormalizedLife(0.65);
+  magicMaterial.fx.setNormalizedLife(DISSOLVE_LIFE);
+  const magicWithoutDissolveMaterial = fxMaterial({
+    blending: 'additive',
+    map,
+    uv: polarUV({ rotation: 0.23 }).flow({ speed: [0.21, 0] }),
+  });
+  magicWithoutDissolveMaterial.fx.setTime(0.7);
   const beamMaterial = fxMaterial({
     blending: 'additive',
     map: beamMap,
@@ -413,7 +448,8 @@ async function run(): Promise<void> {
   const probeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
   probeCamera.position.z = 3;
   const probeScene = new THREE.Scene();
-  probeScene.add(new THREE.Mesh(magicGeometry, magicMaterial));
+  const probeMesh = new THREE.Mesh(magicGeometry, magicMaterial);
+  probeScene.add(probeMesh);
   renderer.setRenderTarget(probeTarget);
   renderer.setClearColor(0x000000, 0);
   renderer.clear();
@@ -426,6 +462,19 @@ async function run(): Promise<void> {
     PROBE_SIZE,
     true,
   );
+  probeMesh.material = magicWithoutDissolveMaterial;
+  renderer.clear();
+  renderer.render(probeScene, probeCamera);
+  const magicWithoutDissolvePixels = compactRgba8Readback(
+    new Uint8Array(
+      await renderer.readRenderTargetPixelsAsync(probeTarget, 0, 0, PROBE_SIZE, PROBE_SIZE),
+    ),
+    PROBE_SIZE,
+    PROBE_SIZE,
+    true,
+  );
+  probeMesh.material = magicMaterial;
+  const magicDissolveDifference = differenceStats(magicPixels, magicWithoutDissolvePixels);
   const approximateWorld = [0.31, 0.18] as const;
   const sampleX = Math.round(((approximateWorld[0] + 1) * PROBE_SIZE) / 2 - 0.5);
   const sampleBottom = Math.round(((approximateWorld[1] + 1) * PROBE_SIZE) / 2 - 0.5);
@@ -439,6 +488,12 @@ async function run(): Promise<void> {
   const mirrorUv = [sourceUv[0], 1 - sourceUv[1]] as const;
   const transformedMirrorUv = uvFlowCpu(polarUVCpu(mirrorUv, { rotation: 0.23 }), [0.21, 0], 0.7);
   const expectedMirrorMagic = sampleAngular(transformedMirrorUv[0]);
+  const expectedDissolveNoise = sampleDissolve(transformedUv) / 255;
+  const expectedDissolve = dissolveCpu(
+    expectedDissolveNoise,
+    DISSOLVE_THRESHOLD,
+    DISSOLVE_EDGE_WIDTH,
+  );
   const sampleRow = PROBE_SIZE - 1 - sampleBottom;
   const mirrorRow = sampleBottom;
   const actualMagic = rgb(magicPixels, sampleX, sampleRow, PROBE_SIZE);
@@ -517,10 +572,19 @@ async function run(): Promise<void> {
     beamReadback: beamPixels > 120,
     beamUvFlow: beamFlowDifference.changedPixels > 120,
     consoleClean: consoleMessages.length === 0,
-    convergence: radii[0]! > radii[1]! && radii[1]! > radii[2]! && radii[2]! < radii[0]! * 0.93,
+    convergence:
+      radii[0]! > radii[1]! &&
+      radii[1]! > radii[2]! &&
+      radiusRelativeErrors.every((error) => error <= 0.03),
     lightReadback:
       lightStats.selectedCount === 4 && lightStats.candidateCount === 6 && lightPixels > 40,
     magicExpectedTexel: rgbMatches(actualMagic, expectedMagic),
+    magicPartialDissolve:
+      48 / 255 < DISSOLVE_THRESHOLD &&
+      216 / 255 > DISSOLVE_THRESHOLD + DISSOLVE_EDGE_WIDTH &&
+      expectedDissolve.coverage === 1 &&
+      expectedDissolve.edge === 0 &&
+      magicDissolveDifference.changedPixels > 120,
     magicNonMirror:
       sampleWorld[1] > 0.1 &&
       !rgbMatches(actualMagic, expectedMirrorMagic) &&
@@ -550,6 +614,14 @@ async function run(): Promise<void> {
     },
     magicCircle: {
       actual: actualMagic,
+      dissolve: {
+        differenceFromDisabled: magicDissolveDifference,
+        expectedAtSample: expectedDissolve,
+        expectedNoiseAtSample: expectedDissolveNoise,
+        life: DISSOLVE_LIFE,
+        noiseBytes: [48, 216],
+        threshold: DISSOLVE_THRESHOLD,
+      },
       expected: expectedMagic,
       expectedMirror: expectedMirrorMagic,
       mirrorEnergy,
@@ -557,12 +629,20 @@ async function run(): Promise<void> {
       transformedUv,
     },
     ok: Object.values(validation).every(Boolean),
-    particles: { changedPixels: particlePixels, radii },
+    particles: {
+      analyticRadii,
+      changedPixels: particlePixels,
+      radii,
+      radiusRelativeErrors,
+      radiusTimes,
+    },
     measurements: {
       beamPixels,
       lightPixels,
       particlePixels,
+      analyticRadii,
       radii,
+      radiusRelativeErrors,
       stressAliveCount,
       stressFinite,
       visual,
@@ -591,6 +671,7 @@ async function run(): Promise<void> {
   beam.geometry.dispose();
   receiver.geometry.dispose();
   magicMaterial.dispose();
+  magicWithoutDissolveMaterial.dispose();
   beamMaterial.dispose();
   (receiver.material as THREE.Material).dispose();
 }

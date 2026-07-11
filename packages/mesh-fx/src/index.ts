@@ -16,7 +16,7 @@ export {
   type MeshFxMesh,
   type RingOptions,
   type SlashArcOptions,
-} from './geometry';
+} from './geometry.js';
 export {
   fxMaterial,
   polarUV,
@@ -33,8 +33,8 @@ export {
   type PolarUvAuthoring,
   type PolarUvAuthoringConfig,
   type UvFlowAuthoringConfig,
-} from './material';
-export { MeshFxDiagnosticError, type MeshFxDiagnostic } from './diagnostics';
+} from './material.js';
+export { MeshFxDiagnosticError, type MeshFxDiagnostic } from './diagnostics.js';
 export {
   applyVat,
   resolveVatFrames,
@@ -50,4 +50,4 @@ export {
   type VatPositionMode,
   type VatRemapRange,
   type VatVertexLookup,
-} from './vat';
+} from './vat.js';

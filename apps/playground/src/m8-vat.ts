@@ -458,7 +458,7 @@ async function run(): Promise<void> {
     isWebGpu,
   );
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: `m8-vat-${requestedBackend}.png`, selector: '#vat-visual' },
+    { filename: 'm8-vat.png', selector: '#vat-visual' },
   ]);
   const monitor = createPerformanceMonitor(renderer, {
     gpuScopes: ['render'],

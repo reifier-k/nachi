@@ -210,6 +210,28 @@ describe('@nachi/mesh-fx Blender VAT runtime', () => {
     ).toEqual({ frame0: 1, frame1: 1, mix: 0 });
   });
 
+  it('diagnoses unsupported interpolation in the standalone frame resolver', () => {
+    expect(() =>
+      resolveVatFrames(0, {
+        fps: 4,
+        frameCount: 4,
+        interpolation: 'cubic' as never,
+      }),
+    ).toThrow(MeshFxDiagnosticError);
+    try {
+      resolveVatFrames(0, {
+        fps: 4,
+        frameCount: 4,
+        interpolation: 'cubic' as never,
+      });
+    } catch (error) {
+      expect((error as MeshFxDiagnosticError).diagnostic).toMatchObject({
+        code: 'NACHI_MESHFX_INVALID_PARAMETER',
+        path: 'resolveVatFrames.interpolation',
+      });
+    }
+  });
+
   it('applies position and normal VAT nodes with package-owned or external clocks', () => {
     const mesh = vatMesh();
     const controls = applyVat(mesh, {
@@ -296,6 +318,32 @@ describe('@nachi/mesh-fx Blender VAT runtime', () => {
 });
 
 describe('@nachi/mesh-fx fxMaterial', () => {
+  it('deep-freezes fluent UV authoring arrays and tuple inputs', () => {
+    const center: [number, number] = [0.25, 0.75];
+    const speed: [number, number] = [0.3, -0.1];
+    const authoring = polarUV({ center }).flow({ speed });
+    const cartesianSpeed: [number, number] = [0, -2];
+    const cartesian = uvFlow({ speed: cartesianSpeed });
+
+    expect(Object.isFrozen(authoring)).toBe(true);
+    expect(Object.isFrozen(authoring.center)).toBe(true);
+    expect(Object.isFrozen(authoring.flows)).toBe(true);
+    expect(Object.isFrozen(authoring.flows[0])).toBe(true);
+    expect(Object.isFrozen(authoring.flows[0]?.speed)).toBe(true);
+    expect(Object.isFrozen(cartesian.speed)).toBe(true);
+    expect(() => ((authoring.center as unknown as number[])[0] = 1)).toThrow(TypeError);
+    expect(() => (authoring.flows as unknown[]).push({ speed: [1, 1] })).toThrow(TypeError);
+    expect(() => ((authoring.flows[0]!.speed as unknown as number[])[0] = 1)).toThrow(TypeError);
+    expect(() => ((cartesian.speed as unknown as number[])[1] = 1)).toThrow(TypeError);
+
+    center[0] = 0.9;
+    speed[0] = 0.9;
+    cartesianSpeed[1] = 0.9;
+    expect(authoring.center).toEqual([0.25, 0.75]);
+    expect(authoring.flows[0]!.speed).toEqual([0.3, -0.1]);
+    expect(cartesian.speed).toEqual([0, -2]);
+  });
+
   it('lowers polar flow, dissolve curve, and Fresnel to one NodeMaterial graph', () => {
     const material = fxMaterial({
       color: '#102040',

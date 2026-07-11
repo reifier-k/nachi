@@ -1,6 +1,6 @@
 import { BufferAttribute, BufferGeometry, Mesh, MeshBasicMaterial, type Material } from 'three';
 
-import { finite, integer, invalid, nonNegative, positive, unit } from './diagnostics';
+import { finite, integer, invalid, nonNegative, positive, unit } from './diagnostics.js';
 
 export interface MeshFxElementMetadata {
   readonly kind: 'slashArc' | 'ring' | 'cylinder' | 'cone' | 'magicCircle';

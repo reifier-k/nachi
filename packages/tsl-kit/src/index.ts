@@ -1,5 +1,5 @@
-export { dissolve, type DissolveConfig } from './dissolve';
-export { fresnel, rimLight, type FresnelConfig, type RimLightConfig } from './lighting';
+export { dissolve, type DissolveConfig } from './dissolve.js';
+export { fresnel, rimLight, type FresnelConfig, type RimLightConfig } from './lighting.js';
 export {
   distortionUV,
   flowMap,
@@ -9,7 +9,7 @@ export {
   type FlowMapConfig,
   type PolarUVConfig,
   type UvFlowConfig,
-} from './uv';
+} from './uv.js';
 export {
   TslKitDiagnosticError,
   type ColorInput,
@@ -19,4 +19,4 @@ export {
   type TslKitDiagnostic,
   type TslNode,
   type Vec2Input,
-} from './types';
+} from './types.js';

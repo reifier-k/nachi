@@ -17,7 +17,14 @@ import { float, mix, select, texture, uniform, uv, vec3 } from 'three/tsl';
 import type Node from 'three/src/nodes/core/Node.js';
 import type UniformNode from 'three/src/nodes/core/UniformNode.js';
 
-import { MeshFxDiagnosticError, finite, invalid, nonNegative, positive, unit } from './diagnostics';
+import {
+  MeshFxDiagnosticError,
+  finite,
+  invalid,
+  nonNegative,
+  positive,
+  unit,
+} from './diagnostics.js';
 
 export interface PolarUvAuthoringConfig {
   readonly center?: Vec2Input;
@@ -43,7 +50,7 @@ export interface CartesianUvFlowAuthoring {
 
 export function uvFlow(config: UvFlowAuthoringConfig): CartesianUvFlowAuthoring {
   validateSpeed(config.speed, 'uvFlow.speed');
-  return Object.freeze({ kind: 'uvFlow' as const, speed: config.speed });
+  return Object.freeze({ kind: 'uvFlow' as const, speed: immutableVec2(config.speed) });
 }
 
 export function polarUV(config: PolarUvAuthoringConfig = {}): PolarUvAuthoring {
@@ -52,21 +59,27 @@ export function polarUV(config: PolarUvAuthoringConfig = {}): PolarUvAuthoring {
     finite(config.center[1] ?? Number.NaN, 'polarUV.center[1]');
   }
   if (typeof config.rotation === 'number') finite(config.rotation, 'polarUV.rotation');
-  return polarBuilder(config, []);
+  const immutableConfig = Object.freeze({
+    ...(config.center === undefined ? {} : { center: immutableVec2(config.center) }),
+    ...(config.rotation === undefined ? {} : { rotation: config.rotation }),
+  }) satisfies PolarUvAuthoringConfig;
+  return polarBuilder(immutableConfig, Object.freeze([]));
 }
 
 function polarBuilder(
   config: PolarUvAuthoringConfig,
   flows: readonly UvFlowAuthoringConfig[],
 ): PolarUvAuthoring {
+  const immutableFlows = Object.freeze([...flows]);
   return Object.freeze({
     kind: 'polarUV' as const,
     ...(config.center === undefined ? {} : { center: config.center }),
     ...(config.rotation === undefined ? {} : { rotation: config.rotation }),
-    flows,
+    flows: immutableFlows,
     flow(flowConfig: UvFlowAuthoringConfig): PolarUvAuthoring {
       validateSpeed(flowConfig.speed, 'polarUV.flow.speed');
-      return polarBuilder(config, [...flows, Object.freeze({ ...flowConfig })]);
+      const immutableFlow = Object.freeze({ speed: immutableVec2(flowConfig.speed) });
+      return polarBuilder(config, [...immutableFlows, immutableFlow]);
     },
   });
 }
@@ -270,6 +283,10 @@ function validateSpeed(speed: Vec2Input, path: string): void {
   if (!Array.isArray(speed)) return;
   finite(speed[0] ?? Number.NaN, `${path}[0]`);
   finite(speed[1] ?? Number.NaN, `${path}[1]`);
+}
+
+function immutableVec2(input: Vec2Input): Vec2Input {
+  return Array.isArray(input) ? Object.freeze([input[0], input[1]] as const) : input;
 }
 
 function blendingValue(blending: FxBlending): THREE.Blending {

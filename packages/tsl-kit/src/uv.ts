@@ -1,8 +1,8 @@
 import type Node from 'three/src/nodes/core/Node.js';
 
-import { abs, cos, fract, length, mix, sin, texture, uv, vec2 } from './tsl';
-import type { ScalarInput, TextureInput, Vec2Input } from './types';
-import { scalar, textureInput, vector2 } from './validation';
+import { abs, cos, fract, length, mix, sin, texture, uv, vec2 } from './tsl.js';
+import type { ScalarInput, TextureInput, Vec2Input } from './types.js';
+import { scalar, textureInput, vector2 } from './validation.js';
 
 export interface UvFlowConfig {
   readonly speed: Vec2Input;

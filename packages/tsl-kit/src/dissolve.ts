@@ -1,8 +1,8 @@
 import type Node from 'three/src/nodes/core/Node.js';
 
-import { step, texture, vec4 } from './tsl';
-import type { ColorInput, ScalarInput, TextureInput } from './types';
-import { color3, scalar, textureInput, vector2 } from './validation';
+import { step, texture, vec4 } from './tsl.js';
+import type { ColorInput, ScalarInput, TextureInput } from './types.js';
+import { color3, scalar, textureInput, vector2 } from './validation.js';
 
 export interface DissolveConfig {
   readonly edgeColor?: ColorInput;

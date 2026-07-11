@@ -1,8 +1,13 @@
 import { Color } from 'three';
 import type Node from 'three/src/nodes/core/Node.js';
 
-import { color, float, vec2 } from './tsl';
-import { TslKitDiagnosticError, type ColorInput, type ScalarInput, type Vec2Input } from './types';
+import { color, float, vec2 } from './tsl.js';
+import {
+  TslKitDiagnosticError,
+  type ColorInput,
+  type ScalarInput,
+  type Vec2Input,
+} from './types.js';
 
 type TextureLike = { readonly isTexture?: boolean };
 

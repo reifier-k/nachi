@@ -1,8 +1,8 @@
 import type Node from 'three/src/nodes/core/Node.js';
 
-import { clamp, dot, normalView, positionViewDirection, pow, vec3 } from './tsl';
-import type { ColorInput, ScalarInput } from './types';
-import { color3, positiveScalar, scalar } from './validation';
+import { clamp, dot, normalView, positionViewDirection, pow, vec3 } from './tsl.js';
+import type { ColorInput, ScalarInput } from './types.js';
+import { color3, positiveScalar, scalar } from './validation.js';
 
 export interface FresnelConfig {
   readonly color?: ColorInput;

@@ -19,7 +19,7 @@ import {
 import type Node from 'three/src/nodes/core/Node.js';
 import type UniformNode from 'three/src/nodes/core/UniformNode.js';
 
-import { MeshFxDiagnosticError, finite, invalid, positive } from './diagnostics';
+import { MeshFxDiagnosticError, finite, invalid, positive } from './diagnostics.js';
 
 export type VatInterpolation = 'nearest' | 'linear';
 export type VatFrameOrder = 'top-to-bottom' | 'bottom-to-top';
@@ -159,7 +159,7 @@ export function resolveVatFrames(
   const validated = {
     end,
     fps,
-    interpolation: config.interpolation ?? 'linear',
+    interpolation: validateInterpolation(config.interpolation, 'resolveVatFrames.interpolation'),
     loop: config.loop ?? true,
     start,
   } as const;
@@ -222,10 +222,7 @@ function validateVat(mesh: THREE.Mesh, config: VatConfig): ValidatedVat {
     }
     requireDataTextureColorSpace(config.normalTexture, 'applyVat.normalTexture');
   }
-  const interpolation = config.interpolation ?? 'linear';
-  if (interpolation !== 'nearest' && interpolation !== 'linear') {
-    invalid('applyVat.interpolation', 'must be nearest or linear');
-  }
+  const interpolation = validateInterpolation(config.interpolation, 'applyVat.interpolation');
   const frameOrder = config.frameOrder ?? 'top-to-bottom';
   if (frameOrder !== 'top-to-bottom' && frameOrder !== 'bottom-to-top') {
     invalid('applyVat.frameOrder', 'must be top-to-bottom or bottom-to-top');
@@ -387,6 +384,14 @@ function validateFrame(value: number, config: Pick<ValidatedVat, 'end' | 'start'
     );
   }
   return value;
+}
+
+function validateInterpolation(value: VatConfig['interpolation'], path: string): VatInterpolation {
+  const interpolation = value ?? 'linear';
+  if (interpolation !== 'nearest' && interpolation !== 'linear') {
+    invalid(path, 'must be nearest or linear');
+  }
+  return interpolation;
 }
 
 function validateRemap(range: VatRemapRange | undefined): void {
