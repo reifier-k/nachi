@@ -55,6 +55,8 @@ export interface TimelineActionEvent {
   readonly action: TimelineAction;
   readonly actionIndex: number;
   readonly cycle: number;
+  /** Emitter created by this play action; absent for mesh-fx and non-play actions. */
+  readonly emitter?: VfxEmitterRuntimeView;
   readonly entryIndex: number;
   readonly localTime: number;
   readonly sequence: number;
@@ -567,11 +569,12 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       if (entry.at > this.#localTime + EPSILON) break;
       this.#entryCursor += 1;
       for (const [actionIndex, action] of entry.actions.entries()) {
-        this.#executeAction(action);
+        const emitter = this.#executeAction(action);
         const event: TimelineActionEvent = {
           action,
           actionIndex,
           cycle: this.#cycle,
+          ...(emitter === undefined ? {} : { emitter }),
           entryIndex,
           localTime: entry.at,
           sequence: this.#sequence++,
@@ -594,17 +597,18 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     }
   }
 
-  #executeAction(action: TimelineAction): void {
-    if (action.kind === 'play') this.#playElement(action.target);
-    else if (action.kind === 'stop') this.#stopElement(action.target);
+  #executeAction(action: TimelineAction): VfxEmitterRuntimeView | undefined {
+    if (action.kind === 'play') return this.#playElement(action.target);
+    if (action.kind === 'stop') this.#stopElement(action.target);
     else if (action.kind === 'hit-stop')
       this.applyHitStop(action.durationMs, action.timeScale ?? 0);
     else if (action.kind === 'camera-shake') {
       this.#activeShakes.push({ action, elapsed: 0, id: this.#sequence });
     }
+    return undefined;
   }
 
-  #playElement(key: string): void {
+  #playElement(key: string): VfxEmitterRuntimeView | undefined {
     const mesh = this.#meshRuntimes.get(key);
     if (mesh) {
       mesh.elapsed = 0;
@@ -614,7 +618,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
         controls.setTime(this.#localTime);
         controls.setNormalizedLife(0);
       }
-      return;
+      return undefined;
     }
     this.#stopElement(key);
     const emitter = this.#spawnEmitter(key, {
@@ -637,6 +641,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       return;
     }
     this.#activeEmitters.set(key, emitter);
+    return emitter.getEmitter(key);
   }
 
   #stopElement(key: string): void {

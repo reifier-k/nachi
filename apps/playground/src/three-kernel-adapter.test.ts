@@ -470,6 +470,53 @@ describe('three kernel adapter', () => {
     expect(mesh.material.blending).toBe(2);
   });
 
+  it('keeps unlit sprites on SpriteNodeMaterial and routes lit sprites through standard lighting', () => {
+    const normalRef = { assetType: 'texture', kind: 'asset-ref', uri: 'normal' } as const;
+    const normalMap = new THREE.DataTexture(new Uint8Array([255, 128, 255, 255]), 1, 1);
+    normalMap.colorSpace = THREE.NoColorSpace;
+    normalMap.needsUpdate = true;
+    const definition = (lit: boolean) =>
+      defineEmitter({
+        capacity: 1,
+        render: billboard(
+          lit ? { lit: { normalMap: normalRef, roughness: 0.7 } } : { blending: 'alpha' },
+        ),
+        spawn: burst({ count: 1 }),
+      });
+    const adapter = createThreeKernelAdapter();
+    const unlitProgram = compileEmitter(definition(false));
+    const litProgram = compileEmitter(definition(true));
+    const unlit = materializeThreeSpriteDraw(unlitProgram, unlitProgram.buildKernels(adapter));
+    const lit = materializeThreeSpriteDraw(litProgram, litProgram.buildKernels(adapter), 0, {
+      resolveTexture: createThreeTextureResolver(new Map([[normalRef.uri, normalMap]])),
+    });
+
+    expect(unlit.material).toBeInstanceOf(THREE.SpriteNodeMaterial);
+    expect(lit.material).toBeInstanceOf(THREE.MeshStandardNodeMaterial);
+    expect(lit.material.normalNode).not.toBeNull();
+    expect((lit.material as THREE.MeshStandardNodeMaterial).lights).toBe(true);
+    expect((lit.material as THREE.MeshStandardNodeMaterial).roughness).toBe(0.7);
+  });
+
+  it('rejects color-managed normal textures before building a lit sprite graph', () => {
+    const normalRef = { assetType: 'texture', kind: 'asset-ref', uri: 'bad-normal' } as const;
+    const normalMap = new THREE.DataTexture(new Uint8Array([128, 128, 255, 255]), 1, 1);
+    normalMap.colorSpace = THREE.SRGBColorSpace;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ lit: { normalMap: normalRef } }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(() =>
+      materializeThreeSpriteDraw(program, program.buildKernels(createThreeKernelAdapter()), 0, {
+        resolveTexture: createThreeTextureResolver(new Map([[normalRef.uri, normalMap]])),
+      }),
+    ).toThrow(/NoColorSpace/);
+  });
+
   it('binds opt-in sorted indirection instead of the compact alive array', () => {
     const program = compileEmitter(
       defineEmitter({

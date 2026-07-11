@@ -546,6 +546,17 @@ export interface BillboardOptions {
     | { readonly mode: 'velocity-aligned' }
     | { readonly mode: 'velocity-stretch'; readonly factor?: number };
   readonly blending?: BlendingMode;
+  /**
+   * Routes the sprite through Three's standard physical-lighting model. The optional normal map
+   * is tangent-space data and must resolve to a linear/NoColorSpace texture.
+   */
+  readonly lit?:
+    | boolean
+    | {
+        readonly metalness?: number;
+        readonly normalMap?: TextureRef;
+        readonly roughness?: number;
+      };
   /** WebGPU-only back-to-front particle sorting by camera depth. Alpha modes only. */
   readonly sorted?: boolean;
   /** Local-space center used by emitter-level coarse sorting. Defaults to the emitter origin. */

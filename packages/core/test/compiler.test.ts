@@ -1007,6 +1007,44 @@ describe('emitter kernel compiler', () => {
     });
   });
 
+  it('compiles lit billboard physical parameters and tangent-space normal maps', () => {
+    const normalMap = { assetType: 'texture', kind: 'asset-ref', uri: 'normal' } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 2,
+        render: billboard({ lit: { metalness: 0.1, normalMap, roughness: 0.65 } }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const draw = program.draws[0];
+    if (!draw || draw.kind !== 'billboard') throw new Error('Expected a billboard draw.');
+
+    expect(draw.fragment.lit).toEqual({ metalness: 0.1, normalMap, roughness: 0.65 });
+    const defaults = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ lit: true }),
+        spawn: burst({ count: 1 }),
+      }),
+    ).draws[0];
+    if (!defaults || defaults.kind !== 'billboard') throw new Error('Expected lit defaults.');
+    expect(defaults.fragment.lit).toEqual({ metalness: 0, roughness: 0.8 });
+    expect(
+      compileEmitter(
+        defineEmitter({
+          capacity: 1,
+          render: billboard({ lit: { metalness: -0.1, roughness: 1.1 } }),
+          spawn: burst({ count: 1 }),
+        }),
+      ).diagnostics.map(({ code }) => code),
+    ).toEqual(
+      expect.arrayContaining([
+        'NACHI_BILLBOARD_LIT_METALNESS_INVALID',
+        'NACHI_BILLBOARD_LIT_ROUGHNESS_INVALID',
+      ]),
+    );
+  });
+
   it('materializes opt-in padded bitonic passes without replacing compaction indices', () => {
     const definition = defineEmitter({
       capacity: 7,
@@ -2068,6 +2106,45 @@ describe('emitter kernel compiler', () => {
     expect(srgbGray.data[0]).toBeCloseTo(0.2158605, 6);
     const linearGray = bakeGradientLut(gradient([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]));
     expect(linearGray.data[0]).toBeCloseTo(0.5, 6);
+  });
+
+  it('bakes alpha-bearing hex colors with linear alpha and sRGB-decoded RGB', () => {
+    const rgba = bakeGradientLut(gradient('#6b2cff00', '#6b2cff00'));
+    expect(rgba.data[0]).toBeCloseTo(0.1470273, 7);
+    expect(rgba.data[1]).toBeCloseTo(0.0251869, 7);
+    expect(rgba.data[2]).toBe(1);
+    expect(rgba.data[3]).toBe(0);
+
+    const shorthand = bakeGradientLut(gradient('#6b28', '#6b28'));
+    const expanded = bakeGradientLut(gradient('#66bb2288', '#66bb2288'));
+    expect([...shorthand.data]).toEqual([...expanded.data]);
+    expect(shorthand.data[3]).toBeCloseTo(8 / 15, 7);
+
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [colorOverLife(gradient('#ffffff', '#6b2cff00'))],
+      }),
+    );
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain('NACHI_LUT_BAKE_FAILED');
+  });
+
+  it('lists supported hexadecimal formats in LUT bake diagnostics', () => {
+    const unsupported = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [colorOverLife(gradient('#ffffff', '#12345'))],
+      }),
+    );
+
+    expect(unsupported.diagnostics).toContainEqual({
+      code: 'NACHI_LUT_BAKE_FAILED',
+      message:
+        'LUT baking failed: Unsupported color "#12345". Expected #RGB, #RRGGBB, #RGBA, or #RRGGBBAA.',
+      path: 'update[0]',
+      phase: 'compile',
+      severity: 'error',
+    });
   });
 
   it('diagnoses underspecified curves/gradients and unsupported interpolation', () => {

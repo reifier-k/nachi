@@ -749,6 +749,11 @@ export interface CompiledSpriteDrawDescription {
       readonly rows: number;
     };
     readonly map?: TextureRef;
+    readonly lit?: {
+      readonly metalness: number;
+      readonly normalMap?: TextureRef;
+      readonly roughness: number;
+    };
     readonly soft?: { readonly fadeDistance: number };
   };
   readonly geometry: {
@@ -1627,8 +1632,12 @@ function normalizeColor(input: ColorInput): Vec4 {
   }
   const hex = input.startsWith('#') ? input.slice(1) : input;
   const expanded =
-    hex.length === 3 ? [...hex].map((character) => character.repeat(2)).join('') : hex;
-  if (!/^[0-9a-fA-F]{6}$/.test(expanded)) throw new Error(`Unsupported color "${input}".`);
+    hex.length === 3 || hex.length === 4
+      ? [...hex].map((character) => character.repeat(2)).join('')
+      : hex;
+  if (!/^(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(expanded)) {
+    throw new Error(`Unsupported color "${input}". Expected #RGB, #RRGGBB, #RGBA, or #RRGGBBAA.`);
+  }
   const srgbToLinear = (channel: number): number =>
     channel < 0.04045
       ? channel * 0.0773993808
@@ -1637,7 +1646,7 @@ function normalizeColor(input: ColorInput): Vec4 {
     srgbToLinear(Number.parseInt(expanded.slice(0, 2), 16) / 255),
     srgbToLinear(Number.parseInt(expanded.slice(2, 4), 16) / 255),
     srgbToLinear(Number.parseInt(expanded.slice(4, 6), 16) / 255),
-    1,
+    expanded.length === 8 ? Number.parseInt(expanded.slice(6, 8), 16) / 255 : 1,
   ];
 }
 
@@ -2034,6 +2043,32 @@ function compileSpriteDraws(
       );
     }
     const flipbook = options.map?.kind === 'flipbook' ? options.map : undefined;
+    const litOptions = typeof options.lit === 'object' ? options.lit : undefined;
+    const lit = options.lit
+      ? {
+          metalness: litOptions?.metalness ?? 0,
+          ...(litOptions?.normalMap === undefined ? {} : { normalMap: litOptions.normalMap }),
+          roughness: litOptions?.roughness ?? 0.8,
+        }
+      : undefined;
+    if (lit && (!Number.isFinite(lit.metalness) || lit.metalness < 0 || lit.metalness > 1)) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_BILLBOARD_LIT_METALNESS_INVALID',
+          'Lit billboard metalness must be a finite number from zero through one.',
+          `${path}.config.lit.metalness`,
+        ),
+      );
+    }
+    if (lit && (!Number.isFinite(lit.roughness) || lit.roughness < 0 || lit.roughness > 1)) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_BILLBOARD_LIT_ROUGHNESS_INVALID',
+          'Lit billboard roughness must be a finite number from zero through one.',
+          `${path}.config.lit.roughness`,
+        ),
+      );
+    }
     if (
       flipbook &&
       (!Number.isSafeInteger(flipbook.cols) ||
@@ -2154,6 +2189,7 @@ function compileSpriteDraws(
               },
             }),
         ...(map === undefined ? {} : { map }),
+        ...(lit === undefined ? {} : { lit }),
         ...(softFadeDistance === undefined ? {} : { soft: { fadeDistance: softFadeDistance } }),
       },
       geometry: {

@@ -18,6 +18,7 @@ import {
   velocityCone,
 } from '@nachi/core';
 import type { GeometryRef, TextureRef, VfxEmitterRuntimeView } from '@nachi/core';
+import { createPostPipeline, screenDistortion } from '@nachi/post';
 import * as THREE from 'three/webgpu';
 import { Pane } from 'tweakpane';
 
@@ -30,6 +31,7 @@ import {
   materializeThreeMeshDraw,
   materializeThreeSpriteDraw,
   readLogicalAttribute,
+  readStorage,
 } from './three-kernel-adapter';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-explosion.css';
@@ -142,6 +144,7 @@ const goldenExplosion = defineEffect({
         blending: 'alpha',
         map: smokeRef,
         soft: { fadeDistance: 0.05 },
+        sorted: true,
       }),
       spawn: burst({ count: 14 }),
       update: [
@@ -270,6 +273,33 @@ function brightnessContribution(pixels: ArrayLike<number>, baseline: ArrayLike<n
   return total / (pixels.length / 4);
 }
 
+function imageStats(frames: readonly ArrayLike<number>[]) {
+  let foreground = 0;
+  let saturated = 0;
+  let pixels = 0;
+  for (const frame of frames) {
+    for (let offset = 0; offset < frame.length; offset += 4) {
+      const energy =
+        Number(frame[offset] ?? 0) +
+        Number(frame[offset + 1] ?? 0) +
+        Number(frame[offset + 2] ?? 0);
+      if (energy > 24) foreground += 1;
+      if (energy > 744) saturated += 1;
+      pixels += 1;
+    }
+  }
+  return { foregroundRatio: foreground / pixels, saturatedRatio: saturated / pixels };
+}
+
+function cameraState(camera: THREE.Camera) {
+  camera.updateMatrixWorld(true);
+  return {
+    projectionMatrix: camera.projectionMatrix.toArray(),
+    viewMatrix: camera.matrixWorldInverse.toArray(),
+    viewportSize: [WIDTH, HEIGHT] as const,
+  };
+}
+
 function paintReadback(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): void {
   const context = canvas.getContext('2d');
   if (!context) throw new Error('Golden explosion preview canvas has no 2D context.');
@@ -288,8 +318,77 @@ function paintReadback(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): vo
   context.putImageData(image, 0, 0);
 }
 
-async function run(): Promise<void> {
+async function measurePerformance(): Promise<void> {
   const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: true });
+  renderer.setSize(64, 64);
+  await renderer.init();
+  const backend = renderer.backend as BackendLike;
+  if (!backend.isWebGPUBackend)
+    throw new Error('Golden explosion performance capture requires WebGPU.');
+  const adapter = createThreeKernelAdapter({
+    backend: 'webgpu',
+    linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
+    ...(backend.device?.limits?.maxStorageBuffersPerShaderStage === undefined
+      ? {}
+      : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
+  });
+  const runtime = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
+  const system = new VFXSystem(runtime, undefined, {
+    fixedTimeStep: { maxSubSteps: 64, stepSeconds: STEP },
+  });
+  const camera = new THREE.OrthographicCamera(-3, 3, 2.25, -2.25, 0.1, 20);
+  camera.position.set(0, 0.35, 5);
+  camera.lookAt(0, 0.25, 0);
+  system.setCamera(cameraState(camera));
+  const { atlas, motion } = proceduralFlameTextures();
+  const smokeTexture = proceduralSmokeTexture();
+  const geometry = debrisGeometry();
+  const resolveTexture = createThreeTextureResolver(
+    new Map([
+      [atlasRef.uri, atlas],
+      [motionRef.uri, motion],
+      [smokeRef.uri, smokeTexture],
+    ]),
+  );
+  const resolveGeometry = createThreeGeometryResolver(new Map([[debrisRef.uri, geometry]]));
+  const instance = system.spawn(goldenExplosion, { seed: 2026 }) as RuntimeInstance;
+  const mainView = instance.getEmitter('mainExplosion');
+  const debrisView = instance.getEmitter('debris');
+  const smokeView = instance.getEmitter('smoke');
+  if (!mainView || !debrisView || !smokeView)
+    throw new Error('Golden explosion performance emitters are missing.');
+  const scene = new THREE.Scene();
+  scene.add(
+    materializeThreeSpriteDraw(mainView.program, mainView.kernels, 0, { resolveTexture }),
+    materializeThreeMeshDraw(debrisView.program, debrisView.kernels, 0, { resolveGeometry }),
+    materializeThreeSpriteDraw(smokeView.program, smokeView.kernels, 0, { resolveTexture }),
+  );
+  const target = new THREE.RenderTarget(64, 64, { depthBuffer: true });
+  const monitor = createPerformanceMonitor(renderer, {
+    gpuScopes: ['compute', 'render'],
+    mode: headless ? 'headless' : 'visual',
+    page: 'golden-explosion',
+  });
+  renderer.setRenderTarget(target);
+  await system.update(0);
+  renderer.render(scene, camera);
+  await monitor.resolveGpuTimestamps();
+  await system.update(STEP);
+  renderer.render(scene, camera);
+  await monitor.resolveGpuTimestamps();
+  monitor.publish();
+  target.dispose();
+  atlas.dispose();
+  motion.dispose();
+  smokeTexture.dispose();
+  geometry.dispose();
+  renderer.dispose();
+}
+
+async function run(): Promise<void> {
+  // Validation performs many sorted-compute submissions; timestamp queries belong to the short,
+  // dedicated performance renderer below so the backend query pool cannot accumulate across them.
+  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: false });
   renderer.setPixelRatio(1);
   renderer.setSize(headless ? WIDTH : innerWidth, headless ? HEIGHT : innerHeight);
   if (!headless) sceneHost.append(renderer.domElement);
@@ -310,11 +409,6 @@ async function run(): Promise<void> {
       : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
   });
   const runtimeRenderer = createThreeRuntimeRenderer(renderer, kernelAdapter, backend.device?.lost);
-  const performanceMonitor = createPerformanceMonitor(renderer, {
-    gpuScopes: ['compute', 'render'],
-    mode: headless ? 'headless' : 'visual',
-    page: 'golden-explosion',
-  });
   const { atlas, motion } = proceduralFlameTextures();
   const smoke = proceduralSmokeTexture();
   const resolveTexture = createThreeTextureResolver(
@@ -344,6 +438,21 @@ async function run(): Promise<void> {
   intersectionRock.scale.set(1.2, 0.72, 0.8);
   scene.add(intersectionRock);
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  target.texture.colorSpace = THREE.NoColorSpace;
+  const shockwavePass = (time: number) =>
+    screenDistortion({
+      shockwaves: [
+        {
+          center: [0.56, 0.47],
+          duration: 1.2,
+          radius: 0.1,
+          ringWidth: 0.09,
+          speed: 0.52,
+          strength: 0.032,
+        },
+      ],
+      time,
+    });
 
   const emitterView = (instance: RuntimeInstance, key: string): VfxEmitterRuntimeView => {
     const view = instance.getEmitter(key);
@@ -355,6 +464,7 @@ async function run(): Promise<void> {
       aliveCountReadbackInterval: 1,
       fixedTimeStep: { maxSubSteps: 64, stepSeconds: STEP },
     });
+    system.setCamera(cameraState(camera));
     const instance = system.spawn(goldenExplosion, { seed }) as RuntimeInstance;
     const mainView = emitterView(instance, 'mainExplosion');
     const debrisView = emitterView(instance, 'debris');
@@ -373,7 +483,7 @@ async function run(): Promise<void> {
     smokeMesh.position.z = 0.67;
     await system.update(0);
     await system.update(STEP);
-    return { debris, instance, main, mainView, smoke: smokeMesh, system };
+    return { debris, instance, main, mainView, smoke: smokeMesh, smokeView, system };
   };
   const mainNormalizedAge = async (runtime: Awaited<ReturnType<typeof createRuntime>>) => {
     const ages = (await readLogicalAttribute(
@@ -393,20 +503,61 @@ async function run(): Promise<void> {
     for (const object of objects) scene.remove(object);
     return pixels;
   };
+  const renderPost = async (objects: readonly THREE.Object3D[], time: number) => {
+    for (const object of objects) scene.add(object);
+    const post = createPostPipeline(renderer, scene, camera, {
+      distortion: shockwavePass(time),
+      outputColorTransform: false,
+    });
+    renderer.setRenderTarget(target);
+    renderer.clear();
+    post.render();
+    const pixels = await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT);
+    renderer.setRenderTarget(null);
+    post.dispose();
+    for (const object of objects) scene.remove(object);
+    return pixels;
+  };
 
   const baseline = await render([]);
   const primary = await createRuntime(2026);
   const earlyMain = await render([primary.main]);
   const earlyMainDebris = await render([primary.main, primary.debris]);
   const earlyAll = await render([primary.main, primary.debris, primary.smoke]);
+  const earlyPost = await renderPost([primary.main, primary.debris, primary.smoke], 0.08);
+  // Both samples stay in the envelope's foreground-crossing interval. At 0.48 the ring has moved
+  // into the nearly uniform background, where a real UV displacement produces no pixel delta.
+  const movedShockwave = await renderPost([primary.main, primary.debris, primary.smoke], 0.2);
+  const shockwaveAtFirst = compareReadbacks(earlyPost, earlyAll);
+  const shockwaveAtSecond = compareReadbacks(movedShockwave, earlyAll);
+  const shockwaveMotion = compareReadbacks(earlyPost, movedShockwave);
+  const aliveWords = (await readStorage(
+    renderer,
+    primary.smokeView.kernels.aliveCount,
+    'uint',
+  )) as Uint32Array;
+  const smokeAlive = aliveWords[primary.smokeView.kernels.counterOffsets.aliveCount] ?? 0;
+  const sortedDepths = (await readStorage(
+    renderer,
+    primary.smokeView.kernels.sortedDepths!,
+    'float',
+  )) as Float32Array;
+  const sortedIndices = (await readStorage(
+    renderer,
+    primary.smokeView.kernels.sortedIndices!,
+    'uint',
+  )) as Uint32Array;
+  const padded = primary.smokeView.kernels.sortPaddedCapacity!;
+  const sortedDepthSuffix = [...sortedDepths.slice(padded - smokeAlive, padded)];
+  const sortedIndexSuffix = [...sortedIndices.slice(padded - smokeAlive, padded)];
   const earlyMainAge = await mainNormalizedAge(primary);
   await primary.system.update(0.34);
   const peakMain = await render([primary.main]);
-  const peakAll = await render([primary.main, primary.debris, primary.smoke]);
+  const peakPost = await renderPost([primary.main, primary.debris, primary.smoke], 0.42);
   const peakMainAge = await mainNormalizedAge(primary);
   await primary.system.update(0.4);
   const lateMain = await render([primary.main]);
-  const lateAll = await render([primary.main, primary.debris, primary.smoke]);
+  const latePost = await renderPost([primary.main, primary.debris, primary.smoke], 0.82);
   const lateMainAge = await mainNormalizedAge(primary);
 
   const duplicate = await createRuntime(2026);
@@ -420,6 +571,7 @@ async function run(): Promise<void> {
     late: brightnessContribution(lateMain, baseline),
     peak: brightnessContribution(peakMain, baseline),
   };
+  const visual = imageStats([earlyPost, peakPost, latePost]);
   const validation = {
     consoleClean: consoleMessages.length === 0,
     debrisContribution: debrisContribution.changedPixelRatio > 0.0002,
@@ -428,30 +580,65 @@ async function run(): Promise<void> {
       deterministicDifference.meanAbsoluteDifference === 0,
     mainContribution: mainContribution.changedPixelRatio > 0.003,
     smokeContribution: smokeContribution.changedPixelRatio > 0.0005,
+    shockwaveDisplacement:
+      shockwaveAtFirst.changedPixelRatio > 0.0005 &&
+      shockwaveAtSecond.changedPixelRatio > 0.0005 &&
+      shockwaveMotion.changedPixelRatio > 0.0005,
+    sortedSmoke:
+      primary.smokeView.program.draws[0]?.kind === 'billboard' &&
+      primary.smokeView.program.draws[0].indirect.physicalIndex === 'sorted-indices' &&
+      smokeAlive > 1 &&
+      sortedDepthSuffix.every(
+        (value, index, values) => index === 0 || values[index - 1]! <= value,
+      ) &&
+      new Set(sortedIndexSuffix).size === smokeAlive &&
+      sortedIndexSuffix.every(
+        (index) => index < primary.smokeView.program.attributeSchema.capacity,
+      ),
     timeEvolution:
       brightnessCurve.peak > brightnessCurve.early * 1.2 &&
       brightnessCurve.peak > brightnessCurve.late * 1.2,
+    visualBounds:
+      visual.foregroundRatio > 0.002 &&
+      visual.foregroundRatio < 0.7 &&
+      visual.saturatedRatio < 0.25,
   };
   const result = {
     brightnessCurve,
     consoleMessages,
     contributions: { debris: debrisContribution, main: mainContribution, smoke: smokeContribution },
     deterministicDifference,
+    post: {
+      shockwave: {
+        atTime0_08: shockwaveAtFirst,
+        atTime0_20: shockwaveAtSecond,
+        motion: shockwaveMotion,
+      },
+    },
+    smokeSort: {
+      alive: smokeAlive,
+      depths: sortedDepthSuffix,
+      drawSource: 'sorted-indices',
+      indices: sortedIndexSuffix,
+      path: 'gpu-bitonic-update-time',
+    },
+    visual,
     mainNormalizedAge: { early: earlyMainAge, late: lateMainAge, peak: peakMainAge },
     mode: headless ? 'headless' : 'visual',
     ok: Object.values(validation).every(Boolean),
     validation,
   };
-  paintReadback(requireElement<HTMLCanvasElement>('#golden-early'), earlyAll);
-  paintReadback(requireElement<HTMLCanvasElement>('#golden-peak'), peakAll);
-  paintReadback(requireElement<HTMLCanvasElement>('#golden-late'), lateAll);
+  paintReadback(requireElement<HTMLCanvasElement>('#golden-early'), earlyPost);
+  paintReadback(requireElement<HTMLCanvasElement>('#golden-peak'), peakPost);
+  paintReadback(requireElement<HTMLCanvasElement>('#golden-late'), latePost);
   root.dataset.artifactScreenshots = JSON.stringify([
     { filename: 'golden-explosion-early.png', selector: '#golden-early' },
     { filename: 'golden-explosion-peak.png', selector: '#golden-peak' },
     { filename: 'golden-explosion-late.png', selector: '#golden-late' },
   ]);
-  await performanceMonitor.resolveGpuTimestamps();
-  performanceMonitor.publish();
+  await measurePerformance();
+  validation.consoleClean = consoleMessages.length === 0;
+  result.ok = Object.values(validation).every(Boolean);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = result.ok ? 'complete' : 'error';
@@ -467,10 +654,26 @@ async function run(): Promise<void> {
     pane.addBinding(settings, 'smoke', { label: 'Smoke' });
     let previous: number | undefined;
     let updating = false;
+    const livePost = createPostPipeline(renderer, scene, camera, {
+      distortion: screenDistortion({
+        shockwaves: [
+          {
+            center: [0.56, 0.47],
+            duration: 1.2,
+            radius: 0.1,
+            ringWidth: 0.09,
+            speed: 0.52,
+            strength: 0.032,
+          },
+        ],
+      }),
+    });
+    let liveTime = 0;
     renderer.setAnimationLoop((timestamp) => {
       if (updating) return;
       const delta = previous === undefined ? STEP : Math.min((timestamp - previous) / 1000, 0.1);
       previous = timestamp;
+      liveTime += delta * settings.playbackSpeed;
       duplicate.instance.setTimeScale(settings.playbackSpeed);
       duplicate.main.scale.setScalar(settings.explosionScale);
       duplicate.debris.visible = settings.debris;
@@ -479,8 +682,8 @@ async function run(): Promise<void> {
       void duplicate.system
         .update(delta)
         .then(() => {
-          renderer.render(scene, camera);
-          performanceMonitor.recordFrame(timestamp);
+          livePost.controls.setTime(liveTime % 1.8);
+          livePost.render();
         })
         .finally(() => {
           updating = false;

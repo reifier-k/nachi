@@ -21,6 +21,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         goldenExplosion: 'golden-explosion/index.html',
+        goldenUltimate: 'golden-ultimate/index.html',
         goldenAmbient: 'golden-ambient/index.html',
         goldenCharacter: 'golden-character/index.html',
         goldenCharge: 'golden-charge/index.html',
@@ -39,6 +40,7 @@ export default defineConfig({
         m9Compose: 'm9-compose/index.html',
         m9Timeline: 'm9-timeline/index.html',
         m10Post: 'm10-post/index.html',
+        m10Lit: 'm10-lit/index.html',
         m10Sort: 'm10-sort/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',

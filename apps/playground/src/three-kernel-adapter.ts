@@ -89,6 +89,9 @@ export interface ThreeSpriteMaterializationOptions {
   readonly resolveTexture?: ThreeTextureResolver;
 }
 
+type ThreeLitSpriteNodeMaterial = THREE.MeshStandardNodeMaterial &
+  Pick<THREE.SpriteNodeMaterial, 'rotationNode' | 'scaleNode' | 'sizeAttenuation'>;
+
 export interface ThreeMeshMaterializationOptions {
   readonly resolveGeometry: ThreeGeometryResolver;
 }
@@ -879,7 +882,10 @@ export function materializeThreeSpriteDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeSpriteMaterializationOptions = {},
-): THREE.InstancedMesh<THREE.BufferGeometry, THREE.SpriteNodeMaterial> {
+): THREE.InstancedMesh<
+  THREE.BufferGeometry,
+  THREE.SpriteNodeMaterial | ThreeLitSpriteNodeMaterial
+> {
   const draw = program.draws[drawIndex];
   if (!draw || draw.kind !== 'billboard') {
     throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
@@ -999,18 +1005,63 @@ export function materializeThreeSpriteDraw(
         .clamp(0, 1)
     : asNode(float(1));
   const blend = spriteBlending(draw.fragment.blending);
-  const material = new THREE.SpriteNodeMaterial({
+  const materialOptions = {
     blending: blend.blending,
     depthTest: true,
     depthWrite: false,
     premultipliedAlpha: blend.premultipliedAlpha,
     transparent: true,
-  });
+  } as const;
+  const material = draw.fragment.lit
+    ? (Object.assign(
+        new THREE.MeshStandardNodeMaterial({
+          ...materialOptions,
+          metalness: draw.fragment.lit.metalness,
+          roughness: draw.fragment.lit.roughness,
+        }),
+        {
+          rotationNode: null,
+          scaleNode: null,
+          sizeAttenuation: true,
+          // Keep MeshStandardNodeMaterial's physical setupLightingModel/setupVariants while using
+          // r185's own sprite vertex implementation. This is the narrow integration seam.
+          setupPositionView: THREE.SpriteNodeMaterial.prototype.setupPositionView,
+        },
+      ) as ThreeLitSpriteNodeMaterial)
+    : new THREE.SpriteNodeMaterial(materialOptions);
   material.positionNode = particlePosition as never;
   material.rotationNode = rotationNode as never;
   material.scaleNode = scaleNode as never;
   material.colorNode = fragmentColor.rgb as never;
   material.opacityNode = fragmentColor.a.mul(softFade) as never;
+  if (draw.fragment.lit) {
+    const tangentRotation = asNode(varying(rotationNode as never));
+    let tangentNormal = asNode(vec3(0, 0, 1));
+    if (draw.fragment.lit.normalMap) {
+      const normalMapTexture = options.resolveTexture?.(draw.fragment.lit.normalMap);
+      if (!normalMapTexture) {
+        throw new Error(
+          `No texture resolver supplied for sprite normal map "${draw.fragment.lit.normalMap.uri}".`,
+        );
+      }
+      if (normalMapTexture.colorSpace !== THREE.NoColorSpace) {
+        throw new Error(
+          `Lit sprite normal map "${draw.fragment.lit.normalMap.uri}" must use THREE.NoColorSpace.`,
+        );
+      }
+      tangentNormal = asNode(texture(normalMapTexture, uv()).rgb.mul(2).sub(1).normalize());
+    }
+    const cosine = asNode(cos(tangentRotation as never));
+    const sine = asNode(sin(tangentRotation as never));
+    // Sprite vertices are built directly in the camera-facing view XY plane. Rotate the tangent
+    // basis by the exact same node used by setupPositionView, then satisfy normalNode's r185
+    // contract explicitly: the result below is view-space, not object-space.
+    material.normalNode = vec3(
+      tangentNormal.x.mul(cosine).sub(tangentNormal.y.mul(sine)) as never,
+      tangentNormal.x.mul(sine).add(tangentNormal.y.mul(cosine)) as never,
+      tangentNormal.z as never,
+    ).normalize() as never;
+  }
 
   const geometry = createThreeSpriteGeometry(draw.geometry.vertexCount);
   const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;

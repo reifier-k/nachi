@@ -56,6 +56,7 @@ function mesh(duration = 1) {
 function fakeChildInstance(
   initialState: EffectInstanceState = 'active',
   diagnostics: VfxDiagnostic[] = [],
+  emitterView?: ReturnType<VfxEffectInstance['getEmitter']>,
 ) {
   const clock = new EffectClock();
   let state = initialState;
@@ -75,7 +76,7 @@ function fakeChildInstance(
     get timeScale() {
       return clock.timeScale;
     },
-    getEmitter: () => undefined,
+    getEmitter: () => emitterView,
     id: 'fake-timeline-child',
     on: () => () => undefined,
     release: () => {
@@ -447,6 +448,34 @@ describe('@nachi/timeline runtime', () => {
       expect(instance.getElementState('child')?.localTime).toBeCloseTo(0.005, 10);
     } finally {
       updateSpy.mockRestore();
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it('publishes the emitter view created by a play action', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      init: [lifetime(1)],
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({ elements: { child: emitter }, timeline: [at(0, play('child'))] });
+    const emitterView = { aliveCount: 1 } as NonNullable<
+      ReturnType<VfxEffectInstance['getEmitter']>
+    >;
+    const fake = fakeChildInstance('active', [], emitterView);
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const system = new VFXSystem({});
+      const instance = system.spawn(effect);
+      const played: unknown[] = [];
+      instance.onAction((event) => played.push(event.emitter));
+
+      await system.update(0);
+      expect(played).toEqual([emitterView]);
+    } finally {
       spawnSpy.mockRestore();
     }
   });

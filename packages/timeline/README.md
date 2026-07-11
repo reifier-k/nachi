@@ -34,3 +34,9 @@ new VFXSystem(renderer, scene).spawn(skill);
 Timeline entries and actions are plain serializable data. Raw Three meshes are stored as ephemeral
 runtime resources while the effect document contains a serializable `timeline/mesh-fx` placeholder.
 Use `meshFxElement(mesh, { duration })` to override the automatic one-second mesh lifetime.
+
+Each emitter `play()` action spawns an independent single-element core instance. Renderer
+integrations can capture the exact `VfxEmitterRuntimeView` from `event.emitter` in
+`TimelineEffectInstance.onAction()`; the field is undefined for mesh-fx and non-play actions.
+A captured view is invalid after its child emitter is released; pooled storage may then be reused,
+so retaining and using the view can alias a later emitter.
