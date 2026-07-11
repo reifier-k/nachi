@@ -1,5 +1,6 @@
 import {
   VFXSystem,
+  burst,
   colorOverLife,
   createCoreKernelModuleRegistry,
   defineEffect,
@@ -195,6 +196,7 @@ async function run(): Promise<void> {
   trailTexture.needsUpdate = true;
 
   const runCase = async (options: {
+    readonly burstCount?: number;
     readonly killOrder?: number;
     readonly maxRibbons: number;
     readonly positions: readonly Vec3[];
@@ -221,7 +223,7 @@ async function run(): Promise<void> {
         uv: options.uv,
         width: RIBBON_WIDTH,
       }),
-      spawn: rate(60),
+      spawn: options.burstCount === undefined ? rate(60) : burst({ count: options.burstCount }),
       update: [
         colorOverLife(gradient('#89e8ff', '#b779ff', '#ff7ac8')),
         ...(options.killOrder === undefined ? [] : [killSpawnOrder(options.killOrder)]),
@@ -234,9 +236,15 @@ async function run(): Promise<void> {
     const instance = system.spawn(defineEffect({ elements: { trail: definition } }), {
       seed: options.seed,
     }) as RuntimeInstance;
-    for (const position of options.positions) {
-      instance.setTransform(position);
+    if (options.burstCount !== undefined) {
+      instance.setTransform(options.positions[0] ?? [0, 0, 0]);
+      await system.update(0);
       await system.update(STEP);
+    } else {
+      for (const position of options.positions) {
+        instance.setTransform(position);
+        await system.update(STEP);
+      }
     }
     const view = instance.getEmitter('trail');
     if (!view) throw new Error('M7 trail runtime emitter is missing.');
@@ -314,6 +322,14 @@ async function run(): Promise<void> {
     seed: 7004,
     uv: { mode: 'stretched' },
   });
+  const deadUnreused = await runCase({
+    burstCount: 5,
+    killOrder: 2,
+    maxRibbons: 1,
+    positions: [[0, 0, 0]],
+    seed: 7005,
+    uv: { mode: 'stretched' },
+  });
 
   const expectedStretched = expectedSegments(stretched);
   const actualStretched = actualSegments(stretched);
@@ -347,6 +363,12 @@ async function run(): Promise<void> {
   });
   const compactionSkippedKilledPoint = actualCompacted.some(
     ([a, b]) => (compacted.spawnOrder[a] ?? -1) === 1 && (compacted.spawnOrder[b] ?? -1) === 3,
+  );
+  const deadUnreusedPhysical = Array.from({ length: CAPACITY }, (_, physical) => physical).find(
+    (physical) => deadUnreused.spawnOrder[physical] === 2 && deadUnreused.alive[physical] === 0,
+  );
+  const deadUnreusedSkipped = actualSegments(deadUnreused).some(
+    ([a, b]) => deadUnreused.spawnOrder[a] === 1 && deadUnreused.spawnOrder[b] === 3,
   );
 
   const visualScene = new THREE.Scene();
@@ -396,6 +418,7 @@ async function run(): Promise<void> {
     compactionResilient:
       JSON.stringify(actualCompacted) === JSON.stringify(expectedCompacted) &&
       compactionSkippedKilledPoint,
+    deadUnreusedExcluded: deadUnreusedPhysical !== undefined && deadUnreusedSkipped,
     consoleClean: consoleMessages.length === 0,
     deterministic:
       bytesEqual(stretched.indices, stretchedDuplicate.indices) &&

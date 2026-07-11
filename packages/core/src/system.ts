@@ -991,7 +991,9 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       );
       await this.#renderer.submitCompute(finalizeSpawn);
       this.#pendingGpuSpawnRequested += dispatchCount;
-      this.#trackSpawnOrderRequests(dispatchCount);
+      if (this.program.attributeSchema.byName.spawnOrder !== undefined) {
+        this.#trackSpawnOrderRequests(dispatchCount);
+      }
     } else {
       await this.#renderer.submitCompute(this.kernels.spawn);
     }
@@ -1032,6 +1034,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         }
         this.#pendingGpuSpawnRequested = 0;
         if (
+          this.program.attributeSchema.byName.spawnOrder !== undefined &&
           (counters[this.kernels.nextSpawnOrderOffset] ?? 0) >= SPAWN_ORDER_WRAP_WARNING_THRESHOLD
         ) {
           this.#warnSpawnOrderWrapRisk();

@@ -31,10 +31,13 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
+  Loop,
   atomicAdd,
   atomicStore,
   cos,
   cameraViewMatrix,
+  cameraProjectionMatrixInverse,
+  cameraWorldMatrix,
   float,
   floor,
   fract,
@@ -392,6 +395,12 @@ const createUniform = uniform as unknown as (value: unknown, type: string) => un
 type StorageArray = Float32Array | Int32Array | Uint32Array;
 type StorageArrayConstructor = new (length: number) => StorageArray;
 
+const THREE_INDIRECT_ATTRIBUTE_TYPE = 4;
+const indirectAttributesByAdapter = new WeakMap<
+  KernelTslAdapter,
+  Set<THREE.IndirectStorageBufferAttribute>
+>();
+
 function materializeInstancedArray(length: number, type: TslStorageType): KernelStorageNode {
   const node = createInstancedArray(length, type) as KernelStorageNode;
   const attribute = node.value as { array: StorageArray };
@@ -406,6 +415,7 @@ function materializeInstancedArray(length: number, type: TslStorageType): Kernel
 export function createThreeKernelAdapter(
   options: ThreeKernelAdapterOptions = {},
 ): KernelTslAdapter {
+  const indirectAttributes = new Set<THREE.IndirectStorageBufferAttribute>();
   const sourceRenderTarget = options.sceneDepthTexture as
     | (THREE.Texture & { readonly renderTarget?: { readonly samples?: number } })
     | undefined;
@@ -464,6 +474,10 @@ export function createThreeKernelAdapter(
     instancedArray: materializeInstancedArray,
     indirectArray: (values) => {
       const attribute = new THREE.IndirectStorageBufferAttribute(values, 1);
+      // Establish an explicit, range-free initialization epoch. Three r185 copies the entire
+      // CPU array when Attributes first creates the GPU buffer; later epochs may use ranges.
+      attribute.needsUpdate = true;
+      indirectAttributes.add(attribute);
       const node = storage(
         attribute,
         'uint',
@@ -606,7 +620,9 @@ export function createThreeKernelAdapter(
           maxTransformFeedbackSeparateAttribs: options.maxTransformFeedbackSeparateAttribs,
         }),
   };
-  return Object.keys(deviceLimits).length === 0 ? base : { ...base, deviceLimits };
+  const adapter = Object.keys(deviceLimits).length === 0 ? base : { ...base, deviceLimits };
+  indirectAttributesByAdapter.set(adapter, indirectAttributes);
+  return adapter;
 }
 
 export function setThreeUniformValue(
@@ -636,18 +652,46 @@ export function createThreeRuntimeRenderer(
   deviceLost?: Promise<VfxDeviceLossInfo>,
   setInstanceCount?: VfxRuntimeRenderer['setInstanceCount'],
 ): VfxRuntimeRenderer {
+  const initializedIndirectAttributes = new WeakSet<THREE.IndirectStorageBufferAttribute>();
+  const initializeIndirectAttributes = (): void => {
+    const attributes = (
+      renderer as unknown as {
+        readonly _attributes?: {
+          update(attribute: THREE.IndirectStorageBufferAttribute, type: number): void;
+        };
+      }
+    )._attributes;
+    if (!attributes) {
+      throw new Error(
+        'Three renderer must be initialized before submitting Nachi compute kernels.',
+      );
+    }
+    for (const attribute of indirectAttributesByAdapter.get(kernelAdapter) ?? []) {
+      if (initializedIndirectAttributes.has(attribute)) continue;
+      // Use Three's shared Attributes manager so the full upload and its version bookkeeping
+      // happen atomically before any compute kernel can write instanceCount on the GPU.
+      attributes.update(attribute, THREE_INDIRECT_ATTRIBUTE_TYPE);
+      attribute.clearUpdateRanges();
+      initializedIndirectAttributes.add(attribute);
+    }
+  };
   const base = {
     kernelAdapter,
     readStorage: (storageNode: KernelStorageNode) =>
       renderer.getArrayBufferAsync(storageNode.value as never),
     setUniformValue: setThreeUniformValue,
     ...(setInstanceCount === undefined ? {} : { setInstanceCount }),
-    submitCompute: (kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0]) =>
-      renderer.computeAsync(kernel as never),
+    submitCompute: (kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0]) => {
+      initializeIndirectAttributes();
+      return renderer.computeAsync(kernel as never);
+    },
     submitComputeIndirect: (
       kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0],
       indirectResource: unknown,
-    ) => renderer.compute(kernel as never, indirectResource as never),
+    ) => {
+      initializeIndirectAttributes();
+      return renderer.compute(kernel as never, indirectResource as never);
+    },
   };
   return deviceLost === undefined ? base : { ...base, deviceLost };
 }
@@ -666,6 +710,20 @@ function spriteBlending(mode: 'additive' | 'alpha' | 'multiply' | 'premultiplied
     blending: THREE.NormalBlending,
     premultipliedAlpha: mode === 'premultiplied',
   };
+}
+
+function primeIndirectIndexCount(
+  indirect: THREE.IndirectStorageBufferAttribute,
+  drawArgumentsOffsetBytes: number,
+  indexCount: number,
+): void {
+  const words = indirect.array as Uint32Array;
+  const word = drawArgumentsOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
+  words[word] = indexCount;
+  // Only upload word 0 of this draw record. A full buffer upload here would overwrite the GPU
+  // compaction result in word 1 (instanceCount) when materialization happens after simulation.
+  indirect.addUpdateRange(word, 1);
+  indirect.needsUpdate = true;
 }
 
 export function createThreeSpriteGeometry(vertexCount: 4 | 5 | 6 | 7 | 8): THREE.BufferGeometry {
@@ -700,10 +758,9 @@ export function createThreeSpriteGeometry(vertexCount: 4 | 5 | 6 | 7 | 8): THREE
   return geometry;
 }
 
-function createThreeParticleVertexBindings(
+function createThreeParticleStorageBindings(
   program: CompiledEmitterProgram,
   kernels: BuiltEmitterKernels,
-  indirect: CompiledDrawIndirectDescription,
 ) {
   const vertexStorages = program.attributeSchema.storageArrays.map((description) => {
     const computeStorage = kernels.storages[description.name];
@@ -714,13 +771,6 @@ function createThreeParticleVertexBindings(
       }
     ).toReadOnly();
   });
-  const lifecycleRead = (
-    storage(
-      kernels.aliveIndices.value as never,
-      'uint',
-      program.meta.lifecycleStorage.buffers.state.wordCount,
-    ) as unknown as { toReadOnly(): KernelStorageNode }
-  ).toReadOnly();
   const logicalAttribute = (name: string, physicalIndex: KernelNode): KernelNode => {
     const attribute = program.attributeSchema.byName[name];
     if (!attribute) throw new Error(`Particle attribute "${name}" is missing.`);
@@ -750,6 +800,22 @@ function createThreeParticleVertexBindings(
     }
     throw new Error(`Packed particle attribute "${name}" has unsupported width.`);
   };
+  return { logicalAttribute };
+}
+
+function createThreeParticleVertexBindings(
+  program: CompiledEmitterProgram,
+  kernels: BuiltEmitterKernels,
+  indirect: CompiledDrawIndirectDescription,
+) {
+  const { logicalAttribute } = createThreeParticleStorageBindings(program, kernels);
+  const lifecycleRead = (
+    storage(
+      kernels.aliveIndices.value as never,
+      'uint',
+      program.meta.lifecycleStorage.buffers.state.wordCount,
+    ) as unknown as { toReadOnly(): KernelStorageNode }
+  ).toReadOnly();
   const aliveIndex = asNode(uint(instanceIndex)).add(
     asNode(uint(indirect.aliveIndicesOffsetWords)),
   );
@@ -897,10 +963,11 @@ export function materializeThreeSpriteDraw(
 
   const geometry = createThreeSpriteGeometry(draw.geometry.vertexCount);
   const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
-  const indirectWords = indirect.array as Uint32Array;
-  const indexCountWord = draw.indirect.drawArgumentsOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
-  indirectWords[indexCountWord] = draw.geometry.indexCount;
-  indirect.needsUpdate = true;
+  primeIndirectIndexCount(
+    indirect,
+    draw.indirect.drawArgumentsOffsetBytes,
+    draw.geometry.indexCount,
+  );
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
 
   const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
@@ -1013,10 +1080,7 @@ export function materializeThreeMeshDraw(
   material.opacityNode = fragmentColor.a as never;
 
   const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
-  const indirectWords = indirect.array as Uint32Array;
-  const indexCountWord = draw.indirect.drawArgumentsOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
-  indirectWords[indexCountWord] = indexCount;
-  indirect.needsUpdate = true;
+  primeIndirectIndexCount(indirect, draw.indirect.drawArgumentsOffsetBytes, indexCount);
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
 
   const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
@@ -1026,6 +1090,350 @@ export function materializeThreeMeshDraw(
   }
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
+  return mesh;
+}
+
+type MutableNode = KernelNode & {
+  abs(): MutableNode;
+  assign(value: unknown): MutableNode;
+  greaterThan(value: unknown): MutableNode;
+  or(value: unknown): MutableNode;
+  toVar(): MutableNode;
+};
+
+function mutable(value: unknown): MutableNode {
+  return value as MutableNode;
+}
+
+export interface ThreeLightSelectionStats {
+  readonly candidateCount: number;
+  readonly selectedCount: number;
+  readonly selected: readonly {
+    readonly color: readonly [number, number, number];
+    readonly intensity: number;
+    readonly physicalIndex: number;
+    readonly position: readonly [number, number, number];
+    readonly priority: number;
+    readonly radius: number;
+  }[];
+}
+
+export interface ThreeLightPoolDraw {
+  dispose(): void;
+  readonly group: THREE.Group;
+  readonly lights: readonly THREE.PointLight[];
+  readonly selectionBuffers: readonly KernelStorageNode[];
+  readonly selectionKernels: readonly unknown[];
+  readonly stats: ThreeLightSelectionStats;
+  update(
+    renderer: THREE.WebGPURenderer,
+    effectState?: 'active' | 'completed' | 'error' | 'released' | 'stopped',
+  ): Promise<ThreeLightSelectionStats>;
+}
+
+export interface ThreeLightPoolOptions {
+  readonly onDiagnostic?: (diagnostic: {
+    readonly code: 'NACHI_LIGHT_LIMIT_EXCEEDED';
+    readonly message: string;
+  }) => void;
+}
+
+/** GPU top-N selection followed by one fixed-size, one-frame-late readback into PointLight pool. */
+export function materializeThreeLightDraw(
+  program: CompiledEmitterProgram,
+  kernels: BuiltEmitterKernels,
+  drawIndex = 0,
+  options: ThreeLightPoolOptions = {},
+): ThreeLightPoolDraw {
+  const draw = program.draws[drawIndex];
+  if (!draw || draw.kind !== 'light')
+    throw new Error(`Compiled light draw ${drawIndex} is missing.`);
+  if (kernels.capabilityPath !== 'webgpu-atomic-indirect') {
+    throw new Error('NACHI_LIGHT_WEBGL2_UNSUPPORTED: Light top-N selection requires WebGPU.');
+  }
+  const { logicalAttribute } = createThreeParticleStorageBindings(program, kernels);
+  const recordCount = 1 + draw.maxLights * 3;
+  const selectionBuffers = [0, 1].map((bufferIndex) =>
+    instancedArray(recordCount, 'vec4').setName(`NachiLightSelection${bufferIndex}`),
+  ) as unknown as KernelStorageNode[];
+  const selectionKernels = selectionBuffers.map((selection, bufferIndex) =>
+    Fn(() => {
+      const candidateCount = mutable(uint(0).toVar());
+      for (let slot = 0; slot < draw.maxLights; slot += 1) {
+        const base = 1 + slot * 3;
+        selection.element(uint(base) as never).assign(vec4(0, 0, 0, -1 - slot) as never);
+        selection.element(uint(base + 1) as never).assign(vec4(0, 0, 0, 0) as never);
+        selection.element(uint(base + 2) as never).assign(vec4(0, 0, 0, -1) as never);
+      }
+      Loop(
+        {
+          condition: '<',
+          end: uint(program.attributeSchema.capacity),
+          start: uint(0),
+          type: 'uint',
+        },
+        ({ i }) => {
+          const physical = asNode(uint(i));
+          const intensity = logicalAttribute('intensity', physical);
+          const radius = logicalAttribute('size', physical).mul(draw.radiusScale);
+          const priority = draw.priority === 'intensity-radius' ? intensity.mul(radius) : intensity;
+          const valid = logicalAttribute('alive', physical)
+            .equal(uint(1) as never)
+            .and(intensity.greaterThanEqual(0.000001))
+            .and(radius.greaterThanEqual(0.000001));
+          If(valid as never, () => {
+            candidateCount.addAssign(uint(1) as never);
+            const minimumPriority = mutable(float(1e30).toVar());
+            const minimumSlot = mutable(uint(0).toVar());
+            for (let slot = 0; slot < draw.maxLights; slot += 1) {
+              const slotPriority = selection.element(uint(1 + slot * 3) as never).w;
+              If(slotPriority.lessThan(minimumPriority) as never, () => {
+                minimumPriority.assign(slotPriority);
+                minimumSlot.assign(uint(slot));
+              });
+            }
+            If(mutable(priority).greaterThan(minimumPriority) as never, () => {
+              const base = minimumSlot.mul(asNode(uint(3))).add(asNode(uint(1)));
+              const position = logicalAttribute('position', physical);
+              const color = logicalAttribute('color', physical);
+              selection
+                .element(base as never)
+                .assign(
+                  vec4(
+                    position.x as never,
+                    position.y as never,
+                    position.z as never,
+                    priority as never,
+                  ) as never,
+                );
+              selection
+                .element(base.add(asNode(uint(1))) as never)
+                .assign(
+                  vec4(
+                    color.r as never,
+                    color.g as never,
+                    color.b as never,
+                    intensity as never,
+                  ) as never,
+                );
+              selection
+                .element(base.add(asNode(uint(2))) as never)
+                .assign(vec4(radius as never, physical as never, 0, 0) as never);
+            });
+          });
+        },
+      );
+      const selectedCount = select(
+        candidateCount.greaterThanEqual(asNode(uint(draw.maxLights))) as never,
+        uint(draw.maxLights),
+        candidateCount as never,
+      );
+      selection
+        .element(uint(0) as never)
+        .assign(vec4(selectedCount as never, candidateCount as never, 0, 0) as never);
+    })()
+      .compute(1, [1])
+      .setName(`NachiLightSelect${bufferIndex}`),
+  );
+  const group = new THREE.Group();
+  group.name = 'NachiPointLightPool';
+  const lights = Array.from({ length: draw.maxLights }, (_, index) => {
+    const light = new THREE.PointLight(0xffffff, 0, 0, 2);
+    light.name = `NachiPointLight${index}`;
+    // Keep the visible-light id set stable. Toggling visibility changes r185 LightsNode's cache
+    // key and recompiles a pipeline; intensity zero is the shader-stable off state.
+    light.visible = true;
+    group.add(light);
+    return light;
+  });
+  let frame = 0;
+  let pending: Promise<ArrayBuffer> | undefined;
+  let warned = false;
+  let disposed = false;
+  let stats: ThreeLightSelectionStats = { candidateCount: 0, selected: [], selectedCount: 0 };
+  const apply = (buffer: ArrayBuffer): ThreeLightSelectionStats => {
+    const values = new Float32Array(buffer);
+    const selectedCount = Math.min(draw.maxLights, Math.max(0, Math.round(values[0] ?? 0)));
+    const candidateCount = Math.max(0, Math.round(values[1] ?? 0));
+    const selected: ThreeLightSelectionStats['selected'][number][] = [];
+    for (let slot = 0; slot < draw.maxLights; slot += 1) {
+      const base = (1 + slot * 3) * 4;
+      const priority = values[base + 3] ?? -1;
+      if (priority < 0 || selected.length >= selectedCount) continue;
+      const entry = {
+        color: [values[base + 4] ?? 0, values[base + 5] ?? 0, values[base + 6] ?? 0] as const,
+        intensity: values[base + 7] ?? 0,
+        physicalIndex: Math.round(values[base + 9] ?? -1),
+        position: [values[base] ?? 0, values[base + 1] ?? 0, values[base + 2] ?? 0] as const,
+        priority,
+        radius: values[base + 8] ?? 0,
+      };
+      selected.push(entry);
+    }
+    selected.sort(
+      (left, right) => right.priority - left.priority || left.physicalIndex - right.physicalIndex,
+    );
+    for (let index = 0; index < lights.length; index += 1) {
+      const light = lights[index]!;
+      const entry = selected[index];
+      light.visible = true;
+      light.intensity = entry?.intensity ?? 0;
+      light.distance = entry?.radius ?? 0;
+      if (entry) {
+        light.position.fromArray(entry.position);
+        light.color.setRGB(...entry.color);
+      }
+    }
+    if (candidateCount > draw.maxLights && !warned) {
+      warned = true;
+      options.onDiagnostic?.({
+        code: 'NACHI_LIGHT_LIMIT_EXCEEDED',
+        message: `${candidateCount} eligible particle lights exceeded maxLights ${draw.maxLights}; GPU intensity priority selected the bounded pool.`,
+      });
+    }
+    stats = { candidateCount, selected, selectedCount: selected.length };
+    return stats;
+  };
+  const result: ThreeLightPoolDraw = {
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const light of lights) light.intensity = 0;
+      group.removeFromParent();
+    },
+    group,
+    lights,
+    selectionBuffers,
+    selectionKernels,
+    get stats() {
+      return stats;
+    },
+    async update(renderer, effectState = 'active') {
+      if (effectState !== 'active') {
+        result.dispose();
+        return stats;
+      }
+      if (disposed) return stats;
+      const index = frame % 2;
+      frame += 1;
+      const previous = pending;
+      await renderer.computeAsync(selectionKernels[index] as never);
+      pending = renderer.getArrayBufferAsync(selectionBuffers[index]!.value as never);
+      return previous ? apply(await previous) : stats;
+    },
+  };
+  return result;
+}
+
+export interface ThreeDecalMaterializationOptions {
+  readonly resolveTexture?: ThreeTextureResolver;
+  /** M6 linear, non-sRGB, previous-frame normalized depth copy. */
+  readonly sceneDepthTexture: THREE.Texture;
+}
+
+/** Projection-box decal using WebGPU [0,1] NDC scene-depth world-position reconstruction. */
+export function materializeThreeDecalDraw(
+  program: CompiledEmitterProgram,
+  kernels: BuiltEmitterKernels,
+  drawIndex = 0,
+  options: ThreeDecalMaterializationOptions,
+): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicNodeMaterial> {
+  const draw = program.draws[drawIndex];
+  if (!draw || draw.kind !== 'decal')
+    throw new Error(`Compiled decal draw ${drawIndex} is missing.`);
+  if (kernels.capabilityPath !== 'webgpu-atomic-indirect') {
+    throw new Error('NACHI_DECAL_WEBGL2_UNSUPPORTED: Projection decals require WebGPU.');
+  }
+  if (!options.sceneDepthTexture) {
+    throw new Error(
+      'NACHI_DECAL_SCENE_DEPTH_UNAVAILABLE: A previous-frame depth copy is required.',
+    );
+  }
+  if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
+    throw new Error('Compiled decal rendering requires the WebGPU indirect-draw lifecycle path.');
+  }
+  const { compactedIndex, logicalAttribute } = createThreeParticleVertexBindings(
+    program,
+    kernels,
+    draw.indirect,
+  );
+  const center = logicalAttribute('position', compactedIndex);
+  const quaternion = logicalAttribute('rotation', compactedIndex);
+  const size = logicalAttribute('size', compactedIndex).mul(draw.sizeScale);
+  const particleColor = asNode(varying(logicalAttribute('color', compactedIndex) as never));
+  const normalizedAge = asNode(varying(logicalAttribute('normalizedAge', compactedIndex) as never));
+  const fragmentCenter = asNode(varying(center as never));
+  const fragmentQuaternion = asNode(varying(quaternion as never));
+  const fragmentSize = asNode(varying(size as never));
+  const sceneDepth = asNode(texture(options.sceneDepthTexture, screenUV)).r;
+  const clip = asNode(
+    vec4(
+      asNode(screenUV.x).mul(2).sub(1) as never,
+      asNode(float(1)).sub(asNode(screenUV.y).mul(2)) as never,
+      sceneDepth as never,
+      1,
+    ),
+  );
+  const viewH = asNode(cameraProjectionMatrixInverse.mul(clip as never));
+  const viewPosition = viewH.xyz.div(viewH.w);
+  const worldPosition = asNode(cameraWorldMatrix.mul(vec4(viewPosition as never, 1))).xyz;
+  const inverseQuaternion = asNode(
+    vec4(
+      fragmentQuaternion.x.mul(-1) as never,
+      fragmentQuaternion.y.mul(-1) as never,
+      fragmentQuaternion.z.mul(-1) as never,
+      fragmentQuaternion.w as never,
+    ),
+  );
+  const local = rotateByQuaternion(worldPosition.sub(fragmentCenter), inverseQuaternion);
+  const halfSize = fragmentSize.mul(0.5);
+  const inside = mutable(local.x)
+    .abs()
+    .lessThanEqual(halfSize)
+    .and(mutable(local.y).abs().lessThanEqual(halfSize))
+    .and(mutable(local.z).abs().lessThanEqual(halfSize))
+    .and(sceneDepth.lessThan(0.999999));
+  const decalUv = asNode(
+    vec2(local.x.div(fragmentSize).add(0.5) as never, local.y.div(fragmentSize).add(0.5) as never),
+  );
+  let fragmentColor = particleColor;
+  if (draw.fragment.map) {
+    const map = options.resolveTexture?.(draw.fragment.map);
+    if (!map)
+      throw new Error(`No texture resolver supplied for decal map "${draw.fragment.map.uri}".`);
+    fragmentColor = asNode(fragmentColor.mul(asNode(texture(map, decalUv as never))));
+  }
+  const lifeFade = draw.fadeOverLife
+    ? asNode(float(1)).sub(normalizedAge).clamp(0, 1)
+    : asNode(float(1));
+  const opacity = asNode(select(inside as never, fragmentColor.a.mul(lifeFade) as never, float(0)));
+  const material = new THREE.MeshBasicNodeMaterial({
+    blending: THREE.NormalBlending,
+    depthTest: false,
+    depthWrite: false,
+    premultipliedAlpha: draw.fragment.blending === 'premultiplied',
+    side: THREE.BackSide,
+    transparent: true,
+  });
+  const localVertex = asNode(positionGeometry).mul(size);
+  material.positionNode = rotateByQuaternion(localVertex, quaternion).add(center) as never;
+  material.colorNode = fragmentColor.rgb as never;
+  material.opacityNode = opacity as never;
+  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
+  primeIndirectIndexCount(
+    indirect,
+    draw.indirect.drawArgumentsOffsetBytes,
+    geometry.getIndex()?.count ?? 36,
+  );
+  geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
+  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
+  const identity = new THREE.Matrix4();
+  for (let index = 0; index < program.attributeSchema.capacity; index += 1)
+    mesh.setMatrixAt(index, identity);
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 10;
   return mesh;
 }
 

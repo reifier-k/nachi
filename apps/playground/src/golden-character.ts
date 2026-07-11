@@ -322,7 +322,11 @@ async function run(): Promise<void> {
         lifecycle: { duration: 3, loopCount: 'infinite' },
         render: billboard({ blending: 'additive' }),
         spawn: burst({ count: 32, cycles: 2, interval: 1.5 }),
-        update: [vortex({ axis: [0, 1, 0], space: 'emitter', strength: 1.4 })],
+        update: [
+          vortex({ axis: [0, 1, 0], space: 'emitter', strength: 1.4 }),
+          sizeOverLife(curve([0, 0.025], [0.35, 0.065], [1, 0.015])),
+          colorOverLife(gradient([0.15, 0.65, 1, 0], [0.4, 0.95, 1, 0.85], [0.5, 0.35, 1, 0])),
+        ],
       }),
     },
   });
@@ -440,6 +444,7 @@ async function run(): Promise<void> {
     socketFollow: socketError < 0.0001,
     surfaceSpawn: surfaceDistance < 0.7,
     visualReadback: foregroundPixelRatio > 0.01,
+    visualReadbackNotSaturated: foregroundPixelRatio < 0.3,
   };
   const result = {
     artifact: 'artifacts/golden-character.png',

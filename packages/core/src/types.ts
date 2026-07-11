@@ -251,6 +251,7 @@ export interface BuiltInTslParticleBindings {
   readonly age: TslExpression<number>;
   readonly alive: TslExpression<boolean>;
   readonly color: TslExpression<Vec4>;
+  readonly intensity: TslExpression<number>;
   readonly lifetime: TslExpression<number>;
   readonly mass: TslExpression<number>;
   readonly normalizedAge: TslExpression<number>;
@@ -560,6 +561,24 @@ export interface MeshRendererOptions {
     | { readonly mode: 'velocity' };
   readonly blending?: BlendingMode;
   readonly geometry: GeometryRef;
+}
+
+export interface LightRendererOptions {
+  /** Hard CPU PointLight-pool bound. Defaults to 8. */
+  readonly maxLights?: number;
+  /** Multiplies Particles.size to obtain PointLight.distance. Defaults to 1. */
+  readonly radiusScale?: number;
+  /** GPU top-N selection key. */
+  readonly priority?: 'intensity' | 'intensity-radius';
+}
+
+export interface DecalRendererOptions {
+  readonly blending?: Extract<BlendingMode, 'alpha' | 'premultiplied'>;
+  /** Multiplies Particles.size to obtain the projection-box edge length. Defaults to 1. */
+  readonly sizeScale?: number;
+  /** Multiplies alpha by 1 - normalizedAge. Defaults to true. */
+  readonly fadeOverLife?: boolean;
+  readonly map?: TextureRef;
 }
 
 export interface EmitToOptions {

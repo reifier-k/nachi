@@ -12,6 +12,9 @@ import {
   killVolume,
   linearForce,
   lifetime,
+  lightIntensity,
+  lightRenderer,
+  decalRenderer,
   meshRenderer,
   pointAttractor,
   parseFga,
@@ -31,6 +34,7 @@ import * as THREE from 'three/webgpu';
 
 import {
   createThreeKernelAdapter,
+  createThreeRuntimeRenderer,
   createThreeGeometryResolver,
   createThreeMeshSurfaceResolver,
   createThreeMeshSurfaceResource,
@@ -43,10 +47,75 @@ import {
   createThreeVectorFieldResource,
   directionEulerAngles,
   materializeThreeMeshDraw,
+  materializeThreeLightDraw,
+  materializeThreeDecalDraw,
   materializeThreeSpriteDraw,
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
+  it('materializes a bounded PointLight pool and projection-box decal', () => {
+    const lightProgram = compileEmitter(
+      defineEmitter({
+        capacity: 12,
+        init: [positionSphere({ radius: 1 }), lifetime(1), lightIntensity(4)],
+        integration: 'none',
+        render: lightRenderer({ maxLights: 3 }),
+        spawn: burst({ count: 12 }),
+      }),
+    );
+    const lightKernels = lightProgram.buildKernels(createThreeKernelAdapter());
+    const lightDraw = materializeThreeLightDraw(lightProgram, lightKernels);
+    expect(lightDraw.lights).toHaveLength(3);
+    expect(lightDraw.lights.every(({ visible }) => visible)).toBe(true);
+    expect(lightDraw.lights.every(({ intensity }) => intensity === 0)).toBe(true);
+    expect(lightDraw.selectionBuffers).toHaveLength(2);
+    expect(lightDraw.selectionKernels).toHaveLength(2);
+    const lightScene = new THREE.Scene();
+    lightScene.add(lightDraw.group);
+    lightDraw.dispose();
+    expect(lightDraw.group.parent).toBeNull();
+    expect(lightDraw.lights.every(({ intensity }) => intensity === 0)).toBe(true);
+
+    const depth = new THREE.DataTexture(
+      new Float32Array([1]),
+      1,
+      1,
+      THREE.RedFormat,
+      THREE.FloatType,
+    );
+    depth.needsUpdate = true;
+    const decalProgram = compileEmitter(
+      defineEmitter({
+        capacity: 2,
+        init: [positionSphere({ radius: 0 }), lifetime(1)],
+        integration: 'none',
+        render: decalRenderer({ sizeScale: 2 }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const decalKernels = decalProgram.buildKernels(
+      createThreeKernelAdapter({ sceneDepthTexture: depth }),
+    );
+    const decal = materializeThreeDecalDraw(decalProgram, decalKernels, 0, {
+      sceneDepthTexture: depth,
+    });
+    const decalIndirect = decalKernels.drawIndirect!
+      .indirectResource as THREE.IndirectStorageBufferAttribute;
+    expect(decal.geometry).toBeInstanceOf(THREE.BoxGeometry);
+    expect(decal.geometry.getIndirect()).toBeDefined();
+    expect(decalIndirect.updateRanges).toEqual([
+      { count: 1, start: decalKernels.drawIndirectOffsetBytes! / 4 },
+    ]);
+    expect(() =>
+      materializeThreeDecalDraw(
+        decalProgram,
+        { ...decalKernels, capabilityPath: 'webgl2-cpu-readback' },
+        0,
+        { sceneDepthTexture: depth },
+      ),
+    ).toThrowError('NACHI_DECAL_WEBGL2_UNSUPPORTED');
+  });
+
   it('materializes an external @nachi/trails GPU birth-ring draw', () => {
     const registry = registerTrails(createCoreKernelModuleRegistry());
     const program = compileEmitter(
@@ -89,6 +158,35 @@ describe('three kernel adapter', () => {
     expect(cdf[0]).toBeCloseTo(0.5);
     expect(cdf[1]).toBe(1);
     expect(resource.positionTexture.image.width).toBe(6);
+  });
+
+  it('samples the mesh CDF in statistically area-proportional frequencies', () => {
+    const geometry = new THREE.BufferGeometry();
+    // Areas 0.5 and 2.0, hence expected probabilities 0.2 and 0.8.
+    geometry.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0], 3),
+    );
+    const resource = createThreeMeshSurfaceResource(
+      new THREE.Mesh(geometry, new THREE.MeshBasicMaterial()),
+      6,
+    );
+    const cdf = resource.cdfTexture.image.data as Float32Array;
+    const counts = [0, 0];
+    let state = 0x1234_5678;
+    for (let sampleIndex = 0; sampleIndex < 20_000; sampleIndex += 1) {
+      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+      const sample = state / 0x1_0000_0000;
+      const triangle = sample <= (cdf[0] ?? 0) ? 0 : 1;
+      counts[triangle] = (counts[triangle] ?? 0) + 1;
+    }
+    const expected = [4_000, 16_000];
+    const chiSquare = counts.reduce((sum, count, index) => {
+      const delta = count - expected[index]!;
+      return sum + (delta * delta) / expected[index]!;
+    }, 0);
+    expect(cdf[0]).toBeCloseTo(0.2, 6);
+    expect(chiSquare).toBeLessThan(10.83); // df=1, p=0.001
   });
 
   it('rejects a one-row mesh texture wider than maxTextureDimension2D', () => {
@@ -357,12 +455,80 @@ describe('three kernel adapter', () => {
     const mesh = materializeThreeSpriteDraw(program, kernels);
     const offset = kernels.drawIndirectOffsetBytes! / Uint32Array.BYTES_PER_ELEMENT;
     const words = (kernels.drawIndirect!.indirectResource as { array: Uint32Array }).array;
+    const indirect = kernels.drawIndirect!.indirectResource as THREE.IndirectStorageBufferAttribute;
 
     expect(mesh.isInstancedMesh).toBe(true);
     expect(mesh.geometry.getIndex()?.count).toBe(6);
     expect(mesh.geometry.getIndirect()).toBe(kernels.drawIndirect!.indirectResource);
     expect(words[offset]).toBe(6);
+    expect(indirect.updateRanges).toEqual([{ count: 1, start: offset }]);
     expect(mesh.material.blending).toBe(2);
+  });
+
+  it('fully initializes indirect words before compute and uses partial updates afterward', async () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 4 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const indirect = kernels.drawIndirect!.indirectResource as THREE.IndirectStorageBufferAttribute;
+    const initialWords = Array.from(indirect.array as Uint32Array);
+    const uploads: { ranges: { count: number; start: number }[]; type: number; words: number[] }[] =
+      [];
+    const renderer = {
+      _attributes: {
+        update(attribute: THREE.IndirectStorageBufferAttribute, type: number) {
+          uploads.push({
+            ranges: attribute.updateRanges.map((range) => ({ ...range })),
+            type,
+            words: Array.from(attribute.array as Uint32Array),
+          });
+        },
+      },
+      compute() {},
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return new ArrayBuffer(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+
+    expect(indirect.version).toBe(1);
+    expect(indirect.updateRanges).toEqual([]);
+    expect(initialWords.every((word) => word === 0)).toBe(true);
+    await runtime.submitCompute(kernels.initialize);
+    expect(uploads).toEqual([{ ranges: [], type: 4, words: initialWords }]);
+
+    materializeThreeSpriteDraw(program, kernels);
+    const offset = kernels.drawIndirectOffsetBytes! / Uint32Array.BYTES_PER_ELEMENT;
+    const drawRecord = Array.from((indirect.array as Uint32Array).slice(offset, offset + 5));
+    expect(indirect.version).toBe(2);
+    expect(indirect.updateRanges).toEqual([{ count: 1, start: offset }]);
+    expect(drawRecord).toEqual([6, 0, 0, 0, 0]);
+  });
+
+  it('keeps the first materialize-to-render indirect record fully defined', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 2,
+        render: billboard({}),
+        spawn: burst({ count: 2 }),
+      }),
+    );
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    const indirect = kernels.drawIndirect!.indirectResource as THREE.IndirectStorageBufferAttribute;
+
+    materializeThreeSpriteDraw(program, kernels);
+    const offset = kernels.drawIndirectOffsetBytes! / Uint32Array.BYTES_PER_ELEMENT;
+    expect(Array.from((indirect.array as Uint32Array).slice(offset, offset + 5))).toEqual([
+      6, 0, 0, 0, 0,
+    ]);
+    // On first render, r185 createAttribute() copies this entire CPU array despite the range.
+    expect(indirect.updateRanges).toEqual([{ count: 1, start: offset }]);
   });
 
   it('uses premultiplied alpha for Three.js multiply blending', () => {

@@ -584,7 +584,39 @@ async function run(): Promise<void> {
     incoming[2] - 2 * normalSpeed * slopeNormal[2],
   ];
 
+  // Regression tripwire for screenUV(v down) <-> WebGPU NDC(y up). A rotation around X makes
+  // depth differ between the upper and lower screen halves; the old mirrored lookup leaves this
+  // upper particle untouched at z=0.15 instead of projecting it near z=0.267.
+  const asymmetricAngle = Math.PI / 9;
+  const asymmetricPlaneZ = 0.07;
+  const asymmetricParticle: Vec3 = [0, 0.55, 0.15];
+  occluder.position.z = asymmetricPlaneZ;
   occluder.rotation.y = 0;
+  occluder.rotation.x = asymmetricAngle;
+  await copySceneDepth('slope-x-pi-over-9-z0.07-asymmetric-y0.55');
+  const asymmetricDepth = await runDepthCollision({
+    collision: collideSceneDepth({ mode: 'stick', surfaceOffset: 0.002, thickness: 0.5 }),
+    integration: 'none',
+    position: asymmetricParticle,
+    seed: 44,
+    velocity: [0, 0, 0],
+  });
+  const asymmetricTangent = Math.tan(asymmetricAngle);
+  const asymmetricRayT =
+    (camera.position.z - asymmetricPlaneZ) /
+    (camera.position.z - asymmetricParticle[2] + asymmetricParticle[1] * asymmetricTangent);
+  const asymmetricNormal: Vec3 = [0, -Math.sin(asymmetricAngle), Math.cos(asymmetricAngle)];
+  const expectedAsymmetricPosition: Vec3 = [
+    0,
+    asymmetricParticle[1] * asymmetricRayT + asymmetricNormal[1] * 0.002,
+    asymmetricPlaneZ +
+      asymmetricParticle[1] * asymmetricRayT * asymmetricTangent +
+      asymmetricNormal[2] * 0.002,
+  ];
+
+  occluder.rotation.x = 0;
+  occluder.rotation.y = 0;
+  occluder.position.z = 0;
   await copySceneDepth('thickness-frontal-z0');
   const thicknessDepth = await runDepthCollision({
     collision: collideSceneDepth({ mode: 'stick', thickness: 0.1 }),
@@ -613,6 +645,10 @@ async function run(): Promise<void> {
       close(slopeDepth.velocity[0] ?? Number.NaN, expectedSlopeVelocity[0], 0.04) &&
       close(slopeDepth.velocity[1] ?? Number.NaN, expectedSlopeVelocity[1], 0.002) &&
       close(slopeDepth.velocity[2] ?? Number.NaN, expectedSlopeVelocity[2], 0.04),
+    depthScreenUvYConvention:
+      close(asymmetricDepth.position[1] ?? Number.NaN, expectedAsymmetricPosition[1], 0.02) &&
+      close(asymmetricDepth.position[2] ?? Number.NaN, expectedAsymmetricPosition[2], 0.02) &&
+      Math.abs((asymmetricDepth.position[2] ?? Number.NaN) - asymmetricParticle[2]) > 0.08,
     depthThicknessReject:
       close(thicknessDepth.position[2] ?? Number.NaN, -1, 0.002) &&
       close(thicknessDepth.velocity[2] ?? Number.NaN, -1, 0.002),
@@ -653,6 +689,12 @@ async function run(): Promise<void> {
         centerDepth: slopeCenterDepth,
         expectedVelocity: expectedSlopeVelocity,
         velocity: [...slopeDepth.velocity.slice(0, 3)],
+      },
+      screenUvYConvention: {
+        expectedPosition: expectedAsymmetricPosition,
+        mirroredConventionPosition: asymmetricParticle,
+        position: [...asymmetricDepth.position.slice(0, 3)],
+        result: 'screenUV-v-down-requires-one-minus-to-WebGPU-NDC-y-up',
       },
       position: [...depth.position.slice(0, 3)],
       source: 'explicit-render-target-depth-prepass-linear-float-depth-color-copy',

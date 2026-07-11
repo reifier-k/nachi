@@ -34,6 +34,8 @@ import type {
   GradientGenerator,
   InitModule,
   MeshRendererOptions,
+  LightRendererOptions,
+  DecalRendererOptions,
   MeshRef,
   ModuleAccess,
   ModuleDefinition,
@@ -577,7 +579,13 @@ export interface RenderModuleCompileContext {
   readonly path: string;
   readonly schema: ResolvedAttributeSchema;
   diagnostic(code: string, message: string, path?: string, severity?: 'error' | 'warning'): void;
-  vertex(attributes: readonly string[]): CompiledDrawVertexDescription | undefined;
+  vertex(
+    attributes: readonly string[],
+    options?: {
+      readonly additionalStorageBuffers?: readonly string[];
+      readonly lifecycle?: boolean;
+    },
+  ): CompiledDrawVertexDescription | undefined;
 }
 
 /** External packages register render compilation without moving their public definitions to core. */
@@ -665,6 +673,8 @@ export interface CompiledEmitterProgram {
 /** Declaration-merging extension point used by renderer packages such as @nachi/trails. */
 export interface CompiledDrawDescriptionMap {
   readonly billboard: CompiledSpriteDrawDescription;
+  readonly decal: CompiledDecalDrawDescription;
+  readonly light: CompiledLightDrawDescription;
   readonly mesh: CompiledMeshDrawDescription;
 }
 
@@ -720,6 +730,37 @@ export interface CompiledMeshDrawDescription {
   readonly vertex: CompiledDrawVertexDescription & {
     readonly alignment: NonNullable<MeshRendererOptions['alignment']>;
   };
+}
+
+export interface CompiledLightDrawDescription {
+  readonly kind: 'light';
+  readonly maxLights: number;
+  readonly path: string;
+  readonly priority: 'intensity' | 'intensity-radius';
+  readonly radiusScale: number;
+  readonly readback: {
+    readonly latencyFrames: 1;
+    readonly records: 'position-priority/color-intensity/radius-index';
+  };
+  readonly requiresBackend: 'webgpu';
+  /** Compute selection bindings; named vertex for the common renderer budget surface. */
+  readonly vertex: CompiledDrawVertexDescription;
+}
+
+export interface CompiledDecalDrawDescription {
+  readonly fadeOverLife: boolean;
+  readonly fragment: {
+    readonly blending: 'alpha' | 'premultiplied';
+    readonly map?: TextureRef;
+  };
+  readonly geometry: { readonly shape: 'projection-box'; readonly topology: 'triangle-list' };
+  readonly indirect: CompiledDrawIndirectDescription;
+  readonly kind: 'decal';
+  readonly path: string;
+  readonly requiresBackend: 'webgpu';
+  readonly requiresSceneDepth: true;
+  readonly sizeScale: number;
+  readonly vertex: CompiledDrawVertexDescription;
 }
 
 type TraceResult = {
@@ -1626,6 +1667,7 @@ function bakeModuleLuts(
     try {
       if (
         module.type === 'core/size-over-life' ||
+        module.type === 'core/intensity-over-life' ||
         module.type === 'core/rotation-over-life' ||
         module.type === 'core/velocity-over-life'
       ) {
@@ -1669,23 +1711,28 @@ function valueGeneratorKind(value: unknown): string | undefined {
     : undefined;
 }
 
-function lifecycleStorageLayout(capacity: number) {
+function lifecycleStorageLayout(capacity: number, hasSpawnOrder: boolean) {
   const indirectFields = {
     spawnDispatch: { offsetWords: 0, wordCount: 3 },
     drawIndirect: { offsetWords: 3, wordCount: 5 },
   } as const;
   const indirectWordCount =
     indirectFields.drawIndirect.offsetWords + indirectFields.drawIndirect.wordCount;
+  const orderWords = hasSpawnOrder ? 2 : 0;
+  const indexBase = 4 + orderWords;
   const stateFields = {
     freeCount: { offsetWords: 0, wordCount: 1 },
     aliveCount: { offsetWords: 1, wordCount: 1 },
     spawnSuccess: { offsetWords: 2, wordCount: 1 },
     spawnOverflow: { offsetWords: 3, wordCount: 1 },
-    nextSpawnOrder: { offsetWords: 4, wordCount: 1 },
-    currentSpawnBase: { offsetWords: 5, wordCount: 1 },
-    freeList: { offsetWords: 6, wordCount: capacity },
-    aliveIndices: { offsetWords: 6 + capacity, wordCount: capacity },
-    birthIndices: { offsetWords: 6 + capacity * 2, wordCount: capacity },
+    nextSpawnOrder: { offsetWords: 4, wordCount: hasSpawnOrder ? 1 : 0 },
+    currentSpawnBase: { offsetWords: 5, wordCount: hasSpawnOrder ? 1 : 0 },
+    freeList: { offsetWords: indexBase, wordCount: capacity },
+    aliveIndices: { offsetWords: indexBase + capacity, wordCount: capacity },
+    birthIndices: {
+      offsetWords: indexBase + capacity * 2,
+      wordCount: hasSpawnOrder ? capacity : 0,
+    },
   } as const;
   const stateWordCount = stateFields.birthIndices.offsetWords + stateFields.birthIndices.wordCount;
   return {
@@ -2196,7 +2243,7 @@ function compileRegisteredDraws(
       module: module as RenderModule,
       path,
       schema,
-      vertex: (attributes) => {
+      vertex: (attributes, vertexOptions = {}) => {
         if (attributes.some((name) => schema.byName[name] === undefined)) return undefined;
         const attributeBuffers = [
           ...new Set(
@@ -2213,7 +2260,11 @@ function compileRegisteredDraws(
             }),
           ),
         ];
-        const storageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+        const storageBuffers = [
+          ...attributeBuffers,
+          ...(vertexOptions.additionalStorageBuffers ?? []),
+          ...(vertexOptions.lifecycle === false ? [] : ['NachiLifecycleState']),
+        ];
         if (storageBuffers.length > 8) {
           diagnostics.push(
             diagnostic(
@@ -2232,6 +2283,165 @@ function compileRegisteredDraws(
     };
     const draw = implementation.compileDraw(context);
     if (draw) draws.push(draw);
+  }
+  return draws;
+}
+
+function rendererAttributeBuffers(
+  schema: ResolvedAttributeSchema,
+  attributes: readonly string[],
+): string[] | undefined {
+  if (attributes.some((name) => schema.byName[name] === undefined)) return undefined;
+  return [
+    ...new Set(
+      attributes.map((name) => {
+        const attribute = schema.byName[name];
+        const storage =
+          attribute === undefined
+            ? undefined
+            : schema.storageArrays[attribute.physical.bufferIndex];
+        if (!attribute || !storage) {
+          throw new Error(`Render attribute "${name}" has no physical storage.`);
+        }
+        return `Particles.${storage.name}`;
+      }),
+    ),
+  ];
+}
+
+function validateRendererStorageBudget(
+  buffers: readonly string[],
+  path: string,
+  label: string,
+  diagnostics: VfxDiagnostic[],
+): void {
+  if (buffers.length <= 8) return;
+  diagnostics.push(
+    diagnostic(
+      'NACHI_STORAGE_BUFFER_LIMIT',
+      `${label} requires ${buffers.length} storage buffers (${buffers.join(', ')}), exceeding the default limit of 8.`,
+      `${path}.vertex.storageBufferCount`,
+    ),
+  );
+}
+
+function compileLightDraws(
+  definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
+  schema: ResolvedAttributeSchema,
+  diagnostics: VfxDiagnostic[],
+): CompiledLightDrawDescription[] {
+  const draws: CompiledLightDrawDescription[] = [];
+  for (const { module, path } of collectEmitterModules(definition)) {
+    if (module.stage !== 'render' || module.type !== 'core/light-renderer') continue;
+    const options = module.config as LightRendererOptions;
+    const maxLights = options.maxLights ?? 8;
+    const radiusScale = options.radiusScale ?? 1;
+    let valid = true;
+    if (!Number.isSafeInteger(maxLights) || maxLights <= 0 || maxLights > 64) {
+      valid = false;
+      diagnostics.push(
+        diagnostic(
+          'NACHI_LIGHT_COUNT_INVALID',
+          'Light renderer maxLights must be a positive safe integer no greater than 64.',
+          `${path}.config.maxLights`,
+        ),
+      );
+    }
+    if (!Number.isFinite(radiusScale) || radiusScale <= 0) {
+      valid = false;
+      diagnostics.push(
+        diagnostic(
+          'NACHI_LIGHT_RADIUS_INVALID',
+          'Light renderer radiusScale must be a positive finite number.',
+          `${path}.config.radiusScale`,
+        ),
+      );
+    }
+    if (!valid) continue;
+    const attributes = ['alive', 'color', 'intensity', 'position', 'size'];
+    const storageBuffers = rendererAttributeBuffers(schema, attributes);
+    if (!storageBuffers) continue;
+    // The selector scans physical attributes directly and owns one output buffer. It never binds
+    // lifecycle state in this compute stage.
+    const selectionBuffers = [...storageBuffers, 'NachiLightSelection'];
+    validateRendererStorageBudget(
+      selectionBuffers,
+      path,
+      'Light selection compute stage',
+      diagnostics,
+    );
+    draws.push({
+      kind: 'light',
+      maxLights,
+      path,
+      priority: options.priority ?? 'intensity',
+      radiusScale,
+      readback: {
+        latencyFrames: 1,
+        records: 'position-priority/color-intensity/radius-index',
+      },
+      requiresBackend: 'webgpu',
+      vertex: {
+        attributes,
+        storageBufferCount: selectionBuffers.length,
+        storageBuffers: selectionBuffers,
+      },
+    });
+  }
+  return draws;
+}
+
+function compileDecalDraws(
+  definition: EmitterDefinition<AttributeSchema, ParameterSchema>,
+  schema: ResolvedAttributeSchema,
+  lifecycleLayout: ReturnType<typeof lifecycleStorageLayout>,
+  diagnostics: VfxDiagnostic[],
+): CompiledDecalDrawDescription[] {
+  const draws: CompiledDecalDrawDescription[] = [];
+  for (const { module, path } of collectEmitterModules(definition)) {
+    if (module.stage !== 'render' || module.type !== 'core/decal-renderer') continue;
+    const options = module.config as DecalRendererOptions;
+    const sizeScale = options.sizeScale ?? 1;
+    if (!Number.isFinite(sizeScale) || sizeScale <= 0) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_DECAL_SIZE_INVALID',
+          'Decal renderer sizeScale must be a positive finite number.',
+          `${path}.config.sizeScale`,
+        ),
+      );
+    }
+    const attributes = ['color', 'normalizedAge', 'position', 'rotation', 'size'];
+    const attributeBuffers = rendererAttributeBuffers(schema, attributes);
+    if (!attributeBuffers) continue;
+    const storageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+    validateRendererStorageBudget(storageBuffers, path, 'Decal vertex stage', diagnostics);
+    draws.push({
+      fadeOverLife: options.fadeOverLife ?? true,
+      fragment: {
+        blending: options.blending ?? 'alpha',
+        ...(options.map === undefined ? {} : { map: options.map }),
+      },
+      geometry: { shape: 'projection-box', topology: 'triangle-list' },
+      indirect: {
+        aliveIndicesOffsetWords: lifecycleLayout.buffers.state.fields.aliveIndices.offsetWords,
+        drawArgumentsOffsetBytes:
+          lifecycleLayout.buffers.indirectArguments.fields.drawIndirect.offsetWords *
+          Uint32Array.BYTES_PER_ELEMENT,
+        instanceCount: 'alive-count',
+        physicalIndex: 'alive-indices',
+      },
+      kind: 'decal',
+      path,
+      requiresBackend: 'webgpu',
+      requiresSceneDepth: true,
+      sizeScale,
+      vertex: {
+        attributes,
+        storageBufferCount: storageBuffers.length,
+        storageBuffers,
+      },
+    });
   }
   return draws;
 }
@@ -2376,6 +2586,56 @@ function createBuildKernels(
         });
       }
     }
+    const decalDraw = program.draws.find(
+      (draw): draw is CompiledDecalDrawDescription => draw.kind === 'decal',
+    );
+    if (decalDraw) {
+      if (backend === 'webgl2') {
+        buildDiagnostics.push({
+          code: 'NACHI_DECAL_WEBGL2_UNSUPPORTED',
+          hint: 'Use the WebGPU backend for particle projection decals.',
+          message:
+            'The decal renderer requires WebGPU storage-buffer instancing and depth reconstruction.',
+          path: decalDraw.path,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      if (adapter.capabilities.sceneDepth !== true || adapter.sampleSceneDepth === undefined) {
+        buildDiagnostics.push({
+          code: 'NACHI_DECAL_SCENE_DEPTH_UNAVAILABLE',
+          hint: 'Bind the M6 previous-frame linear float depth copy through the renderer adapter.',
+          message:
+            'The decal renderer requires an explicit sampleable previous-frame scene-depth texture.',
+          path: decalDraw.path,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      if ((adapter.capabilities.sceneDepthSampleCount ?? 1) > 1) {
+        buildDiagnostics.push({
+          code: 'NACHI_DECAL_DEPTH_MSAA_UNSUPPORTED',
+          hint: 'Resolve and copy scene depth into a single-sample linear float texture.',
+          message: 'The decal renderer cannot reconstruct from an MSAA depth source.',
+          path: decalDraw.path,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+    }
+    const lightDraw = program.draws.find(
+      (draw): draw is CompiledLightDrawDescription => draw.kind === 'light',
+    );
+    if (lightDraw && backend === 'webgl2') {
+      buildDiagnostics.push({
+        code: 'NACHI_LIGHT_WEBGL2_UNSUPPORTED',
+        hint: 'Use the WebGPU backend for GPU top-N light selection.',
+        message: 'The light renderer requires WebGPU storage selection before bounded readback.',
+        path: lightDraw.path,
+        phase: 'compile',
+        severity: 'error',
+      });
+    }
     const storageBufferLimit = adapter.deviceLimits?.maxStorageBuffersPerShaderStage;
     // Incoming queues are effect-owned and therefore absent from standalone emitter meta. Event
     // spawn reads one source state buffer and one payload buffer in addition to target resources.
@@ -2428,7 +2688,8 @@ function createBuildKernels(
 
     const capacity = program.attributeSchema.capacity;
     const gpuLifecycle = backend === 'webgpu';
-    const lifecycleLayout = lifecycleStorageLayout(capacity);
+    const hasSpawnOrder = program.attributeSchema.byName.spawnOrder !== undefined;
+    const lifecycleLayout = lifecycleStorageLayout(capacity, hasSpawnOrder);
     const indirectLayout = lifecycleLayout.buffers.indirectArguments;
     const stateLayout = lifecycleLayout.buffers.state;
     const lifecycleIndirectStorage = gpuLifecycle
@@ -2728,7 +2989,6 @@ function createBuildKernels(
     };
 
     const initModules = program.kernels.init.modules;
-    const hasSpawnOrder = program.attributeSchema.byName.spawnOrder !== undefined;
     const ageModule = program.kernels.update.modules.find(({ type }) => type === 'core/age');
     const updateModules = program.kernels.update.modules.filter(({ type }) => type !== 'core/age');
 
@@ -2747,8 +3007,10 @@ function createBuildKernels(
           writeLifecycle(counterOffsets.aliveCount, adapter.uint(0));
           writeLifecycle(counterOffsets.spawnSuccess, adapter.uint(0));
           writeLifecycle(counterOffsets.spawnOverflow, adapter.uint(0));
-          writeLifecycle(stateLayout.fields.nextSpawnOrder.offsetWords, adapter.uint(0));
-          writeLifecycle(stateLayout.fields.currentSpawnBase.offsetWords, adapter.uint(0));
+          if (hasSpawnOrder) {
+            writeLifecycle(stateLayout.fields.nextSpawnOrder.offsetWords, adapter.uint(0));
+            writeLifecycle(stateLayout.fields.currentSpawnBase.offsetWords, adapter.uint(0));
+          }
           for (const queue of program.events) {
             const resources = eventOutputResources[queue.eventName];
             if (!resources) continue;
@@ -2767,11 +3029,13 @@ function createBuildKernels(
     const init = adapter
       .fn(() => {
         if (hasSpawnOrder) writeAttribute('spawnOrder', adapter.uint(adapter.instanceIndex));
-        writeLifecycle(
-          stateLayout.fields.birthIndices.offsetWords,
-          adapter.uint(adapter.instanceIndex),
-          adapter.instanceIndex,
-        );
+        if (hasSpawnOrder) {
+          writeLifecycle(
+            stateLayout.fields.birthIndices.offsetWords,
+            adapter.uint(adapter.instanceIndex),
+            adapter.instanceIndex,
+          );
+        }
         for (const module of initModules) buildModule(module, adapter.instanceIndex);
         writeAttribute('alive', adapter.constant(true, 'bool'));
       })
@@ -2847,18 +3111,20 @@ function createBuildKernels(
                 attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
                 particleIndex,
               );
-              const spawnOrder = readLifecycle(stateLayout.fields.currentSpawnBase.offsetWords).add(
-                invocation,
-              );
-              if (hasSpawnOrder) writeAttribute('spawnOrder', spawnOrder, particleIndex);
-              const birthSlot = spawnOrder.sub(
-                spawnOrder.div(adapter.uint(capacity)).mul(adapter.uint(capacity)),
-              );
-              writeLifecycle(
-                stateLayout.fields.birthIndices.offsetWords,
-                adapter.uint(particleIndex),
-                birthSlot,
-              );
+              if (hasSpawnOrder) {
+                const spawnOrder = readLifecycle(
+                  stateLayout.fields.currentSpawnBase.offsetWords,
+                ).add(invocation);
+                writeAttribute('spawnOrder', spawnOrder, particleIndex);
+                const birthSlot = spawnOrder.sub(
+                  spawnOrder.div(adapter.uint(capacity)).mul(adapter.uint(capacity)),
+                );
+                writeLifecycle(
+                  stateLayout.fields.birthIndices.offsetWords,
+                  adapter.uint(particleIndex),
+                  birthSlot,
+                );
+              }
               for (const module of initModules) buildModule(module, particleIndex);
               writeAttribute('alive', adapter.uint(1), particleIndex);
               adapter.atomicAdd(counter(counterOffsets.spawnSuccess), adapter.uint(1));
@@ -2874,12 +3140,14 @@ function createBuildKernels(
             attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
             particleIndex,
           );
-          if (hasSpawnOrder) writeAttribute('spawnOrder', invocation, particleIndex);
-          writeLifecycle(
-            stateLayout.fields.birthIndices.offsetWords,
-            adapter.uint(particleIndex),
-            invocation,
-          );
+          if (hasSpawnOrder) {
+            writeAttribute('spawnOrder', invocation, particleIndex);
+            writeLifecycle(
+              stateLayout.fields.birthIndices.offsetWords,
+              adapter.uint(particleIndex),
+              invocation,
+            );
+          }
           for (const module of initModules) buildModule(module, particleIndex);
           writeAttribute('alive', adapter.uint(1), particleIndex);
         }
@@ -2910,12 +3178,17 @@ function createBuildKernels(
           const requested = adapter.uint(uniformNode('Emitter.spawnCount'));
           const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
           const reservation = requested.clamp(adapter.uint(0), freeCount);
-          const spawnBase = adapter.atomicAdd(
-            counter(stateLayout.fields.nextSpawnOrder.offsetWords),
-            reservation,
-            true,
-          );
-          adapter.atomicStore(counter(stateLayout.fields.currentSpawnBase.offsetWords), spawnBase);
+          if (hasSpawnOrder) {
+            const spawnBase = adapter.atomicAdd(
+              counter(stateLayout.fields.nextSpawnOrder.offsetWords),
+              reservation,
+              true,
+            );
+            adapter.atomicStore(
+              counter(stateLayout.fields.currentSpawnBase.offsetWords),
+              spawnBase,
+            );
+          }
           writeIndirect(
             indirectLayout.fields.spawnDispatch.offsetWords,
             requested
@@ -2998,12 +3271,17 @@ function createBuildKernels(
           const count = readCount();
           const freeCount = adapter.atomicLoad(counter(counterOffsets.freeCount));
           const reservation = count.clamp(adapter.uint(0), freeCount);
-          const spawnBase = adapter.atomicAdd(
-            counter(stateLayout.fields.nextSpawnOrder.offsetWords),
-            reservation,
-            true,
-          );
-          adapter.atomicStore(counter(stateLayout.fields.currentSpawnBase.offsetWords), spawnBase);
+          if (hasSpawnOrder) {
+            const spawnBase = adapter.atomicAdd(
+              counter(stateLayout.fields.nextSpawnOrder.offsetWords),
+              reservation,
+              true,
+            );
+            adapter.atomicStore(
+              counter(stateLayout.fields.currentSpawnBase.offsetWords),
+              spawnBase,
+            );
+          }
           resources.indirect
             .element(adapter.uint(0))
             .assign(
@@ -3034,18 +3312,20 @@ function createBuildKernels(
                   attributeNode('spawnGeneration', particleIndex).add(adapter.uint(1)),
                   particleIndex,
                 );
-                const spawnOrder = readLifecycle(
-                  stateLayout.fields.currentSpawnBase.offsetWords,
-                ).add(invocation);
-                if (hasSpawnOrder) writeAttribute('spawnOrder', spawnOrder, particleIndex);
-                const birthSlot = spawnOrder.sub(
-                  spawnOrder.div(adapter.uint(capacity)).mul(adapter.uint(capacity)),
-                );
-                writeLifecycle(
-                  stateLayout.fields.birthIndices.offsetWords,
-                  adapter.uint(particleIndex),
-                  birthSlot,
-                );
+                if (hasSpawnOrder) {
+                  const spawnOrder = readLifecycle(
+                    stateLayout.fields.currentSpawnBase.offsetWords,
+                  ).add(invocation);
+                  writeAttribute('spawnOrder', spawnOrder, particleIndex);
+                  const birthSlot = spawnOrder.sub(
+                    spawnOrder.div(adapter.uint(capacity)).mul(adapter.uint(capacity)),
+                  );
+                  writeLifecycle(
+                    stateLayout.fields.birthIndices.offsetWords,
+                    adapter.uint(particleIndex),
+                    birthSlot,
+                  );
+                }
                 for (const module of initModules) buildModule(module, particleIndex);
                 const bank = adapter.uint(uniformNode('Emitter.eventReadBank'));
                 for (const name of handler.inherit) {
@@ -3266,7 +3546,10 @@ export function compileEmitter<
       'Particles.spawnGeneration',
     ]),
   ].sort();
-  const lifecycleLayout = lifecycleStorageLayout(definition.capacity);
+  const lifecycleLayout = lifecycleStorageLayout(
+    definition.capacity,
+    attributeSchema.byName.spawnOrder !== undefined,
+  );
   const spriteDraws = compileSpriteDraws(
     normalizedDefinition,
     attributeSchema,
@@ -3274,6 +3557,13 @@ export function compileEmitter<
     diagnostics,
   );
   const meshDraws = compileMeshDraws(
+    normalizedDefinition,
+    attributeSchema,
+    lifecycleLayout,
+    diagnostics,
+  );
+  const lightDraws = compileLightDraws(normalizedDefinition, attributeSchema, diagnostics);
+  const decalDraws = compileDecalDraws(
     normalizedDefinition,
     attributeSchema,
     lifecycleLayout,
@@ -3287,7 +3577,9 @@ export function compileEmitter<
     diagnostics,
   );
   const drawsByPath = new Map(
-    [...spriteDraws, ...meshDraws, ...registeredDraws].map((draw) => [draw.path, draw] as const),
+    [...spriteDraws, ...meshDraws, ...lightDraws, ...decalDraws, ...registeredDraws].map(
+      (draw) => [draw.path, draw] as const,
+    ),
   );
   const draws = collectEmitterModules(normalizedDefinition).flatMap(({ module, path }) => {
     if (module.stage !== 'render') return [];
@@ -3325,7 +3617,9 @@ export function compileEmitter<
       name: 'NachiLifecycleState',
       purposes: [
         'free/alive/success/overflow counters',
-        'deterministic spawn-order counters and birth-index ring',
+        ...(attributeSchema.byName.spawnOrder === undefined
+          ? []
+          : ['deterministic spawn-order counters and birth-index ring']),
         'free-list indices',
         'compacted alive indices',
       ],
@@ -4181,7 +4475,12 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .constant(1, 'f32')
         .div(clipPosition.w.mul(clipPosition.w).sqrt().clamp(0.000001, 1e20));
       const ndc = clipPosition.xyz.mul(inverseW);
-      const uv = context.adapter.vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5));
+      // Three r185 screen/depth texture UVs use a top-left origin (v grows down), while WebGPU
+      // NDC y grows up. This one-minus is required in both projection and reconstruction.
+      const uv = context.adapter.vec2(
+        ndc.x.mul(0.5).add(0.5),
+        context.adapter.constant(0.5, 'f32').sub(ndc.y.mul(0.5)),
+      );
       // WebGPURenderer supplies a WebGPU projection matrix, whose NDC z is already [0, 1].
       const particleDepth = ndc.z;
       const sceneDepth = sampleDepth(uv);
@@ -4193,7 +4492,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const reconstructView = (sampleUv: KernelNode, depth: KernelNode): KernelNode => {
         const clip = context.adapter.vec4(
           sampleUv.x.mul(2).sub(1),
-          sampleUv.y.mul(2).sub(1),
+          context.adapter.constant(1, 'f32').sub(sampleUv.y.mul(2)),
           depth,
           1,
         );
@@ -4202,8 +4501,8 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       };
       const leftUv = context.adapter.vec2(uv.x.sub(texel.x), uv.y).clamp(0, 1);
       const rightUv = context.adapter.vec2(uv.x.add(texel.x), uv.y).clamp(0, 1);
-      const downUv = context.adapter.vec2(uv.x, uv.y.sub(texel.y)).clamp(0, 1);
-      const upUv = context.adapter.vec2(uv.x, uv.y.add(texel.y)).clamp(0, 1);
+      const upUv = context.adapter.vec2(uv.x, uv.y.sub(texel.y)).clamp(0, 1);
+      const downUv = context.adapter.vec2(uv.x, uv.y.add(texel.y)).clamp(0, 1);
       const left = reconstructView(leftUv, sampleDepth(leftUv));
       const right = reconstructView(rightUv, sampleDepth(rightUv));
       const down = reconstructView(downUv, sampleDepth(downUv));
@@ -4344,6 +4643,32 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/orient-to-velocity',
+    version: 1,
+  });
+  registry.register({
+    access: { reads: [], writes: ['Particles.intensity'] },
+    build(context) {
+      const config = context.module.config as { readonly value: ValueInput<number> };
+      context.write('intensity', context.value(config.value, 'f32'));
+    },
+    stage: 'init',
+    type: 'core/light-intensity',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Particles.normalizedAge'],
+      writes: ['Particles.intensity'],
+    },
+    build(context) {
+      if (!context.module.lutId) throw new Error('intensityOverLife LUT is missing.');
+      context.write(
+        'intensity',
+        context.sampleLut(context.module.lutId, context.attribute('normalizedAge')).r,
+      );
+    },
+    stage: 'update',
+    type: 'core/intensity-over-life',
     version: 1,
   });
   registry.register({
@@ -4526,6 +4851,8 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/collide-scene-depth',
       'core/collide-sdf',
       'core/orient-to-velocity',
+      'core/light-intensity',
+      'core/intensity-over-life',
       'core/size-over-life',
       'core/rotation-over-life',
       'core/velocity-over-life',

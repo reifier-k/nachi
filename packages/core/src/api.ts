@@ -53,6 +53,8 @@ import type {
   RangeGenerator,
   RateSpawnOptions,
   RenderModule,
+  LightRendererOptions,
+  DecalRendererOptions,
   SpawnModule,
   StopAction,
   TextureRef,
@@ -418,6 +420,30 @@ export function sizeOverLife(value: CurveGenerator<number>): UpdateModule {
   );
 }
 
+export function lightIntensity(value: ValueInput<number>): InitModule {
+  return createModule(
+    'init',
+    'core/light-intensity',
+    { value },
+    {
+      reads: [],
+      writes: ['Particles.intensity'],
+    },
+  );
+}
+
+export function intensityOverLife(value: CurveGenerator<number>): UpdateModule {
+  return createModule(
+    'update',
+    'core/intensity-over-life',
+    { value },
+    {
+      reads: ['Particles.normalizedAge'],
+      writes: ['Particles.intensity'],
+    },
+  );
+}
+
 export function rotationOverLife(value: CurveGenerator<number>): UpdateModule {
   return createModule(
     'update',
@@ -519,6 +545,32 @@ export function meshRenderer(options: MeshRendererOptions): RenderModule {
         : [];
   return createModule('render', 'core/mesh-renderer', options, {
     reads: ['Particles.color', 'Particles.position', 'Particles.scale', ...orientationRead],
+    writes: [],
+  });
+}
+
+export function lightRenderer(options: LightRendererOptions = {}): RenderModule {
+  return createModule('render', 'core/light-renderer', options, {
+    reads: [
+      'Particles.alive',
+      'Particles.color',
+      'Particles.intensity',
+      'Particles.position',
+      'Particles.size',
+    ],
+    writes: [],
+  });
+}
+
+export function decalRenderer(options: DecalRendererOptions = {}): RenderModule {
+  return createModule('render', 'core/decal-renderer', options, {
+    reads: [
+      'Particles.color',
+      'Particles.normalizedAge',
+      'Particles.position',
+      'Particles.rotation',
+      'Particles.size',
+    ],
     writes: [],
   });
 }

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nachi — Golden Slash M7</title>
+  </head>
+  <body>
+    <main>
+      <section class="hud" aria-label="Golden slash status">
+        <p class="eyebrow">Golden #1 · M7 scope</p>
+        <h1>Socket slash renderer stack</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing</dd>
+          </div>
+          <div>
+            <dt>Mode</dt>
+            <dd id="mode-value">Initializing</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing</dd>
+          </div>
+        </dl>
+        <p class="scope">M8 arc mesh · M9 hit stop/shake · M10 post distortion</p>
+      </section>
+      <canvas id="golden-slash" width="640" height="400"></canvas>
+    </main>
+    <script type="module" src="/src/golden-slash.ts"></script>
+  </body>
+</html>

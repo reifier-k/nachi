@@ -34,6 +34,10 @@ import {
   TURBULENCE_SIMPLEX_AMPLITUDE,
   linearForce,
   lifetime,
+  lightIntensity,
+  lightRenderer,
+  intensityOverLife,
+  decalRenderer,
   meshRenderer,
   orientToVelocity,
   parameter,
@@ -694,7 +698,6 @@ describe('emitter kernel compiler', () => {
         name: 'NachiLifecycleState',
         purposes: [
           'free/alive/success/overflow counters',
-          'deterministic spawn-order counters and birth-index ring',
           'free-list indices',
           'compacted alive indices',
         ],
@@ -1009,6 +1012,95 @@ describe('emitter kernel compiler', () => {
     expect(program.meta.backendBudgets.webgpu.vertexStorageBufferCount).toBeLessThanOrEqual(8);
   });
 
+  it('compiles bounded light selection with orthogonal color/intensity over-life attributes', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 16,
+        init: [positionSphere({ radius: 0 }), lifetime(1), lightIntensity(12)],
+        integration: 'none',
+        render: lightRenderer({ maxLights: 4, priority: 'intensity-radius', radiusScale: 2 }),
+        spawn: burst({ count: 16 }),
+        update: [
+          colorOverLife(gradient('#fff', '#f00')),
+          intensityOverLife(curve([0, 10], [1, 0])),
+        ],
+      }),
+    );
+    expect(program.draws[0]).toMatchObject({
+      kind: 'light',
+      maxLights: 4,
+      priority: 'intensity-radius',
+      radiusScale: 2,
+      readback: { latencyFrames: 1 },
+      requiresBackend: 'webgpu',
+    });
+    expect(program.attributeSchema.byName).toHaveProperty('intensity');
+    expect(
+      program.kernels.update.modules.find(({ type }) => type === 'core/intensity-over-life')?.lutId,
+    ).toBeDefined();
+    expect(program.draws[0]?.vertex.storageBuffers).not.toContain('NachiLifecycleState');
+    expect(() =>
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: { ...fakeAdapter().capabilities, backend: 'webgl2' },
+      }),
+    ).toThrowError('The light renderer requires WebGPU storage selection');
+  });
+
+  it('does not publish a light draw after invalid pool-bound diagnostics', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: lightRenderer({ maxLights: 0, radiusScale: -1 }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.draws).toEqual([]);
+    expect(program.diagnostics.map(({ code }) => code)).toEqual(
+      expect.arrayContaining(['NACHI_LIGHT_COUNT_INVALID', 'NACHI_LIGHT_RADIUS_INVALID']),
+    );
+  });
+
+  it('compiles a depth-reconstructed decal and rejects missing depth capability', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        init: [positionSphere({ radius: 0 }), lifetime(2)],
+        integration: 'none',
+        render: decalRenderer({ fadeOverLife: true, sizeScale: 1.5 }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.draws[0]).toMatchObject({
+      fadeOverLife: true,
+      geometry: { shape: 'projection-box' },
+      kind: 'decal',
+      requiresBackend: 'webgpu',
+      requiresSceneDepth: true,
+      sizeScale: 1.5,
+    });
+    const missingDepth = fakeAdapter();
+    const { sampleSceneDepth: _sampleSceneDepth, ...missingDepthAdapter } = missingDepth;
+    void _sampleSceneDepth;
+    expect(() =>
+      program.buildKernels({
+        ...missingDepthAdapter,
+        capabilities: { ...missingDepth.capabilities, sceneDepth: false },
+      }),
+    ).toThrowError(
+      'The decal renderer requires an explicit sampleable previous-frame scene-depth texture',
+    );
+    const adapter = fakeAdapter();
+    expect(() =>
+      program.buildKernels({
+        ...adapter,
+        capabilities: { ...adapter.capabilities, sceneDepth: true, sceneDepthSampleCount: 1 },
+        sampleSceneDepth: () => new FakeNode(),
+      }),
+    ).not.toThrow();
+  });
+
   it('compiles each mesh orientation mode and diagnoses an invalid custom axis', () => {
     const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'debris' } as const;
     const alignments = [
@@ -1214,14 +1306,30 @@ describe('emitter kernel compiler', () => {
     const metadataWords = indirectMetadataWords + stateMetadataWords;
 
     expect(indirectMetadataWords).toBe(8);
-    expect(stateMetadataWords).toBe(30);
-    expect(metadataWords).toBe(38);
+    expect(stateMetadataWords).toBe(20);
+    expect(metadataWords).toBe(28);
     expect(indirectArguments.wordCount).toBe(indirectMetadataWords);
     expect(state.wordCount).toBe(stateMetadataWords);
     expect(program.meta.lifecycleStorage.wordCount).toBe(metadataWords);
     expect(materializedIndirectWords).toBe(indirectMetadataWords);
     expect(materializedInstancedWords.at(-1)).toBe(stateMetadataWords);
-    expect(metadataWords * Uint32Array.BYTES_PER_ELEMENT).toBe(152);
+    expect(metadataWords * Uint32Array.BYTES_PER_ELEMENT).toBe(112);
+
+    const ordered = compileEmitter({
+      ...baseEmitter(),
+      render: {
+        access: { reads: ['Particles.spawnOrder'], writes: [] },
+        config: {},
+        kind: 'module',
+        stage: 'render',
+        type: 'test/spawn-order-reader',
+        version: 1,
+      },
+    });
+    expect(ordered.meta.lifecycleStorage.buffers.state.wordCount).toBe(30);
+    expect(ordered.meta.lifecycleStorage.buffers.state.fields.nextSpawnOrder.wordCount).toBe(1);
+    expect(ordered.meta.lifecycleStorage.buffers.state.fields.currentSpawnBase.wordCount).toBe(1);
+    expect(ordered.meta.lifecycleStorage.buffers.state.fields.birthIndices.wordCount).toBe(8);
   });
 
   it('compiles burst, rate, and per-distance through the unified registry', () => {
@@ -2414,6 +2522,17 @@ describe('emitter kernel compiler', () => {
     expect(depth).toBeGreaterThan(0);
     expect(depth).toBeLessThan(1);
     expect(Math.abs(reconstructedViewZ - viewZ)).toBeLessThan(1e-5);
+  });
+
+  it('round-trips WebGPU NDC y through top-left-origin scene-depth UV', () => {
+    const ndcY = 0.42;
+    const textureV = 0.5 - ndcY * 0.5;
+    const reconstructedNdcY = 1 - textureV * 2;
+    const mirroredTextureV = ndcY * 0.5 + 0.5;
+
+    expect(textureV).toBeCloseTo(0.29);
+    expect(reconstructedNdcY).toBeCloseTo(ndcY);
+    expect(mirroredTextureV).toBeCloseTo(0.71);
   });
 
   it('materializes collideSceneDepth with camera uniforms and a bound depth sampler', () => {

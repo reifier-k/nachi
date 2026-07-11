@@ -53,6 +53,7 @@ describe('resolved attribute schema', () => {
       age: 0,
       alive: false,
       color: [1, 1, 1, 1],
+      intensity: 1,
       lifetime: 1,
       mass: 1,
       normalizedAge: 0,

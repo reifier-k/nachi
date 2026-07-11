@@ -161,7 +161,14 @@ export function registerTrails(registry: KernelModuleRegistry): KernelModuleRegi
           `${context.path}.config.uv.tileLength`,
         );
       }
-      const vertex = context.vertex(['alive', 'color', 'position', 'ribbonId', 'spawnOrder']);
+      const vertex = context.vertex(['color', 'position'], {
+        additionalStorageBuffers: [
+          'NachiRibbonSegmentIndices',
+          'NachiRibbonSegmentUvT',
+          'NachiRibbonSegmentWidths',
+        ],
+        lifecycle: false,
+      });
       if (!vertex) return undefined;
       return {
         fragment: {

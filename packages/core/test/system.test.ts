@@ -993,7 +993,17 @@ describe('VFXSystem runtime scheduler', () => {
       submitComputeIndirect: (kernel) => base.submitCompute(kernel),
     };
     const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
-    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const orderedEmitter = defineEmitter({
+      capacity: 1,
+      init: [lifetime(1)],
+      lifecycle: { duration: 1 },
+      render: {
+        ...computeRender,
+        access: { reads: ['Particles.spawnOrder'], writes: [] },
+      },
+      spawn: burst({ count: 1 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: orderedEmitter } }));
     nextSpawnOrderOffset = instance.getEmitter('particles')?.kernels.nextSpawnOrderOffset ?? 0;
 
     await system.update(0);
