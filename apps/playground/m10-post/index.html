@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#060914" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M10 Post Smoke</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="hud">
+        <p class="eyebrow">M10 GPU smoke · offscreen/readback only</p>
+        <h1>Post integration</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing…</dd>
+          </div>
+          <div>
+            <dt>Path</dt>
+            <dd>RenderPipeline → offscreen RT → pixels</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing…</dd>
+          </div>
+        </dl>
+      </section>
+      <section class="visual-shell">
+        <canvas
+          id="post-visual"
+          width="768"
+          height="128"
+          aria-label="M10 post-processing GPU readback panels"
+        ></canvas>
+        <div class="labels" aria-hidden="true">
+          <span>shockwave</span><span>heat haze</span><span>radial blur</span><span>bloom</span
+          ><span>D→B</span><span>B→D</span>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/m10-post.ts"></script>
+  </body>
+</html>

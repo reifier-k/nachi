@@ -1,0 +1,54 @@
+{
+  "name": "@nachi/post",
+  "version": "0.0.0",
+  "description": "Composable TSL post effects for Three.js RenderPipeline",
+  "keywords": [
+    "three.js",
+    "tsl",
+    "webgpu",
+    "post-processing",
+    "vfx"
+  ],
+  "license": "MIT",
+  "sideEffects": false,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachi-vfx/nachi.git",
+    "directory": "packages/post"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./math": {
+      "types": "./dist/math.d.ts",
+      "import": "./dist/math.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node ../../tools/check-package-esm.mjs .",
+    "prepublishOnly": "pnpm build",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@types/three": ">=0.185.0 <0.186.0",
+    "three": ">=0.185.0 <0.186.0"
+  },
+  "peerDependenciesMeta": {
+    "@types/three": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/three": "0.185.0",
+    "three": "0.185.1"
+  }
+}

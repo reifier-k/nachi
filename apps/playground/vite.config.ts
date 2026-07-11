@@ -38,6 +38,7 @@ export default defineConfig({
         m8Vat: 'm8-vat/index.html',
         m9Compose: 'm9-compose/index.html',
         m9Timeline: 'm9-timeline/index.html',
+        m10Post: 'm10-post/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },
@@ -45,6 +46,10 @@ export default defineConfig({
   },
   resolve: {
     alias: [
+      {
+        find: '@nachi/post',
+        replacement: fileURLToPath(new URL('../../packages/post/src/index.ts', import.meta.url)),
+      },
       {
         find: '@nachi/timeline',
         replacement: fileURLToPath(

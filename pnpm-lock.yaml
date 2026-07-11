@@ -44,6 +44,9 @@ importers:
       '@nachi/mesh-fx':
         specifier: workspace:*
         version: link:../../packages/mesh-fx
+      '@nachi/post':
+        specifier: workspace:*
+        version: link:../../packages/post
       '@nachi/timeline':
         specifier: workspace:*
         version: link:../../packages/timeline
@@ -77,6 +80,15 @@ importers:
       '@nachi/tsl-kit':
         specifier: workspace:*
         version: link:../tsl-kit
+    devDependencies:
+      '@types/three':
+        specifier: 0.185.0
+        version: 0.185.0
+      three:
+        specifier: 0.185.1
+        version: 0.185.1
+
+  packages/post:
     devDependencies:
       '@types/three':
         specifier: 0.185.0
