@@ -29,6 +29,12 @@ describe('FGA parser', () => {
     expect(() => parseFga('1 1 1')).toThrow('resolution and min/max bounds');
   });
 
+  it('rejects binary .vf Volume File signatures with a format-specific error', () => {
+    expect(() => parseFga('VF_F\u0001\u0000\u0000\u0000')).toThrow(
+      'Binary .vf Volume File input is not supported; parseFga() accepts ASCII .fga text only.',
+    );
+  });
+
   it('rejects non-positive and fractional resolutions', () => {
     expect(() => parseFga('0 1 1 0 0 0 1 1 1')).toThrow('positive safe integers');
     expect(() => parseFga('1.5 1 1 0 0 0 1 1 1')).toThrow('positive safe integers');

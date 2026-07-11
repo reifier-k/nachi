@@ -153,6 +153,7 @@ async function run(): Promise<void> {
   root.dataset.backend = 'WebGPU';
   root.dataset.rendererStatus = 'ready';
   root.dataset.spikeStatus = 'running';
+  const linearFloat32Filtering = backend.device?.features?.has('float32-filterable') === true;
 
   const fieldRef = {
     assetType: 'vector-field',
@@ -161,12 +162,12 @@ async function run(): Promise<void> {
   } as const;
   const parsedField = parseFga('2 2 1 -1 -1 -1 1 1 1 1 -1 0 1 1 0 -1 -1 0 -1 1 0');
   const resolveVectorField = createThreeVectorFieldResolver(
-    new Map([[fieldRef.uri, createThreeVectorFieldResource(parsedField)]]),
+    new Map([[fieldRef.uri, createThreeVectorFieldResource(parsedField, linearFloat32Filtering)]]),
   );
 
   const kernelAdapter = createThreeKernelAdapter({
     backend: 'webgpu',
-    linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
+    linearFloat32Filtering,
     ...(backend.device?.limits?.maxStorageBuffersPerShaderStage === undefined
       ? {}
       : {

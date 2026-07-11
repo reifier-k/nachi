@@ -42,7 +42,19 @@ describe('three kernel adapter', () => {
     expect(resource.boundsMin).toEqual([-1, -2, -3]);
     expect(resource.boundsMax).toEqual([1, 2, 3]);
     expect(resource.texture.image).toMatchObject({ width: 2, height: 1, depth: 1 });
+    expect(resource.texture.minFilter).toBe(THREE.NearestFilter);
+    expect(resource.texture.magFilter).toBe(THREE.NearestFilter);
     expect([...data]).toEqual([1, 2, 3, 1, -1, -2, -3, 1]);
+  });
+
+  it('enables trilinear vector-field sampling when float32 filtering is supported', () => {
+    const resource = createThreeVectorFieldResource(
+      parseFga('1 1 1 -1 -1 -1 1 1 1 0.5 0 -0.5'),
+      true,
+    );
+
+    expect(resource.texture.minFilter).toBe(THREE.LinearFilter);
+    expect(resource.texture.magFilter).toBe(THREE.LinearFilter);
   });
 
   it('resolves a FieldRef and builds the vector-field texture sample graph', () => {

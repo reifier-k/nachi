@@ -102,7 +102,10 @@ export function createThreeGeometryResolver(
   return (reference) => geometries.get(reference.uri);
 }
 
-export function createThreeVectorFieldResource(field: ParsedVectorField): ThreeVectorFieldResource {
+export function createThreeVectorFieldResource(
+  field: ParsedVectorField,
+  linearFloat32Filtering = false,
+): ThreeVectorFieldResource {
   const [width, height, depth] = field.resolution;
   const rgba = new Float32Array(width * height * depth * 4);
   for (let sample = 0; sample < field.vectors.length / 3; sample += 1) {
@@ -114,8 +117,9 @@ export function createThreeVectorFieldResource(field: ParsedVectorField): ThreeV
   const texture = new THREE.Data3DTexture(rgba, width, height, depth);
   texture.format = THREE.RGBAFormat;
   texture.type = THREE.FloatType;
-  texture.minFilter = THREE.NearestFilter;
-  texture.magFilter = THREE.NearestFilter;
+  const filter = linearFloat32Filtering ? THREE.LinearFilter : THREE.NearestFilter;
+  texture.minFilter = filter;
+  texture.magFilter = filter;
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return { boundsMax: field.boundsMax, boundsMin: field.boundsMin, texture };

@@ -10,6 +10,11 @@ function finiteValues(tokens: readonly string[], label: string): number[] {
 
 /** Parses the Unreal/Vector Fields ASCII FGA layout without any renderer dependency. */
 export function parseFga(source: string): ParsedVectorField {
+  if (/^VF_[FH]/u.test(source)) {
+    throw new Error(
+      'Binary .vf Volume File input is not supported; parseFga() accepts ASCII .fga text only.',
+    );
+  }
   const tokens = source.replaceAll(',', ' ').split(/\s+/u).filter(Boolean);
   if (tokens.length < 9) throw new Error('FGA requires a resolution and min/max bounds header.');
 

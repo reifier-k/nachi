@@ -422,6 +422,8 @@ async function run(): Promise<void> {
     fireflyMotion:
       liveFireflyPositions.length > 0 && positionVariance > 0.001 && maximumFireflyRadius < 6,
     leavesFallAndRotate,
+    // Churn bands scale with capacity: 28 / 128 ~= 22% for fireflies and
+    // 22 / 160 ~= 14% for leaves, covering each emitter's expected spawn/retire cadence.
     steadyState:
       stableBand(fireflySteady, 28) &&
       stableBand(leafSteady, 22) &&
