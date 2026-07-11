@@ -9,6 +9,10 @@ import {
   billboard,
   burst,
   colorOverLife,
+  collideBox,
+  collidePlane,
+  collideSceneDepth,
+  collideSphere,
   compileEmitter,
   coreModuleImplementationAccess,
   createCoreKernelModuleRegistry,
@@ -325,6 +329,7 @@ function traceCoreImplementation(
     adapter: fakeAdapter(),
     module,
     attribute: (name) => node(`Particles.${name}`),
+    emitEvent: () => undefined,
     random: () => {
       trace.reads.add('Emitter.seed');
       trace.reads.add('Particles.spawnGeneration');
@@ -356,6 +361,7 @@ function fakeAdapter(): KernelTslAdapter {
       backend: 'webgpu',
       indirectDispatch: true,
       indirectDraw: true,
+      sceneDepth: true,
     },
     instanceIndex: node(),
     atomicAdd: node,
@@ -374,6 +380,7 @@ function fakeAdapter(): KernelTslAdapter {
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     inverse: node,
     sampleTexture: node,
+    sampleSceneDepth: node,
     sampleVectorField: (_field, position) => {
       markAccessRead(position);
       return node();
@@ -2097,6 +2104,18 @@ describe('emitter kernel compiler', () => {
         writes: ['Particles.age', 'Particles.normalizedAge'],
       },
       'core/color-over-life': colorOverLife(gradient('#000', '#fff')).access,
+      'core/collide-box': collideBox({
+        center: [0, 0, 0],
+        mode: 'bounce',
+        size: [1, 1, 1],
+      }).access,
+      'core/collide-plane': collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 }).access,
+      'core/collide-scene-depth': collideSceneDepth().access,
+      'core/collide-sphere': collideSphere({
+        center: [0, 0, 0],
+        mode: 'bounce',
+        radius: 1,
+      }).access,
       'core/curl-noise': curlNoise({ frequency: 1, strength: 1 }).access,
       'core/drag': drag(1).access,
       'core/gravity': gravity(-9.8).access,
@@ -2157,6 +2176,23 @@ describe('emitter kernel compiler', () => {
           strength: 1,
         },
       ],
+      [
+        'core/collide-plane',
+        {
+          bounce: 0.5,
+          friction: 0.2,
+          mode: 'bounce',
+          normal: [0, 1, 0],
+          offset: 0,
+          space: 'emitter',
+        },
+      ],
+      ['core/collide-sphere', { center: [0, 0, 0], mode: 'bounce', radius: 1, space: 'emitter' }],
+      [
+        'core/collide-box',
+        { center: [0, 0, 0], mode: 'bounce', size: [1, 1, 1], space: 'emitter' },
+      ],
+      ['core/collide-scene-depth', { mode: 'bounce' }],
       ['core/orient-to-velocity', {}],
       ['core/size-over-life', { value: curve([0, 0], [1, 1]) }, 'size-lut'],
       ['core/rotation-over-life', { value: curve([0, 0], [1, 1]) }, 'rotation-lut'],
@@ -2186,6 +2222,22 @@ describe('emitter kernel compiler', () => {
     [linearForce({ force: [1, 2, 3] }), 'core/linear-force', 'Particles.velocity'],
     [turbulence({ frequency: 2, strength: 3 }), 'core/turbulence', 'Particles.velocity'],
     [
+      collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 }),
+      'core/collide-plane',
+      'Particles.position',
+    ],
+    [
+      collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1 }),
+      'core/collide-sphere',
+      'Particles.position',
+    ],
+    [
+      collideBox({ center: [0, 0, 0], mode: 'kill', size: [1, 1, 1] }),
+      'core/collide-box',
+      'Particles.alive',
+    ],
+    [collideSceneDepth(), 'core/collide-scene-depth', 'Particles.position'],
+    [
       rotationOverLife(curve([0, 0], [1, 1])),
       'core/rotation-over-life',
       'Particles.spriteRotation',
@@ -2209,6 +2261,78 @@ describe('emitter kernel compiler', () => {
     const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }));
     expect(program.diagnostics).toEqual([]);
     expect(program.attributeSchema.byName.alive).toBeDefined();
+  });
+
+  it.each([
+    collidePlane({ bounce: 0.6, friction: 0.1, mode: 'bounce', normal: [0, 1, 0], offset: 0 }),
+    collideSphere({ center: [1, 2, 3], mode: 'stick', radius: 2, space: 'emitter' }),
+    collideBox({ center: [0, 0, 0], mode: 'kill', size: [2, 4, 6] }),
+  ])('compiles an analytic collider alongside the reserved integrator', (module) => {
+    const program = compileEmitter(baseEmitter({ update: [module] }));
+    expect(program.diagnostics).toEqual([]);
+    expect(program.kernels.update.modules.at(-1)?.type).toBe('core/integrate');
+    expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
+  });
+
+  it('diagnoses invalid analytic and depth collision coefficients and geometry', () => {
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [
+          collidePlane({ bounce: 2, mode: 'bounce', normal: [0, 0, 0], offset: 0 }),
+          collideSphere({ center: [0, 0, 0], friction: -1, mode: 'stick', radius: 0 }),
+          collideBox({ center: [0, 0, 0], mode: 'kill', size: [1, 0, 1] }),
+          collideSceneDepth({ surfaceOffset: -1 }),
+        ],
+      }),
+    );
+    expect(program.diagnostics.map(({ code }) => code)).toEqual([
+      'NACHI_COLLISION_RESPONSE_INVALID',
+      'NACHI_COLLISION_PLANE_NORMAL_INVALID',
+      'NACHI_COLLISION_RESPONSE_INVALID',
+      'NACHI_COLLISION_SPHERE_RADIUS_INVALID',
+      'NACHI_COLLISION_BOX_SIZE_INVALID',
+      'NACHI_COLLISION_DEPTH_OFFSET_INVALID',
+    ]);
+  });
+
+  it('requires an explicit previous-frame depth binding for collideSceneDepth', () => {
+    const program = compileEmitter(
+      baseEmitter({ integration: 'none', update: [collideSceneDepth()] }),
+    );
+    const adapter = fakeAdapter();
+    const withoutSceneDepth = { ...adapter };
+    delete withoutSceneDepth.sampleSceneDepth;
+    expect(() =>
+      program.buildKernels({
+        ...withoutSceneDepth,
+        capabilities: { ...adapter.capabilities, sceneDepth: false },
+      }),
+    ).toThrow(VfxDiagnosticError);
+  });
+
+  it('materializes collideSceneDepth with camera uniforms and a bound depth sampler', () => {
+    const program = compileEmitter(
+      baseEmitter({ integration: 'none', update: [collideSceneDepth({ mode: 'stick' })] }),
+    );
+    const built = program.buildKernels(fakeAdapter());
+    expect(built.uniforms).toMatchObject({
+      'System.projectionMatrix': expect.any(FakeNode),
+      'System.viewMatrix': expect.any(FakeNode),
+      'System.viewportSize': expect.any(FakeNode),
+    });
+  });
+
+  it('keeps analytic colliders world-space by default and serializes emitter-space opt-in', () => {
+    const world = collideSphere({ center: [0, 0, 0], mode: 'bounce', radius: 1 });
+    const local = collideSphere({
+      center: [0, 0, 0],
+      mode: 'bounce',
+      radius: 1,
+      space: 'emitter',
+    });
+    expect(world.config).not.toHaveProperty('space');
+    expect(local.config).toMatchObject({ space: 'emitter' });
   });
 
   it.each([
@@ -2428,17 +2552,22 @@ describe('emitter kernel compiler', () => {
     );
   });
 
-  it('diagnoses onCollision until the M6 collision stage exists', () => {
+  it('compiles onCollision through the shared event payload queue', () => {
     const emitter = defineEmitter({
       capacity: 1,
-      events: { onCollision: emitTo('smoke') },
+      events: { onCollision: emitTo('smoke', { inherit: ['position'] }) },
       integration: 'none',
       render: computeRender,
       spawn: burst({ count: 1 }),
+      update: [collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 })],
     });
-    expect(compileEmitter(emitter).diagnostics).toContainEqual(
-      expect.objectContaining({ code: 'NACHI_EVENT_ON_COLLISION_UNIMPLEMENTED' }),
-    );
+    const program = compileEmitter(emitter);
+    expect(program.diagnostics).toEqual([]);
+    expect(program.events[0]).toMatchObject({
+      eventName: 'onCollision',
+      payloadFields: [expect.objectContaining({ attribute: 'position' })],
+    });
+    expect(program.buildKernels(fakeAdapter()).eventOutputs.onCollision).toBeDefined();
   });
 
   it('diagnoses onCustom until tslModule emitEvent(condition) is materialized', () => {

@@ -14,6 +14,10 @@ import type {
   BurstOptions,
   CameraShakeAction,
   ColorInput,
+  CollideBoxOptions,
+  CollidePlaneOptions,
+  CollideSceneDepthOptions,
+  CollideSphereOptions,
   CurlNoiseOptions,
   CurveGenerator,
   CurveKey,
@@ -333,6 +337,36 @@ export function vectorField(options: VectorFieldOptions): UpdateModule {
   return createModule('update', 'core/vector-field', options, {
     reads: ['Emitter.deltaTime', 'Particles.position', 'Particles.velocity'],
     writes: ['Particles.velocity'],
+  });
+}
+
+const COLLISION_ACCESS: ModuleAccess = {
+  reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+  writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+};
+
+export function collidePlane(options: CollidePlaneOptions): UpdateModule {
+  return createModule('update', 'core/collide-plane', options, COLLISION_ACCESS);
+}
+
+export function collideSphere(options: CollideSphereOptions): UpdateModule {
+  return createModule('update', 'core/collide-sphere', options, COLLISION_ACCESS);
+}
+
+export function collideBox(options: CollideBoxOptions): UpdateModule {
+  return createModule('update', 'core/collide-box', options, COLLISION_ACCESS);
+}
+
+export function collideSceneDepth(options: CollideSceneDepthOptions = {}): UpdateModule {
+  return createModule('update', 'core/collide-scene-depth', options, {
+    reads: [
+      'System.projectionMatrix',
+      'System.viewMatrix',
+      'System.viewportSize',
+      'Particles.position',
+      'Particles.velocity',
+    ],
+    writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
   });
 }
 

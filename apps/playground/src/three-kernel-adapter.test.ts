@@ -3,6 +3,7 @@ import {
   billboard,
   burst,
   compileEmitter,
+  collideSceneDepth,
   defineEmitter,
   curve,
   flipbook,
@@ -34,6 +35,37 @@ import {
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
+  it('advertises scene-depth compute support only when an explicit depth copy is bound', () => {
+    const texture = new THREE.DataTexture(new Float32Array([0.5, 0, 0, 1]), 1, 1);
+    expect(createThreeKernelAdapter().capabilities.sceneDepth).toBe(false);
+    expect(createThreeKernelAdapter({ sceneDepthTexture: texture }).capabilities.sceneDepth).toBe(
+      true,
+    );
+  });
+
+  it('builds collideSceneDepth against a sampleable previous-frame color texture', () => {
+    const depth = new THREE.DataTexture(new Float32Array([0.5, 0, 0, 1]), 1, 1);
+    depth.needsUpdate = true;
+    const adapter = createThreeKernelAdapter({ sceneDepthTexture: depth });
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+        update: [collideSceneDepth({ mode: 'stick' })],
+      }),
+    );
+    expect(() => program.buildKernels(adapter)).not.toThrow();
+  });
+
+  it('exposes the bound previous-frame depth sampler to compute nodes', () => {
+    const depth = new THREE.DataTexture(new Float32Array([0.25, 0, 0, 1]), 1, 1);
+    const adapter = createThreeKernelAdapter({ sceneDepthTexture: depth });
+    expect(adapter.sampleSceneDepth).toBeTypeOf('function');
+    expect(() => adapter.sampleSceneDepth?.(adapter.vec2(0.5, 0.5))).not.toThrow();
+  });
+
   it('materializes parsed FGA data as a bounds-aware Three.js 3D texture', () => {
     const parsed = parseFga('2 1 1 -1 -2 -3 1 2 3 1 2 3 -1 -2 -3');
     const resource = createThreeVectorFieldResource(parsed);

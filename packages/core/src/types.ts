@@ -394,6 +394,45 @@ export interface VectorFieldOptions {
   readonly tiling?: boolean;
 }
 
+export type CollisionMode = 'bounce' | 'kill' | 'stick';
+export type CollisionSpace = 'emitter' | 'world';
+
+interface CollisionResponseOptions {
+  /** Normal restitution coefficient. Defaults to 1. */
+  readonly bounce?: ValueInput<number>;
+  /** Tangential velocity loss in the inclusive range [0, 1]. Defaults to 0. */
+  readonly friction?: ValueInput<number>;
+  readonly mode: CollisionMode;
+  /** Collider coordinate space. Defaults to world. */
+  readonly space?: CollisionSpace;
+}
+
+export interface CollidePlaneOptions extends CollisionResponseOptions {
+  readonly normal: Vec3;
+  readonly offset: ValueInput<number>;
+}
+
+export interface CollideSphereOptions extends CollisionResponseOptions {
+  readonly center: ValueInput<Vec3>;
+  readonly radius: ValueInput<number>;
+}
+
+export interface CollideBoxOptions extends CollisionResponseOptions {
+  readonly center: ValueInput<Vec3>;
+  readonly size: ValueInput<Vec3>;
+}
+
+export interface CollideSceneDepthOptions {
+  /** Normal restitution coefficient. Defaults to 1. */
+  readonly bounce?: ValueInput<number>;
+  /** Tangential velocity loss in the inclusive range [0, 1]. Defaults to 0. */
+  readonly friction?: ValueInput<number>;
+  /** Defaults to bounce. */
+  readonly mode?: CollisionMode;
+  /** World-space separation applied after reconstructing the scene surface. Defaults to 0.001. */
+  readonly surfaceOffset?: ValueInput<number>;
+}
+
 export interface ParsedVectorField {
   readonly boundsMax: Vec3;
   readonly boundsMin: Vec3;

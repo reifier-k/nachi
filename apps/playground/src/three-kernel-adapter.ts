@@ -69,6 +69,8 @@ export interface ThreeKernelAdapterOptions {
   readonly maxStorageBuffersPerShaderStage?: number;
   readonly maxTransformFeedbackSeparateAttribs?: number;
   readonly resolveVectorField?: ThreeVectorFieldResolver;
+  /** Sampleable color copy of the previous frame's normalized scene depth. */
+  readonly sceneDepthTexture?: THREE.Texture;
 }
 
 export interface ThreeSpriteMaterializationOptions {
@@ -254,6 +256,7 @@ export function createThreeKernelAdapter(
       backend: options.backend ?? 'webgpu',
       indirectDispatch: options.backend !== 'webgl2',
       indirectDraw: options.backend !== 'webgl2',
+      sceneDepth: options.sceneDepthTexture !== undefined,
     },
     instanceIndex: asNode(instanceIndex),
     atomicAdd: (target, value, returnValue = false) =>
@@ -301,6 +304,12 @@ export function createThreeKernelAdapter(
     },
     inverse: (value) => asNode(inverse(value as never)),
     sampleTexture: (value, uv) => asNode(texture(value as THREE.Texture, uv as never)),
+    ...(options.sceneDepthTexture === undefined
+      ? {}
+      : {
+          sampleSceneDepth: (uv: KernelNode) =>
+            asNode(texture(options.sceneDepthTexture!, uv as never)).r,
+        }),
     sampleVectorField: (reference, position, tiling) => {
       const field = options.resolveVectorField?.(reference);
       if (!field) {

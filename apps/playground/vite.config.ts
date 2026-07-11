@@ -13,6 +13,7 @@ export default defineConfig({
         m3Sprites: 'm3-sprites/index.html',
         m4Behaviors: 'm4-behaviors/index.html',
         m5Events: 'm5-events/index.html',
+        m6Collision: 'm6-collision/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },

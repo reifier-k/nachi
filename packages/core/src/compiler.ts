@@ -18,6 +18,11 @@ import type {
   BillboardOptions,
   BlendingMode,
   ColorInput,
+  CollideBoxOptions,
+  CollidePlaneOptions,
+  CollideSceneDepthOptions,
+  CollideSphereOptions,
+  CollisionMode,
   CurveGenerator,
   DataReference,
   EmitterDefinition,
@@ -368,6 +373,7 @@ export interface KernelAdapterCapabilities {
   readonly backend: 'webgl2' | 'webgpu';
   readonly indirectDispatch: boolean;
   readonly indirectDraw: boolean;
+  readonly sceneDepth?: boolean;
 }
 
 export interface KernelTslAdapter {
@@ -390,6 +396,7 @@ export interface KernelTslAdapter {
   indirectArray(values: Uint32Array): KernelIndirectStorageNode;
   inverse(value: KernelNode): KernelNode;
   sampleTexture(texture: unknown, uv: KernelNode): KernelNode;
+  sampleSceneDepth?(uv: KernelNode): KernelNode;
   sampleVectorField(field: FieldRef, position: KernelNode, tiling: boolean): KernelNode;
   select(condition: KernelNode, whenTrue: KernelNodeInput, whenFalse: KernelNodeInput): KernelNode;
   simplexNoise(position: KernelNode): KernelNode;
@@ -475,6 +482,8 @@ export interface KernelModuleBuildContext {
   readonly module: CompiledKernelModule;
   /** Read-only logical attribute expression. Use write() to update particle storage. */
   attribute(name: string): KernelNode;
+  /** Compiler-owned append path used by built-in event producers. */
+  emitEvent(eventName: 'onCollision'): void;
   random(sampleOffset?: number): KernelNode;
   sampleLut(id: string, coordinate: KernelNode): KernelNode;
   uniform(path: ParameterPath): KernelUniformNode;
@@ -677,7 +686,13 @@ const INTEGRATE_MODULE: UpdateModule = {
   version: 1,
 };
 
-const SYSTEM_PATHS = new Set<ParameterPath>(['System.deltaTime', 'System.time']);
+const SYSTEM_PATHS = new Set<ParameterPath>([
+  'System.deltaTime',
+  'System.projectionMatrix',
+  'System.time',
+  'System.viewMatrix',
+  'System.viewportSize',
+]);
 const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.age',
   'Emitter.deltaTime',
@@ -693,7 +708,10 @@ const EMITTER_PATHS = new Set<ParameterPath>([
 ]);
 const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
   'System.deltaTime',
+  'System.projectionMatrix',
   'System.time',
+  'System.viewMatrix',
+  'System.viewportSize',
   'Emitter.age',
   'Emitter.deltaTime',
   'Emitter.eventReadBank',
@@ -984,7 +1002,15 @@ function normalizeModules(
   const update = normalize(definition.update ?? [], 'update') as UpdateModule[];
   if (definition.integration !== 'none') {
     for (const [index, module] of update.entries()) {
-      if (module.access?.writes.includes('Particles.position')) {
+      if (
+        module.access?.writes.includes('Particles.position') &&
+        ![
+          'core/collide-box',
+          'core/collide-plane',
+          'core/collide-scene-depth',
+          'core/collide-sphere',
+        ].includes(module.type)
+      ) {
         diagnostics.push(
           diagnostic(
             'NACHI_INTEGRATION_DOUBLE_APPLY',
@@ -1394,6 +1420,9 @@ function uniformDescriptions(
   const uniforms: CompiledUniformDescription[] = [
     describe('System.time', 0, 'f32'),
     describe('System.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
+    describe('System.projectionMatrix', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
+    describe('System.viewMatrix', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
+    describe('System.viewportSize', [1, 1], 'vec2'),
     describe('Emitter.age', 0, 'f32'),
     describe('Emitter.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
     describe('Emitter.eventReadBank', 1, 'u32'),
@@ -1589,16 +1618,6 @@ function compileEventQueues(
     const handlers = (Array.isArray(value) ? value : [value]).filter(
       (module): module is NonNullable<typeof module> => module !== undefined,
     );
-    if (eventName === 'onCollision') {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_EVENT_ON_COLLISION_UNIMPLEMENTED',
-          'onCollision is reserved for the M6 collision stage and cannot be scheduled in M5.',
-          `events.${eventName}`,
-        ),
-      );
-      continue;
-    }
     if (eventName === 'onCustom') {
       diagnostics.push(
         diagnostic(
@@ -1609,7 +1628,7 @@ function compileEventQueues(
       );
       continue;
     }
-    if (eventName !== 'onDeath') {
+    if (eventName !== 'onCollision' && eventName !== 'onDeath') {
       diagnostics.push(
         diagnostic(
           'NACHI_EVENT_KIND_UNIMPLEMENTED',
@@ -2140,6 +2159,20 @@ function createBuildKernels(
         });
       }
     }
+    if (
+      program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth') &&
+      (adapter.capabilities.sceneDepth !== true || adapter.sampleSceneDepth === undefined)
+    ) {
+      buildDiagnostics.push({
+        code: 'NACHI_SCENE_DEPTH_UNAVAILABLE',
+        hint: 'Bind a previous-frame depth copy through the renderer kernel adapter.',
+        message:
+          'collideSceneDepth() requires an explicit sampleable previous-frame scene-depth texture.',
+        path: 'update',
+        phase: 'compile',
+        severity: 'error',
+      });
+    }
     const storageBufferLimit = adapter.deviceLimits?.maxStorageBuffersPerShaderStage;
     // Incoming queues are effect-owned and therefore absent from standalone emitter meta. Event
     // spawn reads one source state buffer and one payload buffer in addition to target resources.
@@ -2435,6 +2468,11 @@ function createBuildKernels(
       adapter,
       module,
       attribute: (name) => attributeNode(name, particleIndex),
+      emitEvent: (eventName) => {
+        const queue = program.events.find((candidate) => candidate.eventName === eventName);
+        const resources = eventOutputResources[eventName];
+        if (queue && resources) appendEvent(queue, resources, particleIndex);
+      },
       random: (sampleOffset = 0) => randomNode(module, particleIndex, sampleOffset),
       sampleLut: (id, coordinate) => {
         const texture = lutTextures[id];
@@ -3133,6 +3171,97 @@ function normalizedBasis(direction: Vec3): { forward: Vec3; right: Vec3; up: Vec
   return { forward: cross(up, right), right, up };
 }
 
+type CollisionResponseConfig = {
+  readonly bounce?: unknown;
+  readonly friction?: unknown;
+  readonly mode?: CollisionMode;
+  readonly space?: 'emitter' | 'world';
+};
+
+function dot3(left: KernelNode, right: KernelNode): KernelNode {
+  return left.x.mul(right.x).add(left.y.mul(right.y)).add(left.z.mul(right.z));
+}
+
+function length3(value: KernelNode): KernelNode {
+  return dot3(value, value).sqrt();
+}
+
+function normalized3(
+  context: KernelModuleBuildContext,
+  value: KernelNode,
+  fallback: Vec3 = [0, 1, 0],
+): KernelNode {
+  const length = length3(value);
+  return context.adapter.select(
+    length.lessThan(context.adapter.constant(0.000001, 'f32')),
+    context.adapter.vec3(...fallback),
+    value.div(length.clamp(0.000001, 1e20)),
+  );
+}
+
+function collisionFrame(
+  context: KernelModuleBuildContext,
+  space: 'emitter' | 'world' | undefined,
+): { readonly position: KernelNode; readonly velocity: KernelNode } {
+  const position = context.attribute('position');
+  const velocity = context.attribute('velocity');
+  if (space !== 'emitter') return { position, velocity };
+  const inverseTransform = context.adapter.inverse(context.uniform('Emitter.transform'));
+  return {
+    position: inverseTransform.mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz,
+    velocity: inverseTransform.mul(context.adapter.vec4(velocity.x, velocity.y, velocity.z, 0)).xyz,
+  };
+}
+
+function writeCollisionResponse(
+  context: KernelModuleBuildContext,
+  config: CollisionResponseConfig,
+  collided: KernelNode,
+  correctedPosition: KernelNode,
+  normal: KernelNode,
+  velocity: KernelNode,
+): void {
+  context.adapter.branch(collided, () => {
+    const transform = config.space === 'emitter' ? context.uniform('Emitter.transform') : undefined;
+    const worldPosition =
+      config.space === 'emitter'
+        ? transform!.mul(
+            context.adapter.vec4(correctedPosition.x, correctedPosition.y, correctedPosition.z, 1),
+          ).xyz
+        : correctedPosition;
+    context.write('position', worldPosition);
+
+    let responseVelocity: KernelNode;
+    if (config.mode === 'kill') {
+      responseVelocity = velocity;
+    } else if (config.mode === 'stick') {
+      responseVelocity = context.adapter.vec3(0, 0, 0);
+    } else {
+      const normalSpeed = dot3(velocity, normal);
+      const tangent = velocity.sub(normal.mul(normalSpeed));
+      const bounce = context.value(config.bounce ?? 1, 'f32', 20).clamp(0, 1);
+      const friction = context.value(config.friction ?? 0, 'f32', 21).clamp(0, 1);
+      const outgoingNormalSpeed = context.adapter.select(
+        normalSpeed.lessThan(context.adapter.constant(0, 'f32')),
+        normalSpeed.mul(bounce).mul(-1),
+        normalSpeed,
+      );
+      responseVelocity = tangent
+        .mul(context.adapter.constant(1, 'f32').sub(friction))
+        .add(normal.mul(outgoingNormalSpeed));
+    }
+    const worldVelocity =
+      config.space === 'emitter'
+        ? transform!.mul(
+            context.adapter.vec4(responseVelocity.x, responseVelocity.y, responseVelocity.z, 0),
+          ).xyz
+        : responseVelocity;
+    context.write('velocity', worldVelocity);
+    context.emitEvent('onCollision');
+    context.write('alive', context.adapter.constant(config.mode !== 'kill', 'bool'));
+  });
+}
+
 export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   const registry = new KernelModuleRegistry();
   registry.register({
@@ -3600,6 +3729,218 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
+      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as CollidePlaneOptions;
+      const frame = collisionFrame(context, config.space);
+      const basis = normalizedBasis(config.normal);
+      const normal = context.adapter.vec3(...basis.up);
+      const signedDistance = dot3(frame.position, normal).sub(
+        context.value(config.offset, 'f32', 1),
+      );
+      writeCollisionResponse(
+        context,
+        config,
+        signedDistance.lessThan(context.adapter.constant(0, 'f32')),
+        frame.position.sub(normal.mul(signedDistance)),
+        normal,
+        frame.velocity,
+      );
+    },
+    stage: 'update',
+    type: 'core/collide-plane',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as CollideSphereOptions;
+      const frame = collisionFrame(context, config.space);
+      const center = context.value(config.center, 'vec3', 1);
+      const delta = context.adapter.vec3(
+        frame.position.x.sub(center.x),
+        frame.position.y.sub(center.y),
+        frame.position.z.sub(center.z),
+      );
+      const radius = context.value(config.radius, 'f32', 4);
+      const distance = length3(delta);
+      const normal = normalized3(context, delta);
+      writeCollisionResponse(
+        context,
+        config,
+        distance.lessThan(radius),
+        center.add(normal.mul(radius)),
+        normal,
+        frame.velocity,
+      );
+    },
+    stage: 'update',
+    type: 'core/collide-sphere',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    build(context) {
+      const config = context.module.config as CollideBoxOptions;
+      const frame = collisionFrame(context, config.space);
+      const center = context.value(config.center, 'vec3', 1);
+      const halfSize = context.value(config.size, 'vec3', 4).mul(0.5);
+      const delta = context.adapter.vec3(
+        frame.position.x.sub(center.x),
+        frame.position.y.sub(center.y),
+        frame.position.z.sub(center.z),
+      );
+      const absolute = context.adapter.vec3(
+        delta.x.mul(delta.x).sqrt(),
+        delta.y.mul(delta.y).sqrt(),
+        delta.z.mul(delta.z).sqrt(),
+      );
+      const penetrationX = halfSize.x.sub(absolute.x);
+      const penetrationY = halfSize.y.sub(absolute.y);
+      const penetrationZ = halfSize.z.sub(absolute.z);
+      const sign = (component: KernelNode) =>
+        context.adapter.select(
+          context.adapter.constant(0, 'f32').lessThanEqual(component),
+          context.adapter.constant(1, 'f32'),
+          context.adapter.constant(-1, 'f32'),
+        );
+      const normalX = context.adapter.vec3(sign(delta.x), 0, 0);
+      const normalY = context.adapter.vec3(0, sign(delta.y), 0);
+      const normalZ = context.adapter.vec3(0, 0, sign(delta.z));
+      const useX = penetrationX.lessThanEqual(penetrationY);
+      const xyPenetration = context.adapter.select(useX, penetrationX, penetrationY);
+      const xyNormal = context.adapter.select(useX, normalX, normalY);
+      const useXY = xyPenetration.lessThanEqual(penetrationZ);
+      const penetration = context.adapter.select(useXY, xyPenetration, penetrationZ);
+      const normal = context.adapter.select(useXY, xyNormal, normalZ);
+      const inside = absolute.x
+        .lessThan(halfSize.x)
+        .and(absolute.y.lessThan(halfSize.y))
+        .and(absolute.z.lessThan(halfSize.z));
+      writeCollisionResponse(
+        context,
+        config,
+        inside,
+        frame.position.add(normal.mul(penetration)),
+        normal,
+        frame.velocity,
+      );
+    },
+    stage: 'update',
+    type: 'core/collide-box',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: [
+        'System.projectionMatrix',
+        'System.viewMatrix',
+        'System.viewportSize',
+        'Particles.position',
+        'Particles.velocity',
+      ],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    build(context) {
+      const sampleDepth = context.adapter.sampleSceneDepth;
+      if (!sampleDepth) throw new Error('Scene-depth sampler is missing.');
+      const config = context.module.config as CollideSceneDepthOptions;
+      const position = context.attribute('position');
+      const viewMatrix = context.uniform('System.viewMatrix');
+      const projectionMatrix = context.uniform('System.projectionMatrix');
+      const viewPosition = viewMatrix.mul(
+        context.adapter.vec4(position.x, position.y, position.z, 1),
+      );
+      const clipPosition = projectionMatrix.mul(viewPosition);
+      const inverseW = context.adapter
+        .constant(1, 'f32')
+        .div(clipPosition.w.mul(clipPosition.w).sqrt().clamp(0.000001, 1e20));
+      const ndc = clipPosition.xyz.mul(inverseW);
+      const uv = context.adapter.vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5));
+      const particleDepth = ndc.z.mul(0.5).add(0.5);
+      const sceneDepth = sampleDepth(uv);
+      const viewport = context.uniform('System.viewportSize');
+      const texel = context.adapter.vec2(
+        context.adapter.constant(1, 'f32').div(viewport.x.clamp(1, 1e20)),
+        context.adapter.constant(1, 'f32').div(viewport.y.clamp(1, 1e20)),
+      );
+      const reconstructView = (sampleUv: KernelNode, depth: KernelNode): KernelNode => {
+        const clip = context.adapter.vec4(
+          sampleUv.x.mul(2).sub(1),
+          sampleUv.y.mul(2).sub(1),
+          depth.mul(2).sub(1),
+          1,
+        );
+        const homogeneous = context.adapter.inverse(projectionMatrix).mul(clip);
+        return homogeneous.xyz.div(homogeneous.w.mul(homogeneous.w).sqrt().clamp(0.000001, 1e20));
+      };
+      const leftUv = context.adapter.vec2(uv.x.sub(texel.x), uv.y).clamp(0, 1);
+      const rightUv = context.adapter.vec2(uv.x.add(texel.x), uv.y).clamp(0, 1);
+      const downUv = context.adapter.vec2(uv.x, uv.y.sub(texel.y)).clamp(0, 1);
+      const upUv = context.adapter.vec2(uv.x, uv.y.add(texel.y)).clamp(0, 1);
+      const left = reconstructView(leftUv, sampleDepth(leftUv));
+      const right = reconstructView(rightUv, sampleDepth(rightUv));
+      const down = reconstructView(downUv, sampleDepth(downUv));
+      const up = reconstructView(upUv, sampleDepth(upUv));
+      const horizontal = right.sub(left);
+      const vertical = up.sub(down);
+      const rawNormal = context.adapter.vec3(
+        horizontal.y.mul(vertical.z).sub(horizontal.z.mul(vertical.y)),
+        horizontal.z.mul(vertical.x).sub(horizontal.x.mul(vertical.z)),
+        horizontal.x.mul(vertical.y).sub(horizontal.y.mul(vertical.x)),
+      );
+      const surfaceView = reconstructView(uv, sceneDepth);
+      const normalized = normalized3(context, rawNormal, [0, 0, 1]);
+      const viewNormal = context.adapter.select(
+        context.adapter.constant(0, 'f32').lessThan(dot3(normalized, surfaceView)),
+        normalized.mul(-1),
+        normalized,
+      );
+      const inverseView = context.adapter.inverse(viewMatrix);
+      const worldNormal = normalized3(
+        context,
+        inverseView.mul(context.adapter.vec4(viewNormal.x, viewNormal.y, viewNormal.z, 0)).xyz,
+        [0, 1, 0],
+      );
+      const surfaceOffset = context.value(config.surfaceOffset ?? 0.001, 'f32', 1);
+      const correctedView = surfaceView.add(viewNormal.mul(surfaceOffset));
+      const correctedWorld = inverseView.mul(
+        context.adapter.vec4(correctedView.x, correctedView.y, correctedView.z, 1),
+      ).xyz;
+      const zero = context.adapter.constant(0, 'f32');
+      const one = context.adapter.constant(1, 'f32');
+      const visible = zero
+        .lessThan(clipPosition.w)
+        .and(zero.lessThanEqual(uv.x))
+        .and(uv.x.lessThanEqual(one))
+        .and(zero.lessThanEqual(uv.y))
+        .and(uv.y.lessThanEqual(one));
+      const collided = visible
+        .and(sceneDepth.lessThan(0.999999))
+        .and(sceneDepth.lessThan(particleDepth));
+      writeCollisionResponse(
+        context,
+        { ...config, mode: config.mode ?? 'bounce', space: 'world' },
+        collided,
+        correctedWorld,
+        worldNormal,
+        context.attribute('velocity'),
+      );
+    },
+    stage: 'update',
+    type: 'core/collide-scene-depth',
+    version: 1,
+  });
+  registry.register({
+    access: {
       reads: ['Particles.rotation', 'Particles.spriteRotation', 'Particles.velocity'],
       writes: ['Particles.rotation', 'Particles.spriteRotation'],
     },
@@ -3820,6 +4161,10 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/linear-force',
       'core/turbulence',
       'core/vector-field',
+      'core/collide-plane',
+      'core/collide-sphere',
+      'core/collide-box',
+      'core/collide-scene-depth',
       'core/orient-to-velocity',
       'core/size-over-life',
       'core/rotation-over-life',

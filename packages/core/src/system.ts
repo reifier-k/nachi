@@ -71,6 +71,40 @@ export interface VfxSystemOptions {
   readonly prewarmStepSeconds?: number;
 }
 
+export interface VfxCameraState {
+  /** World-to-view matrix in column-major order. */
+  readonly viewMatrix: readonly number[];
+  /** View-to-clip matrix in column-major order. */
+  readonly projectionMatrix: readonly number[];
+  /** Width and height of the bound previous-frame depth texture. */
+  readonly viewportSize: readonly [number, number];
+}
+
+const IDENTITY_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
+const DEFAULT_CAMERA_STATE: VfxCameraState = {
+  projectionMatrix: IDENTITY_MATRIX,
+  viewMatrix: IDENTITY_MATRIX,
+  viewportSize: [1, 1],
+};
+
+function validateCameraState(camera: VfxCameraState): VfxCameraState {
+  const matrix = (value: readonly number[], name: string) => {
+    if (value.length !== 16 || value.some((component) => !Number.isFinite(component))) {
+      throw new RangeError(`${name} must contain 16 finite column-major components.`);
+    }
+    return [...value];
+  };
+  const [width, height] = camera.viewportSize;
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new RangeError('viewportSize must contain positive finite dimensions.');
+  }
+  return {
+    projectionMatrix: matrix(camera.projectionMatrix, 'projectionMatrix'),
+    viewMatrix: matrix(camera.viewMatrix, 'viewMatrix'),
+    viewportSize: [width, height],
+  };
+}
+
 export type EmitterLifecycleState = 'active' | 'completed' | 'delayed';
 
 export type EmitterLifecycleCommand =
@@ -694,6 +728,17 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.transform', transform);
   }
 
+  setCamera(camera: VfxCameraState): void {
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'System.projectionMatrix',
+      camera.projectionMatrix,
+    );
+    setUniform(this.#renderer, this.kernels.uniforms, 'System.viewMatrix', camera.viewMatrix);
+    setUniform(this.#renderer, this.kernels.uniforms, 'System.viewportSize', camera.viewportSize);
+  }
+
   release(): void {
     this.#renderer.releaseKernels?.(this.kernels);
   }
@@ -955,7 +1000,12 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           if (emitted > 0) {
             this.#onEventAggregate({
               count: emitted,
-              event: eventName === 'onDeath' ? 'death' : eventName,
+              event:
+                eventName === 'onDeath'
+                  ? 'death'
+                  : eventName === 'onCollision'
+                    ? 'collision'
+                    : eventName,
             });
           }
           const overflowTotal = state[2] ?? 0;
@@ -1124,6 +1174,10 @@ export class VfxEffectInstance<
     for (const emitter of this.#emitters.values()) emitter.setTransform(transform);
   }
 
+  setCamera(camera: VfxCameraState): void {
+    for (const emitter of this.#emitters.values()) emitter.setCamera(camera);
+  }
+
   stop(): void {
     this.#assertNotReleased();
     if (this.#state === 'active') this.#state = 'stopped';
@@ -1223,6 +1277,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #instances = new Map<string, VfxEffectInstance<RuntimeEffectDefinition>>();
   readonly #now: () => number;
   readonly #prewarmStepSeconds: number;
+  #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
   #compilationCount = 0;
   #deviceLossDiagnostic?: VfxDiagnostic;
   #instanceSequence = 0;
@@ -1281,6 +1336,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     return this.#systemTime;
   }
 
+  setCamera(camera: VfxCameraState): void {
+    this.#cameraState = validateCameraState(camera);
+    for (const instance of this.#instances.values()) instance.setCamera(this.#cameraState);
+  }
+
   spawn<
     const Elements extends EffectElements,
     const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
@@ -1335,33 +1395,30 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       }
       for (const [index, entry] of compiled.emitters.entries()) {
         const seed = ((options.seed ?? 0) ^ hashModuleLabel(entry.key) ^ index) >>> 0;
-        instance.addEmitter(
-          entry.key,
-          new RuntimeEmitter(
-            entry.definition,
-            entry.program,
-            runtimeRenderer,
-            seed,
-            transform,
-            parameters,
-            entry.maxLifetime,
-            this.#aliveCountReadbackInterval,
-            (diagnostic) => instance.recordDiagnostic(diagnostic),
-            eventResources.get(entry.key),
-            compiled.eventLinks
-              .filter(({ targetKey }) => targetKey === entry.key)
-              .map(({ handler, queue, sourceKey }) => {
-                const resources = eventResources.get(sourceKey)?.[queue.eventName];
-                if (!resources) {
-                  throw new Error(
-                    `Event resources for ${sourceKey}.${queue.eventName} are missing.`,
-                  );
-                }
-                return { handler, queue, resources, sourceKey };
-              }),
-            (summary) => instance.emitEventSummary(summary),
-          ),
+        const runtimeEmitter = new RuntimeEmitter(
+          entry.definition,
+          entry.program,
+          runtimeRenderer,
+          seed,
+          transform,
+          parameters,
+          entry.maxLifetime,
+          this.#aliveCountReadbackInterval,
+          (diagnostic) => instance.recordDiagnostic(diagnostic),
+          eventResources.get(entry.key),
+          compiled.eventLinks
+            .filter(({ targetKey }) => targetKey === entry.key)
+            .map(({ handler, queue, sourceKey }) => {
+              const resources = eventResources.get(sourceKey)?.[queue.eventName];
+              if (!resources) {
+                throw new Error(`Event resources for ${sourceKey}.${queue.eventName} are missing.`);
+              }
+              return { handler, queue, resources, sourceKey };
+            }),
+          (summary) => instance.emitEventSummary(summary),
         );
+        runtimeEmitter.setCamera(this.#cameraState);
+        instance.addEmitter(entry.key, runtimeEmitter);
       }
     } catch (error) {
       const diagnostics =

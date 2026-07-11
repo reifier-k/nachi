@@ -186,6 +186,16 @@ function staticScalarMinimum(value: unknown): number | undefined {
   return undefined;
 }
 
+function staticScalarMaximum(value: unknown): number | undefined {
+  if (typeof value === 'number') return value;
+  if (typeof value !== 'object' || value === null || !('kind' in value)) return undefined;
+  if (value.kind === 'range' && 'max' in value && typeof value.max === 'number') return value.max;
+  if (value.kind === 'parameter' && 'fallback' in value && typeof value.fallback === 'number') {
+    return value.fallback;
+  }
+  return undefined;
+}
+
 function isFiniteVector(value: unknown, length: number): value is readonly number[] {
   return (
     Array.isArray(value) &&
@@ -201,6 +211,74 @@ export function collectEmitterBehaviorConfigDiagnostics(
   const diagnostics: VfxDiagnostic[] = [];
   for (const { module, path } of collectEmitterModules(config)) {
     const moduleConfig = module.config as Record<string, unknown>;
+    if (module.type.startsWith('core/collide-')) {
+      for (const coefficient of ['bounce', 'friction'] as const) {
+        const minimum = staticScalarMinimum(moduleConfig[coefficient]);
+        const maximum = staticScalarMaximum(moduleConfig[coefficient]);
+        if (
+          (minimum !== undefined && (!Number.isFinite(minimum) || minimum < 0)) ||
+          (maximum !== undefined && (!Number.isFinite(maximum) || maximum > 1))
+        ) {
+          diagnostics.push(
+            compileDiagnostic(
+              'NACHI_COLLISION_RESPONSE_INVALID',
+              `Collision ${coefficient} must remain within the inclusive range [0, 1].`,
+              `${path}.config.${coefficient}`,
+            ),
+          );
+        }
+      }
+    }
+
+    if (module.type === 'core/collide-plane') {
+      const normal = moduleConfig.normal;
+      if (!isFiniteVector(normal, 3) || Math.hypot(...normal) === 0) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_COLLISION_PLANE_NORMAL_INVALID',
+            'Collision plane normal must be a finite non-zero vec3.',
+            `${path}.config.normal`,
+          ),
+        );
+      }
+    } else if (module.type === 'core/collide-sphere') {
+      const radius = staticScalarMinimum(moduleConfig.radius);
+      if (radius !== undefined && (!Number.isFinite(radius) || radius <= 0)) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_COLLISION_SPHERE_RADIUS_INVALID',
+            'Collision sphere radius must be positive and finite.',
+            `${path}.config.radius`,
+          ),
+        );
+      }
+    } else if (module.type === 'core/collide-box') {
+      const size = moduleConfig.size;
+      if (
+        Array.isArray(size) &&
+        (!isFiniteVector(size, 3) || size.some((component) => component <= 0))
+      ) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_COLLISION_BOX_SIZE_INVALID',
+            'Collision box size must be a finite vec3 with positive components.',
+            `${path}.config.size`,
+          ),
+        );
+      }
+    } else if (module.type === 'core/collide-scene-depth') {
+      const surfaceOffset = staticScalarMinimum(moduleConfig.surfaceOffset);
+      if (surfaceOffset !== undefined && (!Number.isFinite(surfaceOffset) || surfaceOffset < 0)) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_COLLISION_DEPTH_OFFSET_INVALID',
+            'Scene-depth collision surfaceOffset must be non-negative and finite.',
+            `${path}.config.surfaceOffset`,
+          ),
+        );
+      }
+    }
+
     if (module.type === 'core/vortex') {
       const axis = moduleConfig.axis;
       if (!isFiniteVector(axis, 3) || Math.hypot(...axis) === 0) {

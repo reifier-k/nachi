@@ -9,6 +9,7 @@ import {
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
   attribute,
   burst,
+  collidePlane,
   defineEffect,
   defineEmitter,
   defineParameter,
@@ -289,6 +290,27 @@ function eventEffect(target = 'smokePuffs') {
     spawn: burst({ count: 0 }),
   });
   return defineEffect({ elements: { smokePuffs, sparks } });
+}
+
+function collisionEventEffect() {
+  const source = defineEmitter({
+    capacity: 1,
+    events: { onCollision: emitTo('impact', { inherit: ['position'] }) },
+    init: [positionSphere({ radius: 0 })],
+    integration: 'none',
+    lifecycle: { duration: 1 },
+    render: computeRender,
+    spawn: burst({ count: 1 }),
+    update: [collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 1 })],
+  });
+  const impact = defineEmitter({
+    capacity: 1,
+    init: [positionSphere({ radius: 0 })],
+    integration: 'none',
+    render: computeRender,
+    spawn: burst({ count: 0 }),
+  });
+  return defineEffect({ elements: { impact, source } });
 }
 
 function cascadingEventEffect() {
@@ -1101,6 +1123,39 @@ describe('VFXSystem runtime scheduler', () => {
     expect(matrix).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1]);
   });
 
+  it('supplies camera uniforms to emitters spawned after setCamera', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const viewMatrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 2, -5, 1];
+    const projectionMatrix = [2, 0, 0, 0, 0, 3, 0, 0, 0, 0, -1, -1, 0, 0, -0.2, 0];
+    system.setCamera({ projectionMatrix, viewMatrix, viewportSize: [640, 360] });
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const uniforms = instance.getEmitter('particles')!.kernels.uniforms;
+    expect(uniforms['System.viewMatrix']?.value).toEqual(viewMatrix);
+    expect(uniforms['System.projectionMatrix']?.value).toEqual(projectionMatrix);
+    expect(uniforms['System.viewportSize']?.value).toEqual([640, 360]);
+  });
+
+  it('updates camera uniforms on already materialized emitters', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const viewMatrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 5, 6, 1];
+    system.setCamera({
+      projectionMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      viewMatrix,
+      viewportSize: [32, 16],
+    });
+    expect(instance.getEmitter('particles')!.kernels.uniforms['System.viewMatrix']?.value).toEqual(
+      viewMatrix,
+    );
+  });
+
+  it('rejects invalid camera matrices and viewport dimensions', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    expect(() =>
+      system.setCamera({ projectionMatrix: [1], viewMatrix: [1], viewportSize: [0, 1] }),
+    ).toThrow(RangeError);
+  });
+
   it('diagnoses an unresolved emitTo target in effect scope', () => {
     const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(eventEffect('missing'));
     expect(instance.state).toBe('error');
@@ -1119,6 +1174,16 @@ describe('VFXSystem runtime scheduler', () => {
     ]);
     expect(consumer.kernels.eventInputs).toHaveLength(1);
     expect(consumer.kernels.eventInputs[0]?.binding.sourceKey).toBe('sparks');
+  });
+
+  it('materializes onCollision producer and inherited-position consumer kernels', () => {
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(collisionEventEffect());
+    const producer = instance.getEmitter('source')!;
+    const consumer = instance.getEmitter('impact')!;
+    expect(producer.kernels.eventOutputs.onCollision?.queue.payloadFields).toEqual([
+      expect.objectContaining({ attribute: 'position' }),
+    ]);
+    expect(consumer.kernels.eventInputs[0]?.binding.queue.eventName).toBe('onCollision');
   });
 
   it('drains every frame of an A to B to C zero-lifetime event chain', async () => {
@@ -1203,6 +1268,19 @@ describe('VFXSystem runtime scheduler', () => {
     unsubscribe();
 
     expect(counts).toEqual([4]);
+  });
+
+  it('maps onCollision GPU aggregates to collision callbacks', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const instance = system.spawn(collisionEventEffect());
+    const counts: number[] = [];
+    instance.on('collision', ({ count }) => counts.push(count));
+    await system.update(0);
+    const state = instance.getEmitter('source')!.kernels.eventOutputs.onCollision!.state;
+    renderer.storageValues.set(state, new Uint32Array([0, 0, 0, 1]));
+    await system.update(1 / 60);
+    expect(counts).toEqual([1]);
   });
 
   it('reports append overflow without exposing particle payloads to JavaScript', async () => {
