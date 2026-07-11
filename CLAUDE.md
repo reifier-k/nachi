@@ -60,12 +60,16 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m10-lit/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-ultimate/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-scale/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-scale/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/m11-cache/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m11-cache/?backend=webgl
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
 ```
 
 `webgpu-probe` serves its own localhost page. `spike-runner` adds `headless=1` and reads `data-spike-result` plus the `nachi.perf-baseline` record in `data-perf-result`. Screenshot regression defaults to WebGL2 because headless WebGPU cannot present a canvas.
+When localhost binding is unavailable, build first and use an intercepted secure origin without a
+listener: `node tools/spike-runner.mjs 'https://nachi.local/m11-cache/?backend=webgpu' --dist apps/playground/dist`.
 For pages that publish artifact screenshots, existing PNGs pass when the exact changed-pixel ratio is below `0.5%`; use `--update-screenshots` to intentionally re-record the baselines.
 
 Core `defineEffect()` composes elements and parameters but deliberately does not runtime-validate
@@ -91,6 +95,13 @@ spawn/capacity/fade changes do not recompile; soft/lit/sorted gates do. `setQual
 live structural state and emits `NACHI_QUALITY_RESTART_REQUIRED` when the next spawn must use a new
 compile/pool variant. Fully culled effects pause local time and GPU simulation. Significance budget
 decisions and their distance/screen/priority components are exposed on `instance.scalability`.
+
+M11 simulation caches record only logical attributes declared by render reads plus lossless alive
+indirection. `bakeSimulation()` advances a constant frame step and returns metadata+ArrayBuffer;
+`replaySimulation()` restores the existing packed GPU buffers without scheduling simulation kernels.
+Float interpolation applies only to slots alive in both frames. Loop caches require a continuous
+duplicated endpoint. Keep the v1 per-frame upload path and WebGL2 replay diagnostic aligned with RFC
+§10.5 unless a later RFC explicitly adds all-frame residency or a WebGL2 alive-index renderer path.
 
 ## Three-layer verification
 

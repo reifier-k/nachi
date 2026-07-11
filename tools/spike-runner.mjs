@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { chromium } from 'playwright';
@@ -13,6 +13,7 @@ const ADAPTER_FLAGS = {
 function parseArguments(arguments_) {
   const positional = [];
   let adapter = 'swiftshader';
+  let distDirectory;
   let updateScreenshots = false;
 
   for (let index = 0; index < arguments_.length; index += 1) {
@@ -24,6 +25,11 @@ function parseArguments(arguments_) {
       adapter = argument.slice('--adapter='.length);
     } else if (argument === '--update-screenshots') {
       updateScreenshots = true;
+    } else if (argument === '--dist') {
+      distDirectory = arguments_[index + 1];
+      index += 1;
+    } else if (argument?.startsWith('--dist=')) {
+      distDirectory = argument.slice('--dist='.length);
     } else if (argument?.startsWith('-')) {
       throw new Error(`Unknown option: ${argument}`);
     } else if (argument !== undefined) {
@@ -33,7 +39,7 @@ function parseArguments(arguments_) {
 
   if (positional.length > 1 || !Object.hasOwn(ADAPTER_FLAGS, adapter)) {
     throw new Error(
-      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default] [--update-screenshots] (requires `pnpm dev` to be running)',
+      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default] [--dist directory] [--update-screenshots]',
     );
   }
 
@@ -43,7 +49,49 @@ function parseArguments(arguments_) {
   }
   url.searchParams.set('headless', '1');
 
-  return { adapter, updateScreenshots, url: url.toString() };
+  if (distDirectory !== undefined && distDirectory.length === 0) {
+    throw new Error('--dist requires a directory.');
+  }
+  return {
+    adapter,
+    ...(distDirectory === undefined ? {} : { distDirectory: path.resolve(distDirectory) }),
+    updateScreenshots,
+    url: url.toString(),
+  };
+}
+
+const CONTENT_TYPES = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.wasm': 'application/wasm',
+};
+
+async function installDistRoute(page, origin, directory) {
+  await page.route(`${origin}/**`, async (route) => {
+    const url = new URL(route.request().url());
+    let relative = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+    let filename = path.resolve(directory, relative);
+    if (!filename.startsWith(`${directory}${path.sep}`) && filename !== directory) {
+      await route.fulfill({ body: 'Forbidden', status: 403 });
+      return;
+    }
+    try {
+      const information = await stat(filename);
+      if (information.isDirectory()) filename = path.join(filename, 'index.html');
+      const body = await readFile(filename);
+      await route.fulfill({
+        body,
+        contentType: CONTENT_TYPES[path.extname(filename)] ?? 'application/octet-stream',
+        status: 200,
+      });
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      await route.fulfill({ body: 'Not found', status: 404 });
+    }
+  });
 }
 
 async function comparePngPixels(page, baseline, actual) {
@@ -118,6 +166,10 @@ try {
   });
 
   const page = await browser.newPage();
+  if (target.distDirectory) {
+    const targetUrl = new URL(target.url);
+    await installDistRoute(page, targetUrl.origin, target.distDirectory);
+  }
   page.on('console', (message) => {
     diagnostics.console.push({ type: message.type(), text: message.text() });
   });

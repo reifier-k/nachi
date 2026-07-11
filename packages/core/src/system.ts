@@ -6,6 +6,7 @@ import {
   type CompiledEmitterProgram,
   type KernelComputeNode,
   type KernelModuleRegistry,
+  type KernelStorageNode,
   type KernelTslAdapter,
   type KernelUniformNode,
   type EventInputBinding,
@@ -85,6 +86,8 @@ export interface VfxRuntimeRenderer {
   setVisibility?(kernels: BuiltEmitterKernels, visible: boolean): void;
   /** Applies VFXSystem's stable far-to-near emitter order to backend draw objects. */
   setRenderOrder?(kernels: BuiltEmitterKernels, order: number): void;
+  /** Uploads cache replay bytes into an existing materialized storage resource. */
+  writeStorage?(storage: KernelStorageNode, data: ArrayBufferView, byteOffset?: number): void;
   submitCompute(kernel: KernelComputeNode): Promise<void> | void;
   submitComputeIndirect?(
     kernel: KernelComputeNode,
@@ -1829,6 +1832,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   get qualitySelection(): QualityTierSelection {
     return this.#qualitySelection;
+  }
+
+  /** True when update deltas are routed through this system's fixed-step accumulator. */
+  get usesFixedTimeStep(): boolean {
+    return this.#fixedStep !== undefined;
   }
 
   setQualityTier(tier: QualityTier): void {

@@ -8,6 +8,7 @@ export * from './diagnostics.js';
 export * from './fga.js';
 export * from './random.js';
 export * from './scalability.js';
+export * from './sim-cache.js';
 export * from './sdf.js';
 export * from './system.js';
 export type * from './types.js';

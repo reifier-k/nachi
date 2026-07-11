@@ -702,6 +702,37 @@ export function createThreeRuntimeRenderer(
     indirect.addUpdateRange(instanceCountOffset, 1);
     indirect.needsUpdate = true;
   };
+  const writeStorage: NonNullable<VfxRuntimeRenderer['writeStorage']> = (
+    storageNode,
+    data,
+    byteOffset = 0,
+  ) => {
+    if (
+      !Number.isSafeInteger(byteOffset) ||
+      byteOffset < 0 ||
+      byteOffset % 4 !== 0 ||
+      data.byteLength % 4 !== 0
+    ) {
+      throw new RangeError('Storage upload offset and length must use complete 4-byte words.');
+    }
+    const value = storageNode.value as {
+      addUpdateRange?(start: number, count: number): void;
+      array?: StorageArray;
+      needsUpdate?: boolean;
+    };
+    const array = value.array;
+    if (!array) throw new Error('Three storage node has no CPU upload array.');
+    if (byteOffset + data.byteLength > array.byteLength) {
+      throw new RangeError(
+        `Storage upload (${byteOffset} + ${data.byteLength}) exceeds ${array.byteLength} bytes.`,
+      );
+    }
+    new Uint8Array(array.buffer, array.byteOffset + byteOffset, data.byteLength).set(
+      new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+    );
+    value.addUpdateRange?.(byteOffset / 4, data.byteLength / 4);
+    value.needsUpdate = true;
+  };
   const base = {
     kernelAdapter,
     prepareKernelsForPooling,
@@ -728,6 +759,7 @@ export function createThreeRuntimeRenderer(
       initializeIndirectAttributes();
       return renderer.compute(kernel as never, indirectResource as never);
     },
+    writeStorage,
   };
   return deviceLost === undefined ? base : { ...base, deviceLost };
 }

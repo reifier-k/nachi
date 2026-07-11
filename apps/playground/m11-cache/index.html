@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M11 simulation cache</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">M11 / scalability &amp; debugging</p>
+        <h1>Simulation cache bake &amp; replay</h1>
+        <p>Deterministic render-attribute snapshots with zero simulation work during replay.</p>
+      </header>
+      <canvas id="cache-visual" width="256" height="64"></canvas>
+      <dl class="status">
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Contract</dt>
+          <dd id="status-value">running</dd>
+        </div>
+        <div>
+          <dt>Cache</dt>
+          <dd id="memory-value">pending</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/m11-cache.ts"></script>
+  </body>
+</html>

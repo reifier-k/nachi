@@ -9,8 +9,10 @@ import {
   VfxDiagnosticError,
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
   attribute,
+  bakeSimulation,
   billboard,
   burst,
+  compileEmitter,
   collidePlane,
   collideSceneDepth,
   crossesSpawnOrderWarningThreshold,
@@ -19,6 +21,7 @@ import {
   defineEmitter,
   defineParameter,
   emitTo,
+  estimateSimulationCacheMemory,
   lifetime,
   killVolume,
   perDistance,
@@ -26,6 +29,7 @@ import {
   packedComponentIndex,
   rate,
   resolvePackedAttributeAddress,
+  replaySimulation,
   sortEmittersBackToFront,
   tslModule,
 } from '../src/index.js';
@@ -248,6 +252,29 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
 class ZeroReadbackRenderer extends FakeRuntimeRenderer {
   readStorage(): Promise<ArrayBuffer> {
     return Promise.resolve(new Uint32Array(4).buffer);
+  }
+}
+
+class CacheRuntimeRenderer extends ZeroReadbackRenderer {
+  readonly uploads: { readonly byteLength: number; readonly byteOffset: number }[] = [];
+
+  writeStorage(_storage: KernelStorageNode, data: ArrayBufferView, byteOffset = 0): void {
+    this.uploads.push({ byteLength: data.byteLength, byteOffset });
+  }
+}
+
+class SequenceCacheRuntimeRenderer extends CacheRuntimeRenderer {
+  readonly #readbacks: ArrayBuffer[];
+
+  constructor(readbacks: readonly ArrayBuffer[]) {
+    super();
+    this.#readbacks = readbacks.map((value) => value.slice(0));
+  }
+
+  override readStorage(): Promise<ArrayBuffer> {
+    const value = this.#readbacks.shift();
+    if (!value) throw new Error('Synthetic cache readback sequence is exhausted.');
+    return Promise.resolve(value);
   }
 }
 
@@ -1920,5 +1947,367 @@ describe('M11 VFXSystem scalability scheduling', () => {
     expect(
       epic.diagnostics.filter(({ code }) => code === 'NACHI_QUALITY_RESTART_REQUIRED'),
     ).toHaveLength(2);
+  });
+
+  it('round-trips nonzero per-component u16 ranges and preserves integer attributes losslessly', async () => {
+    const quantizedVector = attribute('quantizedVector', {
+      default: [0, 0, 0],
+      type: 'vec3',
+    });
+    const booleanValue = attribute('booleanValue', { default: false, type: 'bool' });
+    const signedValue = attribute('signedValue', { default: 0, type: 'i32' });
+    const unsignedValue = attribute('unsignedValue', { default: 0, type: 'u32' });
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      ...computeRender,
+      access: {
+        reads: [
+          'Particles.quantizedVector',
+          'Particles.booleanValue',
+          'Particles.signedValue',
+          'Particles.unsignedValue',
+        ],
+        writes: [],
+      },
+    };
+    const emitter = defineEmitter({
+      attributes: { booleanValue, quantizedVector, signedValue, unsignedValue },
+      capacity: 3,
+      render,
+      spawn: burst({ count: 0 }),
+    });
+    const definition = defineEffect({ elements: { particles: emitter } });
+    const program = compileEmitter(emitter);
+    const schema = program.attributeSchema;
+    const source = new Map<string, Float32Array | Int32Array | Uint32Array>([
+      [
+        'quantizedVector',
+        new Float32Array([-5.5, 2.25, -9.875, -1, 2.4375, -0.25, 7.25, 2.75, 0.125]),
+      ],
+      ['booleanValue', new Uint32Array([0, 1, 1])],
+      ['signedValue', new Int32Array([-2_147_483_648, -17, 2_147_483_647])],
+      ['unsignedValue', new Uint32Array([0, 0x89ab_cdef, 0xffff_ffff])],
+    ]);
+    const physical = schema.storageArrays.map((storage) => {
+      const length = storage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type];
+      const values =
+        storage.componentType === 'uint'
+          ? new Uint32Array(length)
+          : storage.componentType === 'int'
+            ? new Int32Array(length)
+            : new Float32Array(length);
+      for (const name of storage.attributes) {
+        const resolved = schema.byName[name];
+        const logical = source.get(name);
+        if (!resolved || !logical) continue;
+        for (let particle = 0; particle < schema.capacity; particle += 1) {
+          for (let component = 0; component < resolved.components; component += 1) {
+            const physicalIndex = storage.packed
+              ? packedComponentIndex(
+                  particle,
+                  resolvePackedAttributeAddress(resolved, storage),
+                  component,
+                )
+              : particle * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] + component;
+            values[physicalIndex] = logical[particle * resolved.components + component] ?? 0;
+          }
+        }
+      }
+      return values;
+    });
+    const lifecycle = new Uint32Array(program.meta.lifecycleStorage.buffers.state.wordCount);
+    const lifecycleFields = program.meta.lifecycleStorage.buffers.state.fields;
+    lifecycle[lifecycleFields.aliveCount.offsetWords] = schema.capacity;
+    for (let particle = 0; particle < schema.capacity; particle += 1) {
+      lifecycle[lifecycleFields.aliveIndices.offsetWords + particle] = particle;
+    }
+    const selectedStorageIndexes = [
+      ...new Set(
+        [...source.keys()].sort().map((name) => schema.byName[name]!.physical.bufferIndex),
+      ),
+    ];
+    const renderer = new SequenceCacheRuntimeRenderer([
+      lifecycle.buffer,
+      ...selectedStorageIndexes.map((index) => physical[index]!.buffer),
+    ]);
+
+    const cache = await bakeSimulation(new VFXSystem(renderer), definition, {
+      compression: 'quantized-u16',
+      frames: 1,
+    });
+    const metadata = cache.metadata.emitters[0]!;
+    for (const cached of metadata.attributes) {
+      const expected = source.get(cached.name)!;
+      const length = metadata.capacity * cached.components;
+      if (cached.encoding === 'quantized-u16') {
+        const encoded = new Uint16Array(cache.data, cached.offsetBytes, length);
+        const range = cached.quantization!;
+        for (let index = 0; index < length; index += 1) {
+          const component = index % cached.components;
+          const extent = range.maximum[component]! - range.minimum[component]!;
+          expect(extent).toBeGreaterThan(0);
+          const decoded = range.minimum[component]! + (encoded[index]! / 65535) * extent;
+          expect(Math.abs(decoded - expected[index]!)).toBeLessThanOrEqual(extent / 131070);
+        }
+      } else if (cached.encoding === 'int32') {
+        expect([...new Int32Array(cache.data, cached.offsetBytes, length)]).toEqual([...expected]);
+      } else {
+        expect([...new Uint32Array(cache.data, cached.offsetBytes, length)]).toEqual([...expected]);
+      }
+    }
+  });
+
+  it('bakes render reads into quantized binary metadata and replays without simulation submits', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 2,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const bakeRenderer = new CacheRuntimeRenderer();
+    const cache = await bakeSimulation(new VFXSystem(bakeRenderer), definition, {
+      compression: 'quantized-u16',
+      frames: 2,
+      loop: true,
+    });
+    expect(cache.metadata.emitters[0]?.attributes).toEqual([
+      expect.objectContaining({ encoding: 'quantized-u16', name: 'color' }),
+      expect.objectContaining({ encoding: 'quantized-u16', name: 'position' }),
+      expect.objectContaining({ encoding: 'quantized-u16', name: 'size' }),
+      expect.objectContaining({ encoding: 'quantized-u16', name: 'spriteRotation' }),
+    ]);
+    expect(cache.metadata.loop).toMatchObject({
+      aliveIndicesMatch: true,
+      continuous: true,
+      enabled: true,
+      integerAttributesMatch: true,
+      maximumAttributeError: 0,
+    });
+    expect(cache.metadata.sourceBackend).toBe('webgpu');
+    expect(estimateSimulationCacheMemory(cache)).toMatchObject({
+      binaryBytes: cache.data.byteLength,
+      uploadBytesPerFrame: expect.any(Number),
+    });
+
+    const replayRenderer = new CacheRuntimeRenderer();
+    const player = await replaySimulation(new VFXSystem(replayRenderer), definition, cache);
+    expect(replayRenderer.submissions).toEqual([]);
+    expect(replayRenderer.uploads.length).toBeGreaterThan(0);
+    player.play();
+    player.setTimeScale(2);
+    await player.update(1 / 240);
+    expect(player.localTime).toBeCloseTo(1 / 120);
+    player.stop();
+    await player.update(1);
+    expect(player.localTime).toBeCloseTo(1 / 120);
+
+    const webglRenderer = new CacheRuntimeRenderer();
+    Object.assign(webglRenderer.kernelAdapter.capabilities, { backend: 'webgl2' });
+    await expect(
+      replaySimulation(new VFXSystem(webglRenderer), definition, cache),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_BACKEND_MISMATCH' })],
+    });
+
+    const webglCache = {
+      ...cache,
+      metadata: { ...cache.metadata, sourceBackend: 'webgl2' as const },
+    };
+    await expect(
+      replaySimulation(new VFXSystem(webglRenderer), definition, webglCache),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_REPLAY_WEBGL2_UNSUPPORTED' })],
+    });
+    await expect(
+      replaySimulation(new VFXSystem(new CacheRuntimeRenderer()), definition, webglCache),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_BACKEND_MISMATCH' })],
+    });
+  });
+
+  it('warms up by sampleStartFrame fixed steps before recording cache frames', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 1,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const renderer = new CacheRuntimeRenderer();
+    const cache = await bakeSimulation(new VFXSystem(renderer), definition, {
+      frameRate: 30,
+      frames: 2,
+      sampleStartFrame: 2,
+    });
+
+    expect(cache.metadata.sampleStartFrame).toBe(2);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterUpdate')).toHaveLength(3);
+  });
+
+  it('rejects baking through a system configured with a fixed timestep', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 1,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const renderer = new CacheRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { stepSeconds: 1 / 30 },
+    });
+
+    expect(system.usesFixedTimeStep).toBe(true);
+    await expect(bakeSimulation(system, definition, { frames: 2 })).rejects.toMatchObject({
+      diagnostics: [
+        expect.objectContaining({ code: 'NACHI_SIM_CACHE_FIXED_TIMESTEP_UNSUPPORTED' }),
+      ],
+    });
+    expect(renderer.submissions).toEqual([]);
+  });
+
+  it('rebuilds valid sorted draw indirection during cache replay', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 4,
+          render: billboard({ blending: 'alpha', sorted: true }),
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const cache = await bakeSimulation(new VFXSystem(new CacheRuntimeRenderer()), definition, {
+      frames: 1,
+    });
+    const renderer = new CacheRuntimeRenderer();
+    const player = await replaySimulation(new VFXSystem(renderer), definition, cache);
+    const emitter = player.instance.getEmitter('particles')!;
+
+    expect(emitter.program.draws[0]).toMatchObject({
+      indirect: { physicalIndex: 'sorted-indices' },
+    });
+    expect(emitter.kernels.sortedIndices).toBeDefined();
+    expect(renderer.submissions[0]).toBe('NachiEmitterPrepareDepthSort');
+    expect(renderer.submissions.slice(1)).toEqual([
+      'NachiBitonicSort_k2_j1',
+      'NachiBitonicSort_k4_j2',
+      'NachiBitonicSort_k4_j1',
+    ]);
+    expect(
+      renderer.submissions.some((name) =>
+        ['NachiEmitterInitialize', 'NachiEmitterSpawn', 'NachiEmitterUpdate'].includes(name),
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects transient attributes required by a cache replay render path', async () => {
+    const heat = attribute('heat', { default: 0, transient: true, type: 'f32' });
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          attributes: { heat },
+          capacity: 1,
+          render: {
+            access: { reads: ['Particles.heat'], writes: [] },
+            config: {},
+            kind: 'module',
+            stage: 'render',
+            type: 'test/runtime-compute-only',
+            version: 1,
+          },
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    await expect(
+      bakeSimulation(new VFXSystem(new CacheRuntimeRenderer()), definition, { frames: 1 }),
+    ).rejects.toMatchObject({
+      diagnostics: [
+        expect.objectContaining({ code: 'NACHI_SIM_CACHE_TRANSIENT_RENDER_ATTRIBUTE' }),
+      ],
+    });
+  });
+
+  it('records birth-ring lifecycle data when a render path reads spawnOrder', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 3,
+          render: {
+            access: { reads: ['Particles.spawnOrder'], writes: [] },
+            config: {},
+            kind: 'module',
+            stage: 'render',
+            type: 'test/runtime-compute-only',
+            version: 1,
+          },
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const cache = await bakeSimulation(new VFXSystem(new CacheRuntimeRenderer()), definition, {
+      frames: 2,
+    });
+    expect(cache.metadata.emitters[0]).toMatchObject({
+      birthIndicesFrameStrideBytes: 12,
+      nextSpawnOrders: [0, 0],
+    });
+    expect(cache.metadata.emitters[0]?.birthIndicesOffsetBytes).toEqual(expect.any(Number));
+  });
+
+  it('diagnoses birth-order schema drift in both replay directions', async () => {
+    const initializeFromOrder = tslModule(
+      ({ spawnOrder }) => ({ lifetime: spawnOrder.toFloat() }),
+      { stage: 'init' },
+    );
+    const definition = (withBirthOrder: boolean) =>
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 2,
+            ...(withBirthOrder ? { init: [initializeFromOrder] } : {}),
+            integration: 'none',
+            render: computeRender,
+            spawn: burst({ count: 0 }),
+          }),
+        },
+      });
+    const withBirthOrder = definition(true);
+    const withoutBirthOrder = definition(false);
+    const cacheWithBirthOrder = await bakeSimulation(
+      new VFXSystem(new CacheRuntimeRenderer()),
+      withBirthOrder,
+      { frames: 1 },
+    );
+    const cacheWithoutBirthOrder = await bakeSimulation(
+      new VFXSystem(new CacheRuntimeRenderer()),
+      withoutBirthOrder,
+      { frames: 1 },
+    );
+
+    await expect(
+      replaySimulation(
+        new VFXSystem(new CacheRuntimeRenderer()),
+        withoutBirthOrder,
+        cacheWithBirthOrder,
+      ),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_SCHEMA_MISMATCH' })],
+    });
+    await expect(
+      replaySimulation(
+        new VFXSystem(new CacheRuntimeRenderer()),
+        withBirthOrder,
+        cacheWithoutBirthOrder,
+      ),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_SCHEMA_MISMATCH' })],
+    });
   });
 });

@@ -714,6 +714,35 @@ describe('three kernel adapter', () => {
     expect(indirect.updateRanges).toContainEqual({ count: 1, start: instanceCountOffset });
   });
 
+  it('uploads replay data into particle and partial indirect storage ranges', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 2,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 0 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const renderer = {
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return new ArrayBuffer(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    const position = kernels.storages.position!.value as THREE.StorageBufferAttribute;
+    runtime.writeStorage?.(kernels.storages.position!, new Float32Array([1, 2, 3, 4]));
+    expect(Array.from((position.array as Float32Array).slice(0, 4))).toEqual([1, 2, 3, 4]);
+    expect(position.updateRanges).toContainEqual({ count: 4, start: 0 });
+
+    const indirect = kernels.drawIndirect!.indirectResource as THREE.IndirectStorageBufferAttribute;
+    const byteOffset = kernels.drawIndirectOffsetBytes! + Uint32Array.BYTES_PER_ELEMENT;
+    runtime.writeStorage?.(kernels.drawIndirect!, new Uint32Array([2]), byteOffset);
+    expect((indirect.array as Uint32Array)[byteOffset / 4]).toBe(2);
+    expect(indirect.updateRanges).toContainEqual({ count: 1, start: byteOffset / 4 });
+  });
+
   it('applies culling visibility both before and after draw materialization', () => {
     const program = compileEmitter(
       defineEmitter({
