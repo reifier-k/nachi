@@ -312,6 +312,10 @@ export interface TslModuleDefinition<
   readonly factory?: TslModuleFactory<Bindings>;
 }
 
+/**
+ * `context.emitEvent(condition)` is reserved for a future Update-only custom-event API and is
+ * intentionally absent from the M5 compile context.
+ */
 export interface TslCompileContext {
   readonly stage: ModuleStage;
   readonly attributes: Readonly<Record<string, TslExpression<unknown>>>;

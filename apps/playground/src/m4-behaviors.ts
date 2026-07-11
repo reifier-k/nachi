@@ -144,7 +144,7 @@ function bytesEqual(left: ArrayBufferView, right: ArrayBufferView): boolean {
 }
 
 async function run(): Promise<void> {
-  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: true });
+  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: false });
   renderer.setPixelRatio(1);
   renderer.setSize(64, 64);
   await renderer.init();
@@ -180,11 +180,57 @@ async function run(): Promise<void> {
     resolveVectorField,
   });
   const runtimeRenderer = createThreeRuntimeRenderer(renderer, kernelAdapter, backend.device?.lost);
-  const performanceMonitor = createPerformanceMonitor(renderer, {
-    gpuScopes: ['compute'],
-    mode: headless ? 'headless' : 'visual',
-    page: 'm4-behaviors',
-  });
+  const measureGpuPerformance = async () => {
+    const performanceRenderer = await createPlaygroundRenderer({
+      antialias: false,
+      trackTimestamp: true,
+    });
+    performanceRenderer.setSize(1, 1);
+    await performanceRenderer.init();
+    const performanceBackend = performanceRenderer.backend as BackendLike;
+    if (!performanceBackend.isWebGPUBackend) {
+      throw new Error('M4 performance measurement requires WebGPU.');
+    }
+    const performanceAdapter = createThreeKernelAdapter({
+      backend: 'webgpu',
+      linearFloat32Filtering:
+        performanceBackend.device?.features?.has('float32-filterable') === true,
+      ...(performanceBackend.device?.limits?.maxStorageBuffersPerShaderStage === undefined
+        ? {}
+        : {
+            maxStorageBuffersPerShaderStage:
+              performanceBackend.device.limits.maxStorageBuffersPerShaderStage,
+          }),
+    });
+    const performanceRuntimeRenderer = createThreeRuntimeRenderer(
+      performanceRenderer,
+      performanceAdapter,
+      performanceBackend.device?.lost,
+    );
+    const performanceMonitor = createPerformanceMonitor(performanceRenderer, {
+      gpuScopes: ['compute'],
+      mode: headless ? 'headless' : 'visual',
+      page: 'm4-behaviors',
+    });
+    const performanceSystem = new VFXSystem(performanceRuntimeRenderer, undefined, {
+      aliveCountReadbackInterval: 1,
+      fixedTimeStep: { stepSeconds: STEP },
+    });
+    performanceSystem.spawn(
+      particleEffect({
+        capacity: 1,
+        update: [linearForce({ force: [1, 0, 0] })],
+      }),
+      { seed: 400 },
+    );
+    await performanceSystem.update(0);
+    await performanceMonitor.resolveGpuTimestamps();
+    for (let frame = 0; frame < 2; frame += 1) {
+      await performanceSystem.update(STEP);
+      await performanceMonitor.resolveGpuTimestamps();
+    }
+    performanceMonitor.publish();
+  };
 
   const spawn = async (
     options: Parameters<typeof particleEffect>[0],
@@ -585,6 +631,7 @@ async function run(): Promise<void> {
   const aliveBefore = await indirectCount(renderer, killRun.view);
   await killRun.system.update(STEP);
   const aliveAfter = await indirectCount(renderer, killRun.view);
+  await measureGpuPerformance();
 
   const validation = {
     consoleClean: consoleMessages.length === 0,
@@ -670,8 +717,6 @@ async function run(): Promise<void> {
       meanSignedAngularMomentum: signedAngularMomentum,
     },
   };
-  await performanceMonitor.resolveGpuTimestamps();
-  performanceMonitor.publish();
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = result.ok ? 'complete' : 'error';

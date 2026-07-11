@@ -342,6 +342,7 @@ type CompiledEmitterEntry = {
 
 type CompiledEffect = {
   readonly emitters: readonly CompiledEmitterEntry[];
+  readonly eventDrainFrames: number;
   readonly eventLinks: readonly {
     readonly handler: CompiledEmitterProgram['events'][number]['handlers'][number];
     readonly queue: CompiledEmitterProgram['events'][number];
@@ -598,6 +599,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #emissionCompletedSequence: number | undefined;
   #exactAliveCount: number | undefined;
   #exactAliveSequence: number | undefined;
+  #forceReadbackThisFrame = false;
   #initialized = false;
   #lastOverflowCount = 0;
   readonly #lastEventOverflow = new Map<string, number>();
@@ -697,6 +699,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   }
 
   async prepareEventFrame(writeBank: 0 | 1): Promise<void> {
+    this.#forceReadbackThisFrame = false;
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventWriteBank', writeBank);
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventReadBank', 1 - writeBank);
     for (const output of Object.values(this.kernels.eventOutputs)) {
@@ -705,6 +708,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   }
 
   async consumeEvents(): Promise<void> {
+    if (this.kernels.eventInputs.length > 0) this.#forceReadbackThisFrame = true;
     for (const input of this.kernels.eventInputs) {
       if (!this.#renderer.submitComputeIndirect) {
         throw new Error('M5 event consumption requires indirect compute submission.');
@@ -748,6 +752,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       } else if (command.kind === 'complete') {
         this.#drainRemaining = this.#maxLifetime;
         this.#emissionCompletedSequence = this.#compactSequence;
+        await this.#compactAlive(true);
       } else {
         const steps = command.prewarm
           ? splitDuration(command.deltaSeconds, context.prewarmStepSeconds)
@@ -910,13 +915,13 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #reportOverflow(requestedCount: number, overflow: number): void {
     this.#onDiagnostic({
       code: 'NACHI_SPAWN_CAPACITY_EXCEEDED',
-      message: `Spawn requests totaling ${requestedCount} exceeded available capacity; ${overflow} particle(s) were safely dropped.`,
+      message: `Spawn requests of up to ${requestedCount} exceeded available capacity; ${overflow} particle(s) were safely dropped.`,
       phase: 'runtime',
       severity: 'warning',
     });
   }
 
-  async #compactAlive(): Promise<void> {
+  async #compactAlive(forceReadback = this.#forceReadbackThisFrame): Promise<void> {
     this.#compactSequence += 1;
     if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
       const { compact, finalizeIndirect, resetAliveCount } = this.kernels;
@@ -929,7 +934,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       if (
         this.#renderer.readStorage &&
         this.#aliveCountReadbackInterval !== undefined &&
-        this.#compactSequence % this.#aliveCountReadbackInterval === 0
+        (forceReadback || this.#compactSequence % this.#aliveCountReadbackInterval === 0)
       ) {
         const counters = new Uint32Array(await this.#renderer.readStorage(this.kernels.aliveCount));
         this.#exactAliveCount = counters[this.kernels.counterOffsets.aliveCount] ?? 0;
@@ -1015,6 +1020,7 @@ export class VfxEffectInstance<
   #state: EffectInstanceState = 'active';
   #eventFrame = 0;
   #completionCandidateFrame: number | undefined;
+  #eventDrainFrames = 0;
   #eventDrainExtended = false;
   #initialized = false;
 
@@ -1048,6 +1054,10 @@ export class VfxEffectInstance<
 
   addEmitter(key: string, emitter: RuntimeEmitter): void {
     this.#emitters.set(key, emitter);
+  }
+
+  setEventDrainFrames(frames: number): void {
+    this.#eventDrainFrames = frames;
   }
 
   getEmitter(key: string): VfxEmitterRuntimeView | undefined {
@@ -1178,7 +1188,7 @@ export class VfxEffectInstance<
         this.#completionCandidateFrame = this.#eventFrame;
         return;
       }
-      if (this.#eventFrame <= this.#completionCandidateFrame) return;
+      if (this.#eventFrame < this.#completionCandidateFrame + this.#eventDrainFrames) return;
     }
     this.#state = 'complete';
   }
@@ -1305,6 +1315,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         throw new Error('VFXSystem renderer must provide kernelAdapter and submitCompute().');
       }
       const compiled = this.#compile(definition);
+      instance.setEventDrainFrames(compiled.eventDrainFrames);
       const parameters = effectParameters(
         parameterDefinitions,
         options.parameters as Readonly<Record<string, unknown>> | undefined,
@@ -1394,13 +1405,36 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   #compile(definition: RuntimeEffectDefinition): CompiledEffect {
     const cached = this.#compiledEffects.get(definition);
     if (cached) return cached;
-    const emitters = Object.entries(definition.elements)
-      .filter((entry): entry is [string, EmitterDefinition] => entry[1].kind === 'emitter')
+    const emitterDefinitions = Object.entries(definition.elements).filter(
+      (entry): entry is [string, EmitterDefinition] => entry[1].kind === 'emitter',
+    );
+    const eventPayloadFields = new Map<string, Set<string>>();
+    for (const [, emitter] of emitterDefinitions) {
+      for (const value of Object.values(emitter.events ?? {})) {
+        const handlers = Array.isArray(value) ? value : [value];
+        for (const handler of handlers) {
+          if (handler?.type !== 'core/emit-to') continue;
+          const config = handler.config as { inherit?: unknown; target?: unknown };
+          if (typeof config.target !== 'string' || !Array.isArray(config.inherit)) continue;
+          let fields = eventPayloadFields.get(config.target);
+          if (!fields) {
+            fields = new Set();
+            eventPayloadFields.set(config.target, fields);
+          }
+          for (const name of config.inherit) {
+            if (typeof name === 'string') fields.add(name);
+          }
+        }
+      }
+    }
+    const emitters = emitterDefinitions
       .map(([key, emitter]) => {
         return {
           definition: emitter,
           key,
-          program: compileEmitter(emitter),
+          program: compileEmitter(emitter, {
+            eventPayloadFields: [...(eventPayloadFields.get(key) ?? [])],
+          }),
         };
       })
       .map((entry) => ({
@@ -1453,7 +1487,28 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       ),
     );
     if (eventDiagnostics.length > 0) throw new VfxDiagnosticError(eventDiagnostics);
-    const compiled = { emitters, eventLinks };
+    const outgoing = new Map<string, string[]>();
+    for (const { sourceKey, targetKey } of eventLinks) {
+      const targets = outgoing.get(sourceKey) ?? [];
+      targets.push(targetKey);
+      outgoing.set(sourceKey, targets);
+    }
+    const eventDepth = (sourceKey: string, visited: ReadonlySet<string>): number => {
+      let maximum = 0;
+      for (const targetKey of outgoing.get(sourceKey) ?? []) {
+        if (visited.has(targetKey)) {
+          maximum = Math.max(maximum, 1);
+          continue;
+        }
+        maximum = Math.max(maximum, 1 + eventDepth(targetKey, new Set([...visited, targetKey])));
+      }
+      return maximum;
+    };
+    const eventDrainFrames = Math.max(
+      0,
+      ...emitters.map(({ key }) => eventDepth(key, new Set([key]))),
+    );
+    const compiled = { emitters, eventDrainFrames, eventLinks };
     this.#compiledEffects.set(definition, compiled);
     this.#compilationCount += 1;
     return compiled;

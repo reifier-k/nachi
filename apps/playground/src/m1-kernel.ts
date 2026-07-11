@@ -149,7 +149,11 @@ const userParameterEmitter = defineEmitter({
 });
 const userParameterProgram = compileEmitter(userParameterEmitter, { deltaTime: 1 });
 
-async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelTslAdapter) {
+async function runProgram(
+  renderer: THREE.WebGPURenderer,
+  kernelAdapter: KernelTslAdapter,
+  performanceMonitor: ReturnType<typeof createPerformanceMonitor>,
+) {
   const built = program.buildKernels(kernelAdapter);
   await renderer.computeAsync(built.init as never);
   const initial = {
@@ -163,6 +167,7 @@ async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelT
   for (let frame = 0; frame < frames; frame += 1) {
     built.uniforms['System.time']!.value = (frame + 1) * FIXED_DELTA_SECONDS;
     await renderer.computeAsync(built.update as never);
+    await performanceMonitor.resolveGpuTimestamps();
     const completedFrame = frame + 1;
     if (
       completedFrame === 1 ||
@@ -185,6 +190,7 @@ async function runProgram(renderer: THREE.WebGPURenderer, kernelAdapter: KernelT
 async function runStorageTypeProbe(
   renderer: THREE.WebGPURenderer,
   kernelAdapter: KernelTslAdapter,
+  performanceMonitor: ReturnType<typeof createPerformanceMonitor>,
 ) {
   const built = storageTypeProbeProgram.buildKernels(kernelAdapter);
   await renderer.computeAsync(built.init as never);
@@ -193,6 +199,7 @@ async function runStorageTypeProbe(
   const sizeSamples: Array<{ frame: number; value: number }> = [];
   for (let frame = 0; frame < frames; frame += 1) {
     await renderer.computeAsync(built.update as never);
+    await performanceMonitor.resolveGpuTimestamps();
     const completedFrame = frame + 1;
     if (sizeSampleFrames.has(completedFrame)) {
       const size = await readLogicalAttribute(renderer, storageTypeProbeProgram, built, 'size');
@@ -359,9 +366,9 @@ async function runSmoke(): Promise<void> {
 
   root.dataset.spikeStatus = 'running';
   statusValue.textContent = 'Compiling and executing kernels…';
-  const first = await runProgram(renderer, kernelAdapter);
-  const second = await runProgram(renderer, kernelAdapter);
-  const storageTypeProbe = await runStorageTypeProbe(renderer, kernelAdapter);
+  const first = await runProgram(renderer, kernelAdapter, performanceMonitor);
+  const second = await runProgram(renderer, kernelAdapter, performanceMonitor);
+  const storageTypeProbe = await runStorageTypeProbe(renderer, kernelAdapter, performanceMonitor);
   const userParameter = await runUserParameterProgram(renderer, kernelAdapter);
   const expectedAge = frames * FIXED_DELTA_SECONDS;
   const lifetimeValue = first.initial.lifetime[0] ?? 1;

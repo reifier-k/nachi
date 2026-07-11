@@ -226,11 +226,13 @@ class ZeroReadbackRenderer extends FakeRuntimeRenderer {
 
 class MappedReadbackRenderer extends FakeRuntimeRenderer {
   readonly storageValues = new Map<KernelStorageNode, Uint32Array>();
+  readonly storageSequences = new Map<KernelStorageNode, Uint32Array[]>();
   readCount = 0;
 
   readStorage(storage: KernelStorageNode): Promise<ArrayBuffer> {
     this.readCount += 1;
-    const values = this.storageValues.get(storage) ?? new Uint32Array(32);
+    const sequence = this.storageSequences.get(storage);
+    const values = sequence?.shift() ?? this.storageValues.get(storage) ?? new Uint32Array(32);
     return Promise.resolve(values.slice().buffer);
   }
 }
@@ -287,6 +289,26 @@ function eventEffect(target = 'smokePuffs') {
     spawn: burst({ count: 0 }),
   });
   return defineEffect({ elements: { smokePuffs, sparks } });
+}
+
+function cascadingEventEffect() {
+  const emitter = (target?: string, count = 0) =>
+    defineEmitter({
+      capacity: 1,
+      ...(target === undefined ? {} : { events: { onDeath: emitTo(target) } }),
+      init: [lifetime(0)],
+      integration: 'none',
+      lifecycle: { duration: 1 / 60 },
+      render: computeRender,
+      spawn: burst({ count }),
+    });
+  return defineEffect({
+    elements: {
+      a: emitter('b', 1),
+      b: emitter('c'),
+      c: emitter(),
+    },
+  });
 }
 
 describe('effect-local clock', () => {
@@ -1097,6 +1119,49 @@ describe('VFXSystem runtime scheduler', () => {
     ]);
     expect(consumer.kernels.eventInputs).toHaveLength(1);
     expect(consumer.kernels.eventInputs[0]?.binding.sourceKey).toBe('sparks');
+  });
+
+  it('drains every frame of an A to B to C zero-lifetime event chain', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(cascadingEventEffect());
+    const step = 1 / 60;
+
+    await system.update(0);
+    await system.update(step);
+    expect(instance.state).toBe('active');
+    await system.update(step);
+    expect(instance.state).toBe('active');
+    await system.update(step);
+
+    expect(instance.state).toBe('complete');
+  });
+
+  it('forces interval-2 readback for event births and the final zero-lifetime death callback', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 2 });
+    const instance = system.spawn(cascadingEventEffect());
+    const callbackCounts: number[] = [];
+    instance.on('death', ({ count }) => callbackCounts.push(count));
+    const b = instance.getEmitter('b')!;
+    const bAlive = b.kernels.aliveCount;
+    const bEvents = b.kernels.eventOutputs.onDeath!.state;
+    const step = 1 / 60;
+
+    await system.update(0);
+    await system.update(step);
+    renderer.storageSequences.set(bAlive, [new Uint32Array([0, 1]), new Uint32Array([0, 0])]);
+    renderer.storageSequences.set(bEvents, [
+      new Uint32Array([0, 0, 0, 0]),
+      new Uint32Array([0, 0, 0, 1]),
+    ]);
+    await system.update(step);
+
+    expect(renderer.storageSequences.get(bAlive)).toHaveLength(0);
+    expect(renderer.storageSequences.get(bEvents)).toHaveLength(0);
+    expect(callbackCounts).toContain(1);
+    expect(instance.state).toBe('active');
+    await system.update(step);
+    expect(instance.state).toBe('complete');
   });
 
   it('alternates event banks and consumes only the previous frame bank', async () => {

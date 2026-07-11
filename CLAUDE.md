@@ -32,6 +32,7 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m2-runtime/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m3-sprites/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-explosion/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m4-behaviors/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m5-events/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-ambient/?backend=webgpu
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]

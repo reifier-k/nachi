@@ -553,6 +553,8 @@ export class KernelModuleRegistry {
 export interface CompileEmitterOptions {
   readonly deltaTime?: number;
   readonly emitterSeed?: number;
+  /** Event payload fields inherited by this emitter from effect-scoped emitTo() links. */
+  readonly eventPayloadFields?: readonly string[];
   readonly registry?: KernelModuleRegistry;
   readonly resolveTsl?: (reference: TslFunctionRef) => TslModuleFactory | undefined;
   readonly spawnGeneration?: number;
@@ -739,6 +741,12 @@ const COMPILER_OWNED_WRITE_PATHS = [
     path: 'Emitter.event*Bank',
   },
   {
+    allows: (module: WriteOwnershipModule) => module.source === 'compiler',
+    matches: (path: DataReference) => path.startsWith('Emitter.eventPayload.'),
+    owner: 'event payload binding',
+    path: 'Emitter.eventPayload.*',
+  },
+  {
     allows: (module: WriteOwnershipModule) => module.stage === 'event',
     matches: (path: DataReference) => path.startsWith('Emitter.events.'),
     owner: 'event stage',
@@ -746,12 +754,16 @@ const COMPILER_OWNED_WRITE_PATHS = [
   },
 ] as const;
 
-function isKnownEmitterPath(reference: ParameterPath): boolean {
+function isKnownEmitterPath(
+  reference: ParameterPath,
+  eventPayloadFields: ReadonlySet<string>,
+): boolean {
   return (
     EMITTER_PATHS.has(reference) ||
     /^Emitter\.allocation\..+/.test(reference) ||
     /^Emitter\.events\..+/.test(reference) ||
-    /^Emitter\.eventPayload\..+/.test(reference)
+    (reference.startsWith('Emitter.eventPayload.') &&
+      eventPayloadFields.has(reference.slice('Emitter.eventPayload.'.length)))
   );
 }
 
@@ -1074,11 +1086,16 @@ function validateModule(
 }
 
 function validateReferences(
-  modules: readonly (CompiledKernelModule | CompiledSpawnModule)[],
+  modules: readonly {
+    readonly access: ModuleAccess;
+    readonly path: string;
+  }[],
   parameters: ParameterSchema | undefined,
+  eventPayloadFields: readonly string[],
 ): VfxDiagnostic[] {
   const diagnostics: VfxDiagnostic[] = [];
   const declaredParameters = new Set(Object.keys(parameters ?? {}));
+  const declaredEventPayloadFields = new Set(eventPayloadFields);
   for (const module of modules) {
     for (const [kind, references] of [
       ['reads', module.access.reads],
@@ -1088,7 +1105,7 @@ function validateReferences(
         if (reference.startsWith('Particles.')) continue;
         const known =
           SYSTEM_PATHS.has(reference) ||
-          isKnownEmitterPath(reference) ||
+          isKnownEmitterPath(reference, declaredEventPayloadFields) ||
           (reference.startsWith('User.') && declaredParameters.has(reference));
         if (!known) {
           diagnostics.push(
@@ -1101,7 +1118,21 @@ function validateReferences(
         }
       }
     }
-    // optionalReads deliberately do not diagnose absence; materializers provide fallbacks.
+    for (const [index, reference] of (module.access.optionalReads ?? []).entries()) {
+      if (
+        reference.startsWith('Emitter.eventPayload.') &&
+        !isKnownEmitterPath(reference, declaredEventPayloadFields)
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_PARAMETER_UNKNOWN_REFERENCE',
+            `Module optionally reads unknown parameter path "${reference}".`,
+            `${module.path}.access.optionalReads[${index}]`,
+          ),
+        );
+      }
+    }
+    // Other optionalReads deliberately do not diagnose absence; materializers provide fallbacks.
   }
   return diagnostics;
 }
@@ -2860,7 +2891,11 @@ export function compileEmitter<
     diagnostics.push(...validateModule(module, registry));
   }
   diagnostics.push(
-    ...validateReferences([...spawnModules, ...initialModules], definition.parameters),
+    ...validateReferences(
+      [...spawnModules, ...initialModules],
+      definition.parameters,
+      options.eventPayloadFields ?? [],
+    ),
   );
   diagnostics.push(...validateSpawnConfigs(spawnModules, definition.parameters));
   const locatedNonKernelModules = collectEmitterModules(normalizedDefinition).filter(
@@ -2871,6 +2906,16 @@ export function compileEmitter<
     config: module.config,
     path,
   }));
+  diagnostics.push(
+    ...validateReferences(
+      locatedNonKernelModules.map(({ module, path }) => ({
+        access: module.access ?? { reads: [], writes: [] },
+        path,
+      })),
+      definition.parameters,
+      options.eventPayloadFields ?? [],
+    ),
+  );
   diagnostics.push(
     ...validateValueGenerators([...initialModules, ...nonKernelModules], definition.parameters),
   );

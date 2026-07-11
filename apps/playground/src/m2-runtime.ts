@@ -228,6 +228,7 @@ function close(left: number, right: number, tolerance = 0.0002): boolean {
 async function runLifecycleScenario(
   renderer: THREE.WebGPURenderer,
   runtimeRenderer: ReturnType<typeof createThreeRuntimeRenderer>,
+  performanceMonitor: ReturnType<typeof createPerformanceMonitor>,
 ) {
   const systemOptions = {
     aliveCountReadbackInterval: 1,
@@ -240,7 +241,10 @@ async function runLifecycleScenario(
     { seed: 11 },
   );
   await rateSystem.update(0);
-  for (let frame = 0; frame < 60; frame += 1) await rateSystem.update(FIXED_DELTA_SECONDS);
+  for (let frame = 0; frame < 60; frame += 1) {
+    await rateSystem.update(FIXED_DELTA_SECONDS);
+    await performanceMonitor.resolveGpuTimestamps();
+  }
   const rateAlive = await aliveCount(renderer, rateInstance);
 
   // 2. A one-slot emitter must recycle the same index and advance its particle generation/RNG.
@@ -515,7 +519,7 @@ async function runSmoke(): Promise<void> {
 
   const lifecycle =
     scenario === 'all' || scenario === 'lifecycle'
-      ? await runLifecycleScenario(renderer, runtimeRenderer)
+      ? await runLifecycleScenario(renderer, runtimeRenderer, performanceMonitor)
       : undefined;
   const time =
     scenario === 'all' || scenario === 'time'

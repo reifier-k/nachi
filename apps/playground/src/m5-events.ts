@@ -46,6 +46,7 @@ root.dataset.spikeStatus = 'initializing';
 
 type RuntimeInstance = {
   readonly diagnostics: readonly { readonly code: string }[];
+  readonly state: string;
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
   on(event: 'death', callback: (summary: EffectEventSummary) => void): () => void;
   release(): void;
@@ -94,6 +95,26 @@ function eventEffect(parentCapacity = 4, loops: number | 'infinite' = 1) {
         render: billboard({}),
         spawn: burst({ count: parentCapacity }),
       }),
+    },
+  });
+}
+
+function cascadingEventEffect() {
+  const cascadeEmitter = (target?: string, count = 0) =>
+    defineEmitter({
+      capacity: 1,
+      ...(target === undefined ? {} : { events: { onDeath: emitTo(target) } }),
+      init: [lifetime(0)],
+      integration: 'none',
+      lifecycle: { duration: STEP },
+      render: billboard({}),
+      spawn: burst({ count }),
+    });
+  return defineEffect({
+    elements: {
+      a: cascadeEmitter('b', 1),
+      b: cascadeEmitter('c'),
+      c: cascadeEmitter(),
     },
   });
 }
@@ -298,6 +319,39 @@ async function run(): Promise<void> {
   const first = await execute(5150);
   const second = await execute(5150);
 
+  const executeCascade = async (aliveCountReadbackInterval: number) => {
+    const system = new VFXSystem(runtimeRenderer, undefined, { aliveCountReadbackInterval });
+    const instance = system.spawn(cascadingEventEffect()) as RuntimeInstance;
+    const callbackCounts: number[] = [];
+    instance.on('death', ({ count }) => callbackCounts.push(count));
+    await system.update(0);
+    await system.update(STEP);
+    const stateAfterA = instance.state;
+    await system.update(STEP);
+    const stateAfterB = instance.state;
+    await system.update(STEP);
+    const finalState = instance.state;
+    const c = emitter(instance, 'c');
+    const cSpawnGenerations = (await readLogicalAttribute(
+      renderer,
+      c.program,
+      c.kernels,
+      'spawnGeneration',
+    )) as Uint32Array;
+    const result = {
+      callbackCount: callbackCounts.reduce((sum, count) => sum + count, 0),
+      cConsumed: (cSpawnGenerations[0] ?? 0) > 0,
+      finalState,
+      stateAfterA,
+      stateAfterB,
+    };
+    instance.release();
+    return result;
+  };
+
+  const cascade = await executeCascade(1);
+  const intervalTwoCascade = await executeCascade(2);
+
   const overflowSystem = new VFXSystem(runtimeRenderer, undefined, {
     aliveCountReadbackInterval: 1,
   });
@@ -314,12 +368,22 @@ async function run(): Promise<void> {
     bankSelection:
       first.gpuDiagnostics.afterProducer.writeBank === first.gpuDiagnostics.afterConsumer.readBank,
     callbackAggregate: first.callbackCount === 4,
+    cascadeFinalConsumed:
+      cascade.stateAfterA === 'active' &&
+      cascade.stateAfterB === 'active' &&
+      cascade.finalState === 'complete' &&
+      cascade.cConsumed,
     childPositionBufferNonZero: first.gpuDiagnostics.afterConsumer.childPositionLogical.some(
       (value) => Math.abs(value) > 1e-7,
     ),
     consoleClean: consoleMessages.length === 0,
     deterministic: JSON.stringify(first.childPoints) === JSON.stringify(second.childPoints),
     inheritPosition: JSON.stringify(first.parentPoints) === JSON.stringify(first.childPoints),
+    intervalTwoFinalFlush:
+      intervalTwoCascade.stateAfterB === 'active' &&
+      intervalTwoCascade.finalState === 'complete' &&
+      intervalTwoCascade.cConsumed &&
+      intervalTwoCascade.callbackCount === 2,
     nextFrameLatency: first.childCountOnProducerFrame === 0 && first.childCountAfterConsume === 4,
     onDeathCount: first.eventCount === 4 && first.childCountAfterConsume === 4,
     overflowSafe,
@@ -332,7 +396,9 @@ async function run(): Promise<void> {
   };
   const result = {
     consoleMessages,
+    cascade,
     first,
+    intervalTwoCascade,
     mode: headless ? 'headless' : 'visual',
     ok: Object.values(validation).every(Boolean),
     overflowCodes,

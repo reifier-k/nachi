@@ -1805,7 +1805,7 @@ describe('emitter kernel compiler', () => {
     expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
   });
 
-  it('accepts every RFC-reserved Emitter path before M2 supplies its uniforms', () => {
+  it('accepts reserved Emitter paths and declared inherited event payload fields', () => {
     const access: ModuleAccess = {
       reads: [
         'Emitter.transform',
@@ -1840,11 +1840,90 @@ describe('emitter kernel compiler', () => {
       version: 1,
     };
     const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      eventPayloadFields: ['position'],
       registry,
     });
 
     expect(program.diagnostics.map(({ code }) => code)).not.toContain(
       'NACHI_PARAMETER_UNKNOWN_REFERENCE',
+    );
+  });
+
+  it('rejects event payload fields that are not declared by an inherit link', () => {
+    const access: ModuleAccess = {
+      reads: ['Emitter.eventPayload.typo'],
+      writes: [],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access,
+      build() {},
+      stage: 'update',
+      type: 'test/unknown-event-payload',
+      version: 1,
+    });
+    const module: ModuleDefinition<'update', Record<string, never>> = {
+      access,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/unknown-event-payload',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      eventPayloadFields: ['position'],
+      registry,
+    });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_PARAMETER_UNKNOWN_REFERENCE' }),
+    );
+  });
+
+  it('rejects undeclared event payload fields from non-kernel stages', () => {
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      access: { reads: ['Emitter.eventPayload.typo'], writes: [] },
+      config: {},
+      kind: 'module',
+      stage: 'render',
+      type: 'test/render-event-payload',
+      version: 1,
+    };
+    const program = compileEmitter({ ...baseEmitter({ integration: 'none' }), render });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_PARAMETER_UNKNOWN_REFERENCE' }),
+    );
+  });
+
+  it('protects inherited event payload fields from author writes', () => {
+    const access: ModuleAccess = {
+      reads: [],
+      writes: ['Emitter.eventPayload.position'],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access,
+      build() {},
+      stage: 'update',
+      type: 'test/write-event-payload',
+      version: 1,
+    });
+    const module: ModuleDefinition<'update', Record<string, never>> = {
+      access,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/write-event-payload',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      eventPayloadFields: ['position'],
+      registry,
+    });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_COMPILER_OWNED_WRITE' }),
     );
   });
 
