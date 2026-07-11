@@ -676,8 +676,18 @@ export function createThreeRuntimeRenderer(
       initializedIndirectAttributes.add(attribute);
     }
   };
+  const prepareKernelsForPooling = (kernels: BuiltEmitterKernels): void => {
+    if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) return;
+    const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
+    const instanceCountOffset = kernels.drawIndirectOffsetBytes / Uint32Array.BYTES_PER_ELEMENT + 1;
+    const words = indirect.array as Uint32Array;
+    words[instanceCountOffset] = 0;
+    indirect.addUpdateRange(instanceCountOffset, 1);
+    indirect.needsUpdate = true;
+  };
   const base = {
     kernelAdapter,
+    prepareKernelsForPooling,
     readStorage: (storageNode: KernelStorageNode) =>
       renderer.getArrayBufferAsync(storageNode.value as never),
     setUniformValue: setThreeUniformValue,

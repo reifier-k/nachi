@@ -36,6 +36,7 @@ export default defineConfig({
         m8TslKit: 'm8-tslkit/index.html',
         m8MeshFx: 'm8-meshfx/index.html',
         m8Vat: 'm8-vat/index.html',
+        m9Compose: 'm9-compose/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },

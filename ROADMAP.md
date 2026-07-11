@@ -166,11 +166,11 @@
 
 ## M9 — 合成とタイムライン
 
-- [ ] defineEffect:エミッタ+メッシュFXの束ね、エミッタ継承・オーバーライド
+- [ ] defineEffect:エミッタ+メッシュFXの束ね、エミッタ継承・オーバーライド — バッチ1でエミッタ継承・型付き合成を完了。mesh-fx要素ライフサイクルは次バッチ
 - [ ] timeline:at()/play()/stop()、トラック評価、ループ・スピード制御
 - [ ] cameraShake / hitStop(ローカル時間との統合)
-- [ ] User.*パラメータのランタイム設定API(型付き)
-- [ ] エフェクト全体のプーリングと再利用(spawn/release)
+- [x] User.*パラメータのランタイム設定API(型付き) — effect/emitter宣言合成、GPU uniform反映、インスタンス独立、負例診断
+- [x] エフェクト全体のプーリングと再利用(spawn/release) — materialized kernel/GPU buffer再利用、完全reset、上限診断、in-flight安全化
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
 ## M10 — ポスト統合と半透明
@@ -226,6 +226,8 @@
 
 | 日付 | セッション成果 |
 |---|---|
+| 2026-07-11 | **M9バッチ1実装**: `defineEmitter(base, overrides)`によるNiagara型のラベル/正規化index指定スタック継承(merge/append/replace・remove/order)、effect/emitter `User.*`宣言合成と型付き`setParameter()`、WeakMapコンパイルキャッシュと分離したmaterialized kernel/GPU bufferプール(maxPoolSize既定16・in-flight release安全化)を実装。再利用initializeは全属性lane/free-list/counter/event/spawnGeneration/spawnOrder/birth ringを初期化。`/m9-compose/`に親子GPU readback、User uniform/負例、同一buffer参照+同seed再spawn bit一致、非対称非鏡像点、linear visual閾値、consoleClean、独立perf v1を追加。RFC§6/§9/§10.3/§16更新。 |
+| 2026-07-11 | **M9バッチ1 検収・レビュー・裁定: 受入(コミット)**。Claudeレビュー: **PASS(BLOCKER 0)** — 継承マージ11ケース+プールin-flight挙動3ケースをスクラッチ実測、JSONラウンドトリップ完全一致、プール状態リセットの完全性(GPU全カウンタ/birth ring sentinel/イベントword/CPU側フレッシュ構築)を構造確認。採用SHOULD5件を修正: [S1]エラー状態インスタンスが遅延release経路でプールされる実測バグ→release時点のpoolability捕捉 [S2]プール帳簿のGC乖離→定義キーWeakMap値へ [S3]WebGL2 initializeのTF varying予算未検証→検証対象化 [S4]プール退避のレンダラ通知→フック+Threeアダプタでindirect instanceCount 0化 [S5]スモーク弁別の穴→死亡後dirty lane再利用+onDeath→emitTo付き再利用ケース追加。NIT7件消化(spawn失敗時のリソースリーク、undefined clobber防御、RFC文言群)。再検証: テスト358本、m9-compose全緑、m2-webgl緑、回帰8ページ+スクショ緑。**運用障害: resumeが実行されない空振り(5回目の実行系障害)→以後の差し戻しは自己完結仕様のfresh運用に切替** |
 | 2026-07-10 | エコシステム調査、計画策定、PLAN.md/ROADMAP.md作成 |
 | 2026-07-10 | 環境セットアップ:Playwright+Chromium導入、ヘッドレスWebGPU動作確認(SwiftShader・compute成功・要localhost)、監査プロトコル+FA新設、.mcp.json(Playwright MCP)作成 |
 | 2026-07-10 | M0項目1/2/9完了:雛形実装(Codex, thread 019f4b46)→検収→Claudeレビュー(FAIL: tweakpane型崩壊+ヘッドレスcanvas提示不可)→Codex修正→再レビューPASS→コミット。持ち越しNIT2件(probe引数検証のObject.hasOwn化、screenshotのバックエンド一致検証)は次回委譲に含める。Codexジョブランナーが2回ともゾンビ化(実体turnは完走)→rolloutログ直接監視で運用 |

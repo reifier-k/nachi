@@ -29,6 +29,9 @@ import type {
   EmitToOptions,
   EmitterConfig,
   EmitterDefinition,
+  EmitterModuleListOverride,
+  EmitterModuleSelector,
+  EmitterOverrideConfig,
   EventModule,
   FlipbookDefinition,
   MeshRendererOptions,
@@ -77,6 +80,7 @@ import type {
   VelocityConeOptions,
   VelocityMeshNormalOptions,
   VortexOptions,
+  ComposedEffectParameterSchema,
 } from './types.js';
 
 function createModule<Stage extends ModuleStage, Config extends object>(
@@ -202,10 +206,289 @@ export function attribute<const Name extends string, const Type extends Attribut
   return { kind: 'attribute', name, ...options };
 }
 
+type InheritedEmitterDefinition<
+  BaseAttributes extends AttributeSchema,
+  BaseParameters extends ParameterSchema,
+  OverrideAttributes extends AttributeSchema,
+  OverrideParameters extends ParameterSchema,
+> = EmitterDefinition<
+  Omit<BaseAttributes, DefinedKeys<OverrideAttributes>> &
+    Pick<OverrideAttributes, DefinedKeys<OverrideAttributes>>,
+  Omit<BaseParameters, DefinedKeys<OverrideParameters>> &
+    Pick<OverrideParameters, DefinedKeys<OverrideParameters>>
+>;
+
+type DefinedKeys<Schema> = {
+  [Key in keyof Schema]: [Schema[Key]] extends [never] ? never : Key;
+}[keyof Schema];
+
+type LocatedModule<Module extends ModuleDefinition<ModuleStage, object>> = {
+  readonly identity: string;
+  readonly module: Module;
+};
+
+function withoutUndefined<Value extends object>(value: Value | undefined): Partial<Value> {
+  return Object.fromEntries(
+    Object.entries(value ?? {}).filter(([, entry]) => entry !== undefined),
+  ) as Partial<Value>;
+}
+
+function moduleIdentity(module: ModuleDefinition<ModuleStage, object>, index: number): string {
+  return module.label === undefined ? `index:${index}` : `label:${module.label}`;
+}
+
+function selectorIdentity(selector: EmitterModuleSelector): string {
+  return typeof selector === 'number' ? `index:${selector}` : `label:${selector}`;
+}
+
+function mergeModuleList<Module extends ModuleDefinition<ModuleStage, object>>(
+  baseValue: Module | readonly Module[] | undefined,
+  override: EmitterModuleListOverride<Module> | undefined,
+  path: 'init' | 'render' | 'update',
+): readonly Module[] | undefined {
+  if (override === undefined) {
+    return baseValue === undefined
+      ? undefined
+      : Array.isArray(baseValue)
+        ? [...baseValue]
+        : [baseValue as Module];
+  }
+  const base = (
+    baseValue === undefined ? [] : Array.isArray(baseValue) ? [...baseValue] : [baseValue as Module]
+  ) as readonly Module[];
+  const additions = override.modules ?? [];
+  const expectedStage = path;
+  const diagnostics = additions.flatMap((module, index) =>
+    module.stage === expectedStage
+      ? []
+      : [
+          {
+            code: 'NACHI_EMITTER_INHERITANCE_STAGE_MISMATCH',
+            message: `Inherited ${path} override contains a ${module.stage} module.`,
+            path: `${path}.modules[${index}]`,
+            phase: 'compile' as const,
+            severity: 'error' as const,
+          },
+        ],
+  );
+  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
+
+  if ((override.mode ?? 'merge') === 'replace') return [...additions];
+
+  let located: LocatedModule<Module>[] = base.map((module, index) => ({
+    identity: moduleIdentity(module, index),
+    module,
+  }));
+  const knownBaseIdentities = new Set(located.map(({ identity }) => identity));
+  const selectorDiagnostics: Array<{
+    readonly reason: 'duplicate-order' | 'unknown';
+    readonly selector: EmitterModuleSelector;
+  }> = [];
+  for (const selector of override.remove ?? []) {
+    const identity = selectorIdentity(selector);
+    if (!knownBaseIdentities.has(identity)) {
+      selectorDiagnostics.push({ reason: 'unknown', selector });
+    }
+    located = located.filter((entry) => entry.identity !== identity);
+  }
+
+  if ((override.mode ?? 'merge') === 'append') {
+    located.push(
+      ...additions.map((module, index) => ({
+        identity:
+          module.label === undefined ? `index:${base.length + index}` : `label:${module.label}`,
+        module,
+      })),
+    );
+  } else {
+    for (const [index, module] of additions.entries()) {
+      const requestedIdentity = moduleIdentity(module, index);
+      const targetIndex = located.findIndex(({ identity }) => identity === requestedIdentity);
+      if (targetIndex >= 0) {
+        const target = located[targetIndex]!;
+        located[targetIndex] = { identity: target.identity, module };
+      } else {
+        located.push({
+          identity: requestedIdentity,
+          module,
+        });
+      }
+    }
+  }
+
+  if (override.order) {
+    const selected = new Set<string>();
+    const reordered: LocatedModule<Module>[] = [];
+    for (const selector of override.order) {
+      const identity = selectorIdentity(selector);
+      const entry = located.find((candidate) => candidate.identity === identity);
+      if (!entry) {
+        selectorDiagnostics.push({ reason: 'unknown', selector });
+        continue;
+      }
+      if (selected.has(identity)) {
+        selectorDiagnostics.push({ reason: 'duplicate-order', selector });
+        continue;
+      }
+      selected.add(identity);
+      reordered.push(entry);
+    }
+    located = [...reordered, ...located.filter(({ identity }) => !selected.has(identity))];
+  }
+  if (selectorDiagnostics.length > 0) {
+    throw new VfxDiagnosticError(
+      selectorDiagnostics.map(({ reason, selector }) => ({
+        code: 'NACHI_EMITTER_INHERITANCE_TARGET_UNKNOWN',
+        message:
+          reason === 'duplicate-order'
+            ? `Inherited ${path} override order contains duplicate module selector ${JSON.stringify(selector)}.`
+            : `Inherited ${path} override cannot resolve module selector ${JSON.stringify(selector)}.`,
+        path,
+        phase: 'compile',
+        severity: 'error',
+      })),
+    );
+  }
+  return located.map(({ module }) => module);
+}
+
+function collectInheritanceSchemaDiagnostics(
+  base: EmitterDefinition<AttributeSchema, ParameterSchema>,
+  overrides: EmitterOverrideConfig<AttributeSchema, ParameterSchema>,
+) {
+  const diagnostics = [];
+  for (const [name, definition] of Object.entries(overrides.attributes ?? {})) {
+    const inherited = base.attributes?.[name];
+    if (inherited && inherited.type !== definition.type) {
+      diagnostics.push({
+        code: 'NACHI_EMITTER_INHERITANCE_ATTRIBUTE_TYPE_MISMATCH',
+        message: `Inherited attribute "${name}" changes type from ${inherited.type} to ${definition.type}.`,
+        path: `attributes.${name}`,
+        phase: 'compile' as const,
+        severity: 'error' as const,
+      });
+    }
+  }
+  for (const [path, definition] of Object.entries(overrides.parameters ?? {})) {
+    const inherited = base.parameters?.[path as ParameterPath];
+    if (inherited && inherited.type !== definition.type) {
+      diagnostics.push({
+        code: 'NACHI_EMITTER_INHERITANCE_PARAMETER_TYPE_MISMATCH',
+        message: `Inherited parameter "${path}" changes type from ${inherited.type} to ${definition.type}.`,
+        path: `parameters.${path}`,
+        phase: 'compile' as const,
+        severity: 'error' as const,
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function assertAcyclicAuthoringValue(value: unknown): void {
+  const active = new WeakSet<object>();
+  const visit = (candidate: unknown, path: string): void => {
+    if (typeof candidate !== 'object' || candidate === null) return;
+    const prototype = Object.getPrototypeOf(candidate);
+    if (!Array.isArray(candidate) && prototype !== Object.prototype && prototype !== null) return;
+    if (active.has(candidate)) {
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_EMITTER_INHERITANCE_CYCLE',
+          message: 'Emitter inheritance input contains a cyclic object graph.',
+          path,
+          phase: 'compile',
+          severity: 'error',
+        },
+      ]);
+    }
+    active.add(candidate);
+    for (const [key, nested] of Object.entries(candidate)) visit(nested, `${path}.${key}`);
+    active.delete(candidate);
+  };
+  visit(value, 'emitter');
+}
+
 export function defineEmitter<
   const Attributes extends AttributeSchema = AttributeSchema,
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
->(config: EmitterConfig<Attributes, Parameters>): EmitterDefinition<Attributes, Parameters> {
+>(config: EmitterConfig<Attributes, Parameters>): EmitterDefinition<Attributes, Parameters>;
+
+export function defineEmitter<
+  const BaseAttributes extends AttributeSchema,
+  const BaseParameters extends ParameterSchema,
+  const OverrideAttributes extends AttributeSchema = Readonly<Record<string, never>>,
+  const OverrideParameters extends ParameterSchema = Readonly<Record<string, never>>,
+>(
+  base: EmitterDefinition<BaseAttributes, BaseParameters>,
+  overrides: EmitterOverrideConfig<OverrideAttributes, OverrideParameters>,
+): InheritedEmitterDefinition<
+  BaseAttributes,
+  BaseParameters,
+  OverrideAttributes,
+  OverrideParameters
+>;
+
+export function defineEmitter(
+  baseOrConfig: EmitterConfig | EmitterDefinition,
+  overrides?: EmitterOverrideConfig,
+): EmitterDefinition;
+export function defineEmitter(
+  baseOrConfig: EmitterConfig | EmitterDefinition,
+  overrides?: EmitterOverrideConfig,
+): EmitterDefinition {
+  return defineEmitterImplementation(baseOrConfig, overrides);
+}
+
+function defineEmitterImplementation(
+  baseOrConfig:
+    | EmitterConfig<AttributeSchema, ParameterSchema>
+    | EmitterDefinition<AttributeSchema, ParameterSchema>,
+  overrides?: EmitterOverrideConfig<AttributeSchema, ParameterSchema>,
+): EmitterDefinition {
+  if (overrides !== undefined) {
+    assertAcyclicAuthoringValue(baseOrConfig);
+    assertAcyclicAuthoringValue(overrides);
+  }
+  if (overrides !== undefined && (!('kind' in baseOrConfig) || baseOrConfig.kind !== 'emitter')) {
+    throw new VfxDiagnosticError([
+      {
+        code: 'NACHI_EMITTER_INHERITANCE_BASE_TYPE_MISMATCH',
+        message: 'defineEmitter(base, overrides) requires an emitter definition as its base.',
+        path: 'base',
+        phase: 'compile',
+        severity: 'error',
+      },
+    ]);
+  }
+  const base = baseOrConfig as EmitterConfig<AttributeSchema, ParameterSchema> &
+    Partial<EmitterDefinition<AttributeSchema, ParameterSchema>>;
+  const config =
+    overrides === undefined
+      ? base
+      : ({
+          ...base,
+          ...withoutUndefined(overrides),
+          attributes: {
+            ...(base.attributes ?? {}),
+            ...withoutUndefined(overrides.attributes),
+          },
+          events: { ...(base.events ?? {}), ...withoutUndefined(overrides.events) },
+          init: mergeModuleList<InitModule>(base.init, overrides.init, 'init'),
+          lifecycle: { ...(base.lifecycle ?? {}), ...withoutUndefined(overrides.lifecycle) },
+          parameters: {
+            ...(base.parameters ?? {}),
+            ...withoutUndefined(overrides.parameters),
+          },
+          render: mergeModuleList<RenderModule>(base.render, overrides.render, 'render'),
+          update: mergeModuleList<UpdateModule>(base.update, overrides.update, 'update'),
+        } as EmitterConfig<AttributeSchema, ParameterSchema>);
+  const inheritanceDiagnostics =
+    overrides === undefined
+      ? []
+      : collectInheritanceSchemaDiagnostics(
+          baseOrConfig as EmitterDefinition<AttributeSchema, ParameterSchema>,
+          overrides,
+        );
   const events = config.events
     ? Object.fromEntries(
         Object.entries(config.events).map(([eventName, handlers]) => [
@@ -218,7 +501,8 @@ export function defineEmitter<
     : undefined;
   const normalizedConfig = events === undefined ? config : { ...config, events };
   const diagnostics = [
-    ...resolveAttributeSchema<Attributes, Parameters>(normalizedConfig).diagnostics,
+    ...inheritanceDiagnostics,
+    ...resolveAttributeSchema(normalizedConfig).diagnostics,
     ...collectEmitterLifecycleDiagnostics(normalizedConfig),
     ...collectEmitterModuleLabelDiagnostics(normalizedConfig),
     ...collectParameterDeclarationDiagnostics(normalizedConfig.parameters),
@@ -227,7 +511,7 @@ export function defineEmitter<
     throw new VfxDiagnosticError(diagnostics);
   }
 
-  return { ...normalizedConfig, kind: 'emitter' } as EmitterDefinition<Attributes, Parameters>;
+  return { ...normalizedConfig, kind: 'emitter' } as EmitterDefinition;
 }
 
 export function burst(options: BurstOptions): SpawnModule {
@@ -670,10 +954,66 @@ export function at<const Actions extends readonly TimelineAction[]>(
 export function defineEffect<
   const Elements extends EffectElements,
   const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
->(config: EffectConfig<Elements, Parameters>): EffectDefinition<Elements, Parameters> {
-  const diagnostics = collectParameterDeclarationDiagnostics(config.parameters);
+>(
+  config: EffectConfig<Elements, Parameters>,
+): EffectDefinition<Elements, ComposedEffectParameterSchema<Elements, Parameters>> {
+  const explicit = (config.parameters ?? {}) as ParameterSchema;
+  const declarations = new Map<
+    ParameterPath,
+    { definition: ParameterDefinition; path: string }[]
+  >();
+  for (const [elementKey, element] of Object.entries(config.elements)) {
+    if (element.kind !== 'emitter') continue;
+    for (const [path, definition] of Object.entries(element.parameters ?? {})) {
+      const entries = declarations.get(path as ParameterPath) ?? [];
+      entries.push({ definition, path: `elements.${elementKey}.parameters.${path}` });
+      declarations.set(path as ParameterPath, entries);
+    }
+  }
+  const diagnostics = [...collectParameterDeclarationDiagnostics(explicit)];
+  const composed: Record<string, ParameterDefinition> = {};
+  for (const [path, entries] of declarations) {
+    const authoritative = explicit[path];
+    const first = authoritative ?? entries[0]?.definition;
+    if (!first) continue;
+    const conflicts = entries.filter(({ definition }) => {
+      if (definition.type !== first.type) return true;
+      if (authoritative) return false;
+      return (
+        definition.mutable !== first.mutable ||
+        JSON.stringify(definition.default) !== JSON.stringify(first.default)
+      );
+    });
+    diagnostics.push(
+      ...conflicts.map(({ definition, path: declarationPath }) => ({
+        code: 'NACHI_EFFECT_PARAMETER_CONFLICT',
+        message: authoritative
+          ? `Composed parameter "${path}" conflicts with the effect-level parameter schema (${first.type} versus ${definition.type}).`
+          : `Sibling emitter declarations for composed parameter "${path}" disagree (type/default/mutability: ${first.type}/${JSON.stringify(first.default)}/${String(first.mutable === true)} versus ${definition.type}/${JSON.stringify(definition.default)}/${String(definition.mutable === true)}).`,
+        path: declarationPath,
+        phase: 'compile' as const,
+        severity: 'error' as const,
+      })),
+    );
+    composed[path] = first;
+  }
+  Object.assign(composed, explicit);
+  diagnostics.push(...collectParameterDeclarationDiagnostics(composed));
   if (diagnostics.some(({ severity }) => severity === 'error')) {
     throw new VfxDiagnosticError(diagnostics);
   }
-  return { ...config, kind: 'effect' } as EffectDefinition<Elements, Parameters>;
+  const elements = Object.fromEntries(
+    Object.entries(config.elements).map(([key, element]) => [
+      key,
+      element.kind === 'emitter'
+        ? { ...element, parameters: { ...(element.parameters ?? {}), ...composed } }
+        : element,
+    ]),
+  ) as Elements;
+  return {
+    ...config,
+    elements,
+    ...(Object.keys(composed).length === 0 ? {} : { parameters: composed }),
+    kind: 'effect',
+  } as EffectDefinition<Elements, ComposedEffectParameterSchema<Elements, Parameters>>;
 }

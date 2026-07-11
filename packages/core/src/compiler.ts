@@ -2,6 +2,7 @@ import {
   resolveAttributeSchema,
   resolvePackedAttributeAddress,
   resolveTslStorageType,
+  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
 } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
@@ -142,9 +143,9 @@ export interface CompiledUniformDescription {
 export interface CompiledEmitterMeta {
   readonly backendBudgets: {
     readonly webgl2: {
-      readonly defaultSpawnVaryingLimit: 4;
-      readonly spawnVaryingCount: number;
-      readonly spawnVaryings: readonly string[];
+      readonly defaultInitializeVaryingLimit: 4;
+      readonly initializeVaryingCount: number;
+      readonly initializeVaryings: readonly string[];
     };
     readonly webgpu: {
       readonly defaultVertexStorageBufferLimit: 8;
@@ -2534,25 +2535,31 @@ function createBuildKernels(
       }
       const varyingLimit =
         adapter.deviceLimits?.maxTransformFeedbackSeparateAttribs ??
-        program.meta.backendBudgets.webgl2.defaultSpawnVaryingLimit;
-      if (program.meta.backendBudgets.webgl2.spawnVaryingCount > varyingLimit) {
+        program.meta.backendBudgets.webgl2.defaultInitializeVaryingLimit;
+      if (program.meta.backendBudgets.webgl2.initializeVaryingCount > varyingLimit) {
         buildDiagnostics.push({
           code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
           hint: 'Use the WebGPU backend. WebGL2 lifecycle spawning will be revisited with a packed transform-feedback layout.',
-          message: `WebGL2 spawn/init requires ${program.meta.backendBudgets.webgl2.spawnVaryingCount} transform-feedback varyings (${program.meta.backendBudgets.webgl2.spawnVaryings.join(', ')}), but the backend limit is ${varyingLimit}.`,
-          path: 'meta.backendBudgets.webgl2.spawnVaryingCount',
+          message: `WebGL2 initialize writes ${program.meta.backendBudgets.webgl2.initializeVaryingCount} physical transform-feedback varyings (${program.meta.backendBudgets.webgl2.initializeVaryings.join(', ')}), but the backend limit is ${varyingLimit}.`,
+          path: 'meta.backendBudgets.webgl2.initializeVaryingCount',
           phase: 'compile',
           severity: 'error',
         });
       }
-      for (const varying of program.meta.backendBudgets.webgl2.spawnVaryings) {
-        const attribute = program.attributeSchema.byName[varying.slice('Particles.'.length)];
-        if (!attribute || attribute.components <= 4) continue;
+      for (const storage of program.attributeSchema.storageArrays) {
+        const components = TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type];
+        if (components <= 4) continue;
+        const attribute =
+          storage.attributes.length === 1
+            ? program.attributeSchema.byName[storage.attributes[0]!]
+            : undefined;
         buildDiagnostics.push({
           code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
           hint: 'Use the WebGPU backend. WebGL2 SEPARATE_ATTRIBS varyings may contain at most four components.',
-          message: `WebGL2 spawn/init varying ${varying} has ${attribute.components} components (${attribute.logicalType}), exceeding the per-varying SEPARATE_ATTRIBS limit of 4.`,
-          path: `attributeSchema.byName.${attribute.name}.components`,
+          message: `WebGL2 initialize varying Particles.${storage.name} has ${components} physical components (${storage.type}), exceeding the per-varying SEPARATE_ATTRIBS limit of 4.`,
+          path: attribute
+            ? `attributeSchema.byName.${attribute.name}.components`
+            : `attributeSchema.storageArrays.${storage.index}.type`,
           phase: 'compile',
           severity: 'error',
         });
@@ -3049,9 +3056,30 @@ function createBuildKernels(
 
     const initialize = adapter
       .fn(() => {
+        for (const attribute of program.attributeSchema.attributes) {
+          const components = attribute.components;
+          const resetValue =
+            attribute.logicalType === 'bool'
+              ? false
+              : components === 1
+                ? 0
+                : Array.from({ length: components }, () => 0);
+          writeAttribute(
+            attribute.name,
+            adapter.constant(resetValue, attribute.logicalType),
+            adapter.instanceIndex,
+          );
+        }
         writeAttribute('alive', adapter.constant(false, 'bool'));
         writeAttribute('spawnGeneration', adapter.constant(0, 'u32'));
-        if (hasSpawnOrder) writeAttribute('spawnOrder', adapter.constant(0, 'u32'));
+        if (hasSpawnOrder) {
+          writeAttribute('spawnOrder', adapter.constant(0, 'u32'));
+          writeLifecycle(
+            stateLayout.fields.birthIndices.offsetWords,
+            adapter.uint(0xffff_ffff),
+            adapter.instanceIndex,
+          );
+        }
         writeLifecycle(
           stateLayout.fields.freeList.offsetWords,
           adapter.uint(adapter.instanceIndex),
@@ -3592,15 +3620,9 @@ export function compileEmitter<
     },
   } as const;
   const uniforms = uniformDescriptions(definition.parameters, options);
-  const webgl2SpawnVaryings = [
-    ...new Set([
-      ...initModules.flatMap(({ access }) =>
-        access.writes.filter((path) => path.startsWith('Particles.')),
-      ),
-      'Particles.alive',
-      'Particles.spawnGeneration',
-    ]),
-  ].sort();
+  const webgl2InitializeVaryings = attributeSchema.storageArrays.map(
+    ({ name }) => `Particles.${name}`,
+  );
   const lifecycleLayout = lifecycleStorageLayout(
     definition.capacity,
     attributeSchema.byName.spawnOrder !== undefined,
@@ -3702,9 +3724,9 @@ export function compileEmitter<
   const meta: CompiledEmitterMeta = {
     backendBudgets: {
       webgl2: {
-        defaultSpawnVaryingLimit: 4,
-        spawnVaryingCount: webgl2SpawnVaryings.length,
-        spawnVaryings: webgl2SpawnVaryings,
+        defaultInitializeVaryingLimit: 4,
+        initializeVaryingCount: webgl2InitializeVaryings.length,
+        initializeVaryings: webgl2InitializeVaryings,
       },
       webgpu: {
         defaultVertexStorageBufferLimit: 8,

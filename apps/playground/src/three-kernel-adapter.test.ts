@@ -516,6 +516,34 @@ describe('three kernel adapter', () => {
     expect(drawRecord).toEqual([6, 0, 0, 0, 0]);
   });
 
+  it('zeros the draw indirect instance count when kernels enter the effect pool', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 4 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const renderer = {
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return new ArrayBuffer(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    const indirect = kernels.drawIndirect!.indirectResource as THREE.IndirectStorageBufferAttribute;
+    const instanceCountOffset =
+      kernels.drawIndirectOffsetBytes! / Uint32Array.BYTES_PER_ELEMENT + 1;
+    (indirect.array as Uint32Array)[instanceCountOffset] = 4;
+
+    runtime.prepareKernelsForPooling?.(kernels);
+
+    expect((indirect.array as Uint32Array)[instanceCountOffset]).toBe(0);
+    expect(indirect.updateRanges).toContainEqual({ count: 1, start: instanceCountOffset });
+  });
+
   it('keeps the first materialize-to-render indirect record fully defined', () => {
     const program = compileEmitter(
       defineEmitter({

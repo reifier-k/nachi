@@ -1435,11 +1435,25 @@ describe('emitter kernel compiler', () => {
     expect(built.spawnDispatch).toBeUndefined();
   });
 
-  it('rejects WebGL2 burst lifecycle kernels that exceed the transform-feedback budget', () => {
-    const program = compileEmitter(baseEmitter({ init: [lifetime(1)], integration: 'none' }));
+  it('rejects WebGL2 initialize when all physical attribute buffers exceed the TF budget', () => {
+    const zero4 = [0, 0, 0, 0] as const;
+    const program = compileEmitter(
+      defineEmitter({
+        attributes: {
+          customA: attribute('customA', { default: zero4, type: 'vec4' }),
+          customB: attribute('customB', { default: zero4, type: 'vec4' }),
+          customC: attribute('customC', { default: zero4, type: 'vec4' }),
+        },
+        capacity: 8,
+        init: [lifetime(1)],
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    );
     expect(program.meta.backendBudgets.webgl2).toMatchObject({
-      defaultSpawnVaryingLimit: 4,
-      spawnVaryingCount: 5,
+      defaultInitializeVaryingLimit: 4,
+      initializeVaryingCount: 5,
     });
 
     let caught: unknown;
@@ -1462,7 +1476,7 @@ describe('emitter kernel compiler', () => {
     expect(caught instanceof VfxDiagnosticError ? caught.diagnostics : []).toContainEqual(
       expect.objectContaining({
         code: 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
-        path: 'meta.backendBudgets.webgl2.spawnVaryingCount',
+        path: 'meta.backendBudgets.webgl2.initializeVaryingCount',
       }),
     );
   });

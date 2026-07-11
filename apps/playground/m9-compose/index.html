@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>nachi — M9 composition smoke</title>
+  </head>
+  <body>
+    <main>
+      <section class="hud" aria-label="M9 composition smoke status">
+        <p class="eyebrow">M9 · composition batch 1</p>
+        <h1>Inheritance · User.* · Pool</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing</dd>
+          </div>
+        </dl>
+        <p class="scope">GPU storage readback · deterministic respawn · offscreen visual</p>
+      </section>
+      <canvas id="compose-visual" width="256" height="128"></canvas>
+    </main>
+    <script type="module" src="/src/m9-compose.ts"></script>
+  </body>
+</html>

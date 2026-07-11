@@ -1,5 +1,6 @@
 import {
   VFXSystem,
+  attribute,
   burst,
   defineEffect,
   defineEmitter,
@@ -122,6 +123,26 @@ function smokeEffect(options: {
         },
         render: computeRender,
         spawn: options.spawn,
+      }),
+    },
+  });
+}
+
+function webglInitializeBudgetEffect() {
+  const zero4 = [0, 0, 0, 0] as const;
+  return defineEffect({
+    elements: {
+      particles: defineEmitter({
+        attributes: {
+          customA: attribute('customA', { default: zero4, type: 'vec4' }),
+          customB: attribute('customB', { default: zero4, type: 'vec4' }),
+          customC: attribute('customC', { default: zero4, type: 'vec4' }),
+        },
+        capacity: 8,
+        init: [lifetime(1)],
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 1 }),
       }),
     },
   });
@@ -490,9 +511,7 @@ async function runSmoke(): Promise<void> {
   if (!backend.isWebGPUBackend) {
     statusValue.textContent = 'Verifying the WebGL2 lifecycle varying-budget diagnostic…';
     const diagnosticSystem = new VFXSystem(runtimeRenderer);
-    const diagnosed = diagnosticSystem.spawn(
-      smokeEffect({ capacity: 8, lifetimeSeconds: 1, spawn: burst({ count: 1 }) }),
-    );
+    const diagnosed = diagnosticSystem.spawn(webglInitializeBudgetEffect());
     const diagnostic = diagnosed.diagnostics.find(
       ({ code }) => code === 'NACHI_BACKEND_SPAWN_UNSUPPORTED',
     );

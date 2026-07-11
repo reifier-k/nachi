@@ -619,6 +619,36 @@ export interface EmitterDefinition<
   readonly kind: 'emitter';
 }
 
+export type EmitterModuleSelector = number | string;
+
+/**
+ * Declarative patch for an inherited ordered module stack. `merge` is the default: labeled child
+ * modules replace the same label and unlabeled child modules replace the same normalized index.
+ */
+export interface EmitterModuleListOverride<Module extends ModuleDefinition<ModuleStage, object>> {
+  readonly mode?: 'append' | 'merge' | 'replace';
+  readonly modules?: readonly Module[];
+  readonly order?: readonly EmitterModuleSelector[];
+  readonly remove?: readonly EmitterModuleSelector[];
+}
+
+export interface EmitterOverrideConfig<
+  Attributes extends AttributeSchema = AttributeSchema,
+  Parameters extends ParameterSchema = EmptyParameterSchema,
+> {
+  readonly attributes?: Attributes;
+  readonly capacity?: number;
+  readonly events?: Partial<Record<ParticleEventName, EventModule | readonly EventModule[]>>;
+  readonly init?: EmitterModuleListOverride<InitModule>;
+  readonly integration?: EmitterIntegration;
+  readonly lifecycle?: EmitterLifecycle;
+  readonly parameters?: Parameters;
+  readonly render?: EmitterModuleListOverride<RenderModule>;
+  /** Spawn policy is replaced as a unit; it is not a particle module-stack inheritance patch. */
+  readonly spawn?: SpawnModule | readonly SpawnModule[];
+  readonly update?: EmitterModuleListOverride<UpdateModule>;
+}
+
 export interface VisualElementDefinition<Config extends object = object> {
   readonly config: Readonly<Config>;
   readonly kind: 'visual-element';
@@ -687,6 +717,55 @@ export interface EffectDefinition<
 > extends EffectConfig<Elements, Parameters> {
   readonly kind: 'effect';
 }
+
+type UnionToIntersection<Union> = (Union extends unknown ? (value: Union) => void : never) extends (
+  value: infer Intersection,
+) => void
+  ? Intersection
+  : never;
+
+type ElementParameterUnion<Elements extends EffectElements> = {
+  [Key in keyof Elements]: Elements[Key] extends {
+    readonly kind: 'emitter';
+    readonly parameters?: infer Parameters;
+  }
+    ? Parameters extends ParameterSchema
+      ? Parameters
+      : never
+    : never;
+}[keyof Elements];
+
+type ElementParameterSchema<Elements extends EffectElements> = [
+  ElementParameterUnion<Elements>,
+] extends [never]
+  ? EmptyParameterSchema
+  : UnionToIntersection<ElementParameterUnion<Elements>>;
+
+/** Effect declarations override compatible child declarations; child-only User.* paths are lifted. */
+export type ComposedEffectParameterSchema<
+  Elements extends EffectElements,
+  Parameters extends ParameterSchema,
+> = Readonly<{
+  [Path in Extract<
+    | keyof Parameters
+    | {
+        [Key in keyof ElementParameterSchema<Elements>]: [
+          ElementParameterSchema<Elements>[Key],
+        ] extends [never]
+          ? never
+          : Key;
+      }[keyof ElementParameterSchema<Elements>],
+    ParameterPath
+  >]: Path extends keyof Parameters
+    ? Parameters[Path] extends ParameterDefinition
+      ? Parameters[Path]
+      : never
+    : Path extends keyof ElementParameterSchema<Elements>
+      ? ElementParameterSchema<Elements>[Path] extends ParameterDefinition
+        ? ElementParameterSchema<Elements>[Path]
+        : never
+      : never;
+}>;
 
 export type DefinitionParameterSchema<Definition> = Definition extends {
   readonly parameters?: infer Parameters;

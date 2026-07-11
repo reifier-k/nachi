@@ -37,6 +37,7 @@ import type {
 } from './types.js';
 
 const DEFAULT_MAX_SUB_STEPS = 8;
+const DEFAULT_MAX_POOL_SIZE = 16;
 const DEFAULT_PREWARM_STEP_SECONDS = 1 / 60;
 const TIME_EPSILON = 1e-10;
 export const SPAWN_ORDER_WRAP_WARNING_THRESHOLD = 0x8000_0000;
@@ -57,6 +58,8 @@ export interface VfxDeviceLossInfo {
 export interface VfxRuntimeRenderer {
   readonly deviceLost?: Promise<VfxDeviceLossInfo>;
   readonly kernelAdapter: KernelTslAdapter;
+  /** Synchronously makes retained kernels non-drawable before ownership moves into the pool. */
+  prepareKernelsForPooling?(kernels: BuiltEmitterKernels): void;
   readStorage?(storage: BuiltEmitterKernels['aliveCount']): Promise<ArrayBuffer>;
   releaseKernels?(kernels: BuiltEmitterKernels): void;
   setUniformValue?(uniform: KernelUniformNode, path: ParameterPath, value: unknown): void;
@@ -77,6 +80,8 @@ export interface VfxSystemOptions {
   /** Read exact GPU alive count every N compactions; omitted keeps conservative draining. */
   readonly aliveCountReadbackInterval?: number;
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
+  /** Maximum released resource bundles retained per effect definition. Defaults to 16. */
+  readonly maxPoolSize?: number;
   readonly now?: () => number;
   readonly prewarmStepSeconds?: number;
   /** Module/render compiler registrations supplied by optional packages. */
@@ -397,6 +402,14 @@ type CompiledEffect = {
   }[];
 };
 
+type PooledEffectResources = {
+  readonly kernelsByEmitter: ReadonlyMap<string, BuiltEmitterKernels>;
+};
+
+type EffectResourcePool = {
+  readonly resources: PooledEffectResources[];
+};
+
 type RuntimeEffectDefinition = {
   readonly elements: EffectElements;
   readonly kind: 'effect';
@@ -689,6 +702,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     eventOutputs: Readonly<Record<string, EventQueueResources>> = {},
     eventInputs: readonly EventInputBinding[] = [],
     onEventAggregate: (summary: EffectEventSummary) => void = () => undefined,
+    reusedKernels?: BuiltEmitterKernels,
   ) {
     this.program = program;
     this.#renderer = renderer;
@@ -700,7 +714,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#onDiagnostic = onDiagnostic;
     this.#onEventAggregate = onEventAggregate;
     this.controller = new EmitterLifecycleController(definition.lifecycle);
-    this.kernels = program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
+    this.kernels =
+      reusedKernels ?? program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', transform);
     for (const [path, value] of Object.entries(parameters)) {
@@ -780,6 +795,15 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
 
   release(): void {
     this.#renderer.releaseKernels?.(this.kernels);
+  }
+
+  detachKernels(): BuiltEmitterKernels {
+    return this.kernels;
+  }
+
+  prepareForPooling(): void {
+    this.#renderer.setInstanceCount?.(this.kernels, 0);
+    this.#renderer.prepareKernelsForPooling?.(this.kernels);
   }
 
   async prepareEventFrame(writeBank: 0 | 1): Promise<void> {
@@ -1125,6 +1149,16 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   }
 }
 
+type ReleasableEffectInstance = {
+  readonly definition: RuntimeEffectDefinition;
+  readonly id: string;
+  detachEmitterKernels(): ReadonlyMap<string, BuiltEmitterKernels>;
+  recordDiagnostic(diagnostic: VfxDiagnostic): void;
+  recordReleaseDiagnostic(diagnostic: VfxDiagnostic): void;
+  releaseEmitterKernels(): void;
+  takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels>;
+};
+
 export class VfxEffectInstance<
   Definition extends RuntimeEffectDefinition = RuntimeEffectDefinition,
 > implements EffectInstance<Definition> {
@@ -1133,7 +1167,7 @@ export class VfxEffectInstance<
   readonly #diagnosticCodes = new Set<string>();
   readonly #emitters = new Map<string, RuntimeEmitter>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
-  readonly #onRelease: (id: string) => void;
+  readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
   readonly #parameterDefinitions: ParameterSchema;
   #state: EffectInstanceState = 'active';
   #eventFrame = 0;
@@ -1148,7 +1182,7 @@ export class VfxEffectInstance<
     readonly id: string,
     timeScale: number,
     parameterDefinitions: ParameterSchema,
-    onRelease: (id: string) => void,
+    onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void,
   ) {
     this.clock = new EffectClock(timeScale);
     this.#parameterDefinitions = parameterDefinitions;
@@ -1228,11 +1262,33 @@ export class VfxEffectInstance<
 
   release(): void {
     if (this.#state === 'released') return;
+    const poolable = this.#state !== 'error';
+    this.#eventListeners.clear();
+    this.#onRelease(this, poolable);
+    this.#state = 'released';
+  }
+
+  /** @internal Transfers materialized resources to VFXSystem's pool without exposing them publicly. */
+  detachEmitterKernels(): ReadonlyMap<string, BuiltEmitterKernels> {
+    const kernels = new Map(
+      [...this.#emitters.entries()].map(
+        ([key, emitter]) => [key, emitter.detachKernels()] as const,
+      ),
+    );
+    this.#emitters.clear();
+    return kernels;
+  }
+
+  /** @internal Retires renderer-visible draw state before transferring kernels into the pool. */
+  takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels> {
+    for (const emitter of this.#emitters.values()) emitter.prepareForPooling();
+    return this.detachEmitterKernels();
+  }
+
+  /** @internal Releases materialized resources when this instance cannot enter the pool. */
+  releaseEmitterKernels(): void {
     for (const emitter of this.#emitters.values()) emitter.release();
     this.#emitters.clear();
-    this.#eventListeners.clear();
-    this.#state = 'released';
-    this.#onRelease(this.id);
   }
 
   setParameter<Path extends UserParameterKeys<Definition>>(
@@ -1280,6 +1336,11 @@ export class VfxEffectInstance<
 
   recordDiagnostic(diagnostic: VfxDiagnostic): void {
     if (this.#state !== 'released') this.#diagnostics.push(diagnostic);
+  }
+
+  /** @internal Pool-limit diagnostics may be finalized after an in-flight update becomes safe. */
+  recordReleaseDiagnostic(diagnostic: VfxDiagnostic): void {
+    this.#diagnostics.push(diagnostic);
   }
 
   recordDiagnosticOnce(diagnostic: VfxDiagnostic): void {
@@ -1368,9 +1429,11 @@ function effectParameters(
 export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #aliveCountReadbackInterval: number | undefined;
   readonly #compiledEffects = new WeakMap<RuntimeEffectDefinition, CompiledEffect>();
+  readonly #effectPools = new WeakMap<RuntimeEffectDefinition, EffectResourcePool>();
   readonly #fixedStep: FixedStepAccumulator | undefined;
   readonly #instances = new Map<string, VfxEffectInstance<RuntimeEffectDefinition>>();
   readonly #now: () => number;
+  readonly #maxPoolSize: number;
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
   #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
@@ -1381,6 +1444,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   #lastTimestamp?: number;
   #systemTime = 0;
   #updateQueue: Promise<void> = Promise.resolve();
+  #updateInFlight = false;
 
   constructor(
     readonly renderer: Renderer,
@@ -1389,6 +1453,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   ) {
     this.#aliveCountReadbackInterval = options.aliveCountReadbackInterval;
     this.#registry = options.registry;
+    this.#maxPoolSize = options.maxPoolSize ?? DEFAULT_MAX_POOL_SIZE;
+    if (!Number.isSafeInteger(this.#maxPoolSize) || this.#maxPoolSize < 0) {
+      throw new RangeError('maxPoolSize must be a non-negative safe integer.');
+    }
     if (
       this.#aliveCountReadbackInterval !== undefined &&
       (!Number.isSafeInteger(this.#aliveCountReadbackInterval) ||
@@ -1430,6 +1498,13 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     return this.#instances.size;
   }
 
+  getPooledInstanceCount<
+    const Elements extends EffectElements,
+    const Parameters extends ParameterSchema,
+  >(definition: EffectDefinition<Elements, Parameters>): number {
+    return this.#effectPools.get(definition as RuntimeEffectDefinition)?.resources.length ?? 0;
+  }
+
   get time(): number {
     return this.#systemTime;
   }
@@ -1460,7 +1535,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       id,
       options.timeScale ?? 1,
       parameterDefinitions,
-      (releasedId) => this.#instances.delete(releasedId),
+      (releasedInstance, poolable) => this.#releaseInstance(releasedInstance, poolable),
     );
     this.#instances.set(id, instance);
 
@@ -1469,17 +1544,21 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       return instance;
     }
 
+    let pooled: PooledEffectResources | undefined;
+    let runtimeRenderer: VfxRuntimeRenderer | undefined;
     try {
       const parameterDiagnostics = validateSpawnParameterOverrides(
         parameterDefinitions,
         options.parameters as Readonly<Record<string, unknown>> | undefined,
       );
       if (parameterDiagnostics.length > 0) throw new VfxDiagnosticError(parameterDiagnostics);
-      const runtimeRenderer = asRuntimeRenderer(this.renderer);
+      runtimeRenderer = asRuntimeRenderer(this.renderer);
       if (!runtimeRenderer) {
         throw new Error('VFXSystem renderer must provide kernelAdapter and submitCompute().');
       }
+      const materializationRenderer = runtimeRenderer;
       const compiled = this.#compile(definition);
+      pooled = this.#takePooledResources(definition);
       const usesSceneDepth = compiled.emitters.some(({ program }) =>
         program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth'),
       );
@@ -1494,45 +1573,64 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       );
       const transform = transformMatrix(options.position, options.rotation);
       const eventResources = new Map<string, Readonly<Record<string, EventQueueResources>>>();
-      for (const entry of compiled.emitters) {
-        eventResources.set(
-          entry.key,
-          Object.fromEntries(
-            entry.program.events.map((queue) => [
-              queue.eventName,
-              allocateEventQueueResources(runtimeRenderer.kernelAdapter, queue, entry.key),
-            ]),
-          ),
-        );
+      if (!pooled) {
+        for (const entry of compiled.emitters) {
+          eventResources.set(
+            entry.key,
+            Object.fromEntries(
+              entry.program.events.map((queue) => [
+                queue.eventName,
+                allocateEventQueueResources(
+                  materializationRenderer.kernelAdapter,
+                  queue,
+                  entry.key,
+                ),
+              ]),
+            ),
+          );
+        }
       }
       for (const [index, entry] of compiled.emitters.entries()) {
         const seed = ((options.seed ?? 0) ^ hashModuleLabel(entry.key) ^ index) >>> 0;
         const runtimeEmitter = new RuntimeEmitter(
           entry.definition,
           entry.program,
-          runtimeRenderer,
+          materializationRenderer,
           seed,
           transform,
           parameters,
           entry.maxLifetime,
           this.#aliveCountReadbackInterval,
           (diagnostic) => instance.recordDiagnostic(diagnostic),
-          eventResources.get(entry.key),
-          compiled.eventLinks
-            .filter(({ targetKey }) => targetKey === entry.key)
-            .map(({ handler, queue, sourceKey }) => {
-              const resources = eventResources.get(sourceKey)?.[queue.eventName];
-              if (!resources) {
-                throw new Error(`Event resources for ${sourceKey}.${queue.eventName} are missing.`);
-              }
-              return { handler, queue, resources, sourceKey };
-            }),
+          pooled ? {} : eventResources.get(entry.key),
+          pooled
+            ? []
+            : compiled.eventLinks
+                .filter(({ targetKey }) => targetKey === entry.key)
+                .map(({ handler, queue, sourceKey }) => {
+                  const resources = eventResources.get(sourceKey)?.[queue.eventName];
+                  if (!resources) {
+                    throw new Error(
+                      `Event resources for ${sourceKey}.${queue.eventName} are missing.`,
+                    );
+                  }
+                  return { handler, queue, resources, sourceKey };
+                }),
           (summary) => instance.emitEventSummary(summary),
+          pooled?.kernelsByEmitter.get(entry.key),
         );
         runtimeEmitter.setCamera(this.#cameraState);
         instance.addEmitter(entry.key, runtimeEmitter);
       }
     } catch (error) {
+      const kernelsToRelease = new Set<BuiltEmitterKernels>();
+      for (const kernels of pooled?.kernelsByEmitter.values() ?? []) {
+        kernelsToRelease.add(kernels);
+      }
+      for (const kernels of instance.detachEmitterKernels().values()) {
+        kernelsToRelease.add(kernels);
+      }
+      for (const kernels of kernelsToRelease) runtimeRenderer?.releaseKernels?.(kernels);
       const diagnostics =
         error instanceof VfxDiagnosticError
           ? error.diagnostics
@@ -1551,31 +1649,36 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const delta = deltaSeconds ?? this.#measuredDelta();
     requireNonNegativeFinite(delta, 'deltaSeconds');
     const run = async () => {
-      for (const instance of this.#instances.values()) {
-        if (instance.usesSceneDepth && !this.#cameraConfigured) {
-          instance.recordDiagnosticOnce(
-            runtimeDiagnostic(
-              'NACHI_SCENE_DEPTH_CAMERA_UNSET',
-              'collideSceneDepth() is using identity camera uniforms because VFXSystem.setCamera() was not called before the first update.',
-              'System.projectionMatrix',
-              'warning',
-            ),
-          );
-        }
-        instance.syncAttachment();
-        await this.#advanceInstance(instance, () =>
-          instance.initialize(this.#systemTime, this.#prewarmStepSeconds),
-        );
-      }
-      const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
-      for (const step of steps) {
-        this.#systemTime += step;
+      this.#updateInFlight = true;
+      try {
         for (const instance of this.#instances.values()) {
+          if (instance.usesSceneDepth && !this.#cameraConfigured) {
+            instance.recordDiagnosticOnce(
+              runtimeDiagnostic(
+                'NACHI_SCENE_DEPTH_CAMERA_UNSET',
+                'collideSceneDepth() is using identity camera uniforms because VFXSystem.setCamera() was not called before the first update.',
+                'System.projectionMatrix',
+                'warning',
+              ),
+            );
+          }
           instance.syncAttachment();
           await this.#advanceInstance(instance, () =>
-            instance.advance(step, this.#systemTime, this.#prewarmStepSeconds),
+            instance.initialize(this.#systemTime, this.#prewarmStepSeconds),
           );
         }
+        const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
+        for (const step of steps) {
+          this.#systemTime += step;
+          for (const instance of this.#instances.values()) {
+            instance.syncAttachment();
+            await this.#advanceInstance(instance, () =>
+              instance.advance(step, this.#systemTime, this.#prewarmStepSeconds),
+            );
+          }
+        }
+      } finally {
+        this.#updateInFlight = false;
       }
     };
     const scheduled = this.#updateQueue.then(run, run);
@@ -1694,6 +1797,45 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     this.#compiledEffects.set(definition, compiled);
     this.#compilationCount += 1;
     return compiled;
+  }
+
+  #takePooledResources(definition: RuntimeEffectDefinition): PooledEffectResources | undefined {
+    const pool = this.#effectPools.get(definition);
+    return pool?.resources.pop();
+  }
+
+  #releaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
+    this.#instances.delete(instance.id);
+    if (this.#updateInFlight) {
+      void this.#updateQueue.then(
+        () => this.#retainOrReleaseInstance(instance, poolable),
+        () => this.#retainOrReleaseInstance(instance, poolable),
+      );
+      return;
+    }
+    this.#retainOrReleaseInstance(instance, poolable);
+  }
+
+  #retainOrReleaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
+    const definition = instance.definition;
+    const pool = this.#effectPools.get(definition) ?? { resources: [] };
+    if (!poolable || this.#maxPoolSize === 0 || pool.resources.length >= this.#maxPoolSize) {
+      if (poolable && pool.resources.length >= this.#maxPoolSize && this.#maxPoolSize > 0) {
+        instance.recordReleaseDiagnostic({
+          code: 'NACHI_EFFECT_POOL_LIMIT_EXCEEDED',
+          message: `Effect pool limit ${this.#maxPoolSize} was reached; released GPU resources were disposed instead of retained.`,
+          path: 'VFXSystem.maxPoolSize',
+          phase: 'runtime',
+          severity: 'warning',
+        });
+      }
+      instance.releaseEmitterKernels();
+      return;
+    }
+    const kernelsByEmitter = instance.takeEmitterKernelsForPooling();
+    if (kernelsByEmitter.size === 0) return;
+    pool.resources.push({ kernelsByEmitter });
+    this.#effectPools.set(definition, pool);
   }
 
   #measuredDelta(): number {

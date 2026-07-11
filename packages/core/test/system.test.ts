@@ -691,7 +691,8 @@ describe('VFXSystem runtime scheduler', () => {
     stopped.release();
     expect(stopped.state).toBe('released');
     expect(system.instanceCount).toBe(0);
-    expect((system.renderer as FakeRuntimeRenderer).releaseCount).toBe(1);
+    expect((system.renderer as FakeRuntimeRenderer).releaseCount).toBe(0);
+    expect(system.getPooledInstanceCount(stopped.definition)).toBe(1);
   });
 
   it('turns submission failures into runtime diagnostics', async () => {
@@ -704,6 +705,9 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_GPU_SUBMISSION_FAILED', phase: 'runtime' }),
     );
+    instance.release();
+    expect(system.getPooledInstanceCount(instance.definition)).toBe(0);
+    expect(renderer.releaseCount).toBe(1);
   });
 
   it('rejects unregistered spawn modules through the unified registry', () => {
