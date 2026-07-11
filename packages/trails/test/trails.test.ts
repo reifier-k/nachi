@@ -15,13 +15,14 @@ function compileRibbon(
     uv: { mode: 'tiled', tileLength: 0.5 },
     width: 0.4,
   },
+  id: Parameters<typeof ribbonId>[0] = { count: 2, mode: 'alternating' },
 ) {
   const registry = registerTrails(createCoreKernelModuleRegistry());
   return compileEmitter(
     defineEmitter({
       attributes: { ribbonId: ribbonIdAttribute() },
       capacity: 16,
-      init: [lifetime(1), ribbonId({ count: 2, mode: 'alternating' })],
+      init: [lifetime(1), ribbonId(id)],
       integration: 'none',
       render: ribbon(options),
       spawn: burst({ count: 8 }),
@@ -64,6 +65,29 @@ describe('@nachi/trails renderer registration', () => {
         'NACHI_RIBBON_TILE_LENGTH_INVALID',
         'NACHI_RIBBON_WIDTH_INVALID',
       ]),
+    );
+  });
+
+  it('diagnoses an alternating ribbonId count that would divide by zero on the GPU', () => {
+    const program = compileRibbon(undefined, { count: 0, mode: 'alternating' });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_RIBBON_ID_COUNT_INVALID',
+        path: 'init[1].config.value.count',
+      }),
+    );
+  });
+
+  it('diagnoses invalid ribbon blending instead of silently using normal blending', () => {
+    const program = compileRibbon({ blending: 'screen' as never, width: 0.4 });
+
+    expect(program.draws).toEqual([]);
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_RIBBON_BLENDING_INVALID',
+        path: 'render[0].config.blending',
+      }),
     );
   });
 

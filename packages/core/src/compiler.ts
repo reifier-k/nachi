@@ -562,6 +562,7 @@ export interface KernelModuleImplementation {
   readonly build: (context: KernelModuleBuildContext) => void;
   readonly stage: CompiledKernelStage;
   readonly type: string;
+  readonly validate?: (context: KernelModuleValidationContext) => void;
   readonly version: number;
 }
 
@@ -569,7 +570,14 @@ export interface SpawnModuleImplementation {
   readonly access: ModuleAccess;
   readonly stage: 'spawn';
   readonly type: string;
+  readonly validate?: (context: KernelModuleValidationContext) => void;
   readonly version: number;
+}
+
+export interface KernelModuleValidationContext {
+  readonly module: CompiledKernelModule | CompiledSpawnModule;
+  readonly path: string;
+  diagnostic(code: string, message: string, path?: string, severity?: 'error' | 'warning'): void;
 }
 
 export interface RenderModuleCompileContext {
@@ -1235,6 +1243,13 @@ function validateModule(
       ),
     );
   }
+  implementation.validate?.({
+    diagnostic: (code, message, diagnosticPath = module.path, severity = 'error') => {
+      diagnostics.push(diagnostic(code, message, diagnosticPath, severity));
+    },
+    module,
+    path: module.path,
+  });
   return diagnostics;
 }
 
@@ -2357,6 +2372,20 @@ function compileLightDraws(
         ),
       );
     }
+    if (
+      options.priority !== undefined &&
+      options.priority !== 'intensity' &&
+      options.priority !== 'intensity-radius'
+    ) {
+      valid = false;
+      diagnostics.push(
+        diagnostic(
+          'NACHI_LIGHT_PRIORITY_INVALID',
+          'Light renderer priority must be "intensity" or "intensity-radius".',
+          `${path}.config.priority`,
+        ),
+      );
+    }
     if (!valid) continue;
     const attributes = ['alive', 'color', 'intensity', 'position', 'size'];
     const storageBuffers = rendererAttributeBuffers(schema, attributes);
@@ -2402,6 +2431,7 @@ function compileDecalDraws(
     if (module.stage !== 'render' || module.type !== 'core/decal-renderer') continue;
     const options = module.config as DecalRendererOptions;
     const sizeScale = options.sizeScale ?? 1;
+    let valid = true;
     if (!Number.isFinite(sizeScale) || sizeScale <= 0) {
       diagnostics.push(
         diagnostic(
@@ -2411,6 +2441,31 @@ function compileDecalDraws(
         ),
       );
     }
+    if (
+      options.blending !== undefined &&
+      options.blending !== 'alpha' &&
+      options.blending !== 'premultiplied'
+    ) {
+      valid = false;
+      diagnostics.push(
+        diagnostic(
+          'NACHI_DECAL_BLENDING_INVALID',
+          'Decal renderer blending must be "alpha" or "premultiplied".',
+          `${path}.config.blending`,
+        ),
+      );
+    }
+    if (options.fadeOverLife !== undefined && typeof options.fadeOverLife !== 'boolean') {
+      valid = false;
+      diagnostics.push(
+        diagnostic(
+          'NACHI_DECAL_FADE_OVER_LIFE_INVALID',
+          'Decal renderer fadeOverLife must be a boolean.',
+          `${path}.config.fadeOverLife`,
+        ),
+      );
+    }
+    if (!valid) continue;
     const attributes = ['color', 'normalizedAge', 'position', 'rotation', 'size'];
     const attributeBuffers = rendererAttributeBuffers(schema, attributes);
     if (!attributeBuffers) continue;

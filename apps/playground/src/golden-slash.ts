@@ -20,6 +20,7 @@ import {
   rate,
   sizeOverLife,
   velocityCone,
+  type EffectInstanceState,
   type Vec3,
   type VfxEmitterRuntimeView,
 } from '@nachi/core';
@@ -45,6 +46,19 @@ const WIDTH = 640;
 const HEIGHT = 400;
 const STEP = 1 / 60;
 const HIT: Vec3 = [0.72, -0.08, 0.08];
+const root = document.documentElement;
+const headless = new URLSearchParams(location.search).get('headless') === '1';
+const consoleMessages: string[] = [];
+const originalWarn = console.warn.bind(console);
+const originalError = console.error.bind(console);
+console.warn = (...values: unknown[]) => {
+  consoleMessages.push(`warning: ${values.map(String).join(' ')}`);
+  originalWarn(...values);
+};
+console.error = (...values: unknown[]) => {
+  consoleMessages.push(`error: ${values.map(String).join(' ')}`);
+  originalError(...values);
+};
 
 type BackendLike = {
   device?: {
@@ -58,6 +72,7 @@ type BackendLike = {
 type RuntimeInstance = {
   attachTo(source: ReturnType<typeof createThreeTransformSource>): void;
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+  readonly state: EffectInstanceState;
 };
 
 function required<ElementType extends Element>(selector: string): ElementType {
@@ -139,8 +154,6 @@ async function probePointLights(
 }
 
 async function run(): Promise<void> {
-  const root = document.documentElement;
-  const headless = new URLSearchParams(location.search).get('headless') === '1';
   root.dataset.spikeStatus = 'running';
   root.dataset.rendererStatus = 'initializing';
   root.dataset.goldenScope = JSON.stringify({
@@ -149,7 +162,7 @@ async function run(): Promise<void> {
     M9: ['hit-stop', 'shake'],
     M10: 'post-distortion',
   });
-  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: true });
+  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: false });
   renderer.setPixelRatio(1);
   renderer.setSize(WIDTH, HEIGHT);
   await renderer.init();
@@ -258,6 +271,52 @@ async function run(): Promise<void> {
     spawn: burst({ count: 1 }),
     update: [colorOverLife(gradient('#d9f8ff', '#5d7dff'))],
   });
+  const measureGpuPerformance = async () => {
+    const performanceRenderer = await createPlaygroundRenderer({
+      antialias: false,
+      trackTimestamp: true,
+    });
+    performanceRenderer.setSize(32, 32);
+    await performanceRenderer.init();
+    const performanceBackend = performanceRenderer.backend as BackendLike;
+    if (!performanceBackend.isWebGPUBackend) {
+      throw new Error('Golden slash performance capture requires WebGPU.');
+    }
+    const performanceAdapter = createThreeKernelAdapter({
+      backend: 'webgpu',
+      linearFloat32Filtering:
+        performanceBackend.device?.features?.has('float32-filterable') === true,
+      ...(performanceBackend.device?.limits?.maxStorageBuffersPerShaderStage === undefined
+        ? {}
+        : {
+            maxStorageBuffersPerShaderStage:
+              performanceBackend.device.limits.maxStorageBuffersPerShaderStage,
+          }),
+    });
+    const performanceRuntime = createThreeRuntimeRenderer(
+      performanceRenderer,
+      performanceAdapter,
+      performanceBackend.device?.lost,
+    );
+    const performanceMonitor = createPerformanceMonitor(performanceRenderer, {
+      gpuScopes: ['compute', 'render'],
+      mode: headless ? 'headless' : 'visual',
+      page: 'golden-slash',
+    });
+    const performanceSystem = new VFXSystem(performanceRuntime, undefined, {
+      fixedTimeStep: { stepSeconds: STEP },
+    });
+    performanceSystem.spawn(defineEffect({ elements: { flash: lightDefinition } }), {
+      seed: 7199,
+    });
+    await performanceSystem.update(0);
+    await performanceMonitor.resolveGpuTimestamps();
+    await performanceSystem.update(STEP);
+    await performanceMonitor.resolveGpuTimestamps();
+    const pointLightProbe = await probePointLights(performanceRenderer, camera);
+    performanceMonitor.publish();
+    return pointLightProbe;
+  };
   const trailSystem = new VFXSystem(runtime, undefined, {
     fixedTimeStep: { stepSeconds: STEP },
     registry,
@@ -446,18 +505,17 @@ async function run(): Promise<void> {
   const visualPixels = await renderVisual();
   renderer.setRenderTarget(null);
   const foregroundRatio = paint(required<HTMLCanvasElement>('#golden-slash'), visualPixels);
-  const pointLightProbe = await probePointLights(renderer, camera);
-  await lightDraw.update(renderer, 'completed');
+  const pointLightProbe = await measureGpuPerformance();
+  for (let frame = 0; frame < 60 && lightInstance.state === 'active'; frame += 1) {
+    await lightSystem.update(STEP);
+  }
+  await lightDraw.update(renderer, lightInstance.state);
   const lightPoolDisposed =
-    lightDraw.group.parent === null && lightDraw.lights.every(({ intensity }) => intensity === 0);
-  const performance = createPerformanceMonitor(renderer, {
-    gpuScopes: ['compute', 'render'],
-    mode: headless ? 'headless' : 'visual',
-    page: 'golden-slash',
-  });
-  await performance.resolveGpuTimestamps();
-  performance.publish();
+    lightInstance.state === 'complete' &&
+    lightDraw.group.parent === null &&
+    lightDraw.lights.every(({ intensity }) => intensity === 0);
   const validation = {
+    consoleClean: consoleMessages.length === 0,
     decalParticlePosition: decalPositionError < 0.0001,
     decalProjected: decalProjectedPixels > 100,
     fireSparksRendered: sparkForegroundPixels > 20,
@@ -473,13 +531,19 @@ async function run(): Promise<void> {
   };
   const result = {
     artifact: 'artifacts/golden-slash.png',
+    consoleMessages,
     decal: {
       expectedPixel: expectedDecalPixel,
       positionError: decalPositionError,
       projectedPixels: decalProjectedPixels,
       projection: 'scene-depth-world-reconstruction',
     },
-    light: { ...lightStats, positionError: lightPositionError, readbackLatencyFrames: 1 },
+    light: {
+      ...lightStats,
+      effectState: lightInstance.state,
+      positionError: lightPositionError,
+      readbackLatencyFrames: 1,
+    },
     lightSelection: 'gpu-top-n-intensity',
     ok: Object.values(validation).every(Boolean),
     pointLightProbe,

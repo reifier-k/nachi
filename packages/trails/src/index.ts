@@ -108,6 +108,16 @@ export function registerTrails(registry: KernelModuleRegistry): KernelModuleRegi
     },
     stage: 'init',
     type: 'trails/ribbon-id',
+    validate(context) {
+      const { value } = context.module.config as { readonly value: RibbonIdInput };
+      if (typeof value !== 'number' && (!Number.isSafeInteger(value.count) || value.count < 1)) {
+        context.diagnostic(
+          'NACHI_RIBBON_ID_COUNT_INVALID',
+          'Alternating ribbonId count must be a positive safe integer.',
+          `${context.path}.config.value.count`,
+        );
+      }
+    },
     version: 1,
   });
 
@@ -126,6 +136,20 @@ export function registerTrails(registry: KernelModuleRegistry): KernelModuleRegi
       const options = context.module.config as RibbonOptions;
       const maxRibbons = options.maxRibbons ?? 1;
       const taper = { end: options.taper?.end ?? 0.15, start: options.taper?.start ?? 0.15 };
+      if (
+        options.blending !== undefined &&
+        options.blending !== 'additive' &&
+        options.blending !== 'alpha' &&
+        options.blending !== 'multiply' &&
+        options.blending !== 'premultiplied'
+      ) {
+        context.diagnostic(
+          'NACHI_RIBBON_BLENDING_INVALID',
+          'Ribbon blending must be "additive", "alpha", "multiply", or "premultiplied".',
+          `${context.path}.config.blending`,
+        );
+        return undefined;
+      }
       if (!Number.isFinite(options.width) || options.width <= 0) {
         context.diagnostic(
           'NACHI_RIBBON_WIDTH_INVALID',

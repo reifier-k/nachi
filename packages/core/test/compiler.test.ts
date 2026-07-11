@@ -1062,6 +1062,25 @@ describe('emitter kernel compiler', () => {
     );
   });
 
+  it('diagnoses an invalid light selection priority instead of treating it as intensity', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: lightRenderer({ priority: 'distance' as never }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.draws).toEqual([]);
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_LIGHT_PRIORITY_INVALID',
+        path: 'render[0].config.priority',
+      }),
+    );
+  });
+
   it('compiles a depth-reconstructed decal and rejects missing depth capability', () => {
     const program = compileEmitter(
       defineEmitter({
@@ -1099,6 +1118,34 @@ describe('emitter kernel compiler', () => {
         sampleSceneDepth: () => new FakeNode(),
       }),
     ).not.toThrow();
+  });
+
+  it('diagnoses invalid decal blending and fade-over-life values', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: decalRenderer({
+          blending: 'additive' as never,
+          fadeOverLife: 'yes' as never,
+        }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+
+    expect(program.draws).toEqual([]);
+    expect(program.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'NACHI_DECAL_BLENDING_INVALID',
+          path: 'render[0].config.blending',
+        }),
+        expect.objectContaining({
+          code: 'NACHI_DECAL_FADE_OVER_LIFE_INVALID',
+          path: 'render[0].config.fadeOverLife',
+        }),
+      ]),
+    );
   });
 
   it('compiles each mesh orientation mode and diagnoses an invalid custom axis', () => {

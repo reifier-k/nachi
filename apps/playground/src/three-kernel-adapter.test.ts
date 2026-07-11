@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   billboard,
   bakeSdf,
@@ -28,6 +28,7 @@ import {
   vortex,
   createCoreKernelModuleRegistry,
 } from '@nachi/core';
+import type { EffectInstanceState } from '@nachi/core';
 import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
 import { materializeThreeRibbonDraw } from '@nachi/trails/three';
 import * as THREE from 'three/webgpu';
@@ -53,7 +54,7 @@ import {
 } from './three-kernel-adapter.js';
 
 describe('three kernel adapter', () => {
-  it('materializes a bounded PointLight pool and projection-box decal', () => {
+  it('materializes a bounded PointLight pool and projection-box decal', async () => {
     const lightProgram = compileEmitter(
       defineEmitter({
         capacity: 12,
@@ -70,9 +71,13 @@ describe('three kernel adapter', () => {
     expect(lightDraw.lights.every(({ intensity }) => intensity === 0)).toBe(true);
     expect(lightDraw.selectionBuffers).toHaveLength(2);
     expect(lightDraw.selectionKernels).toHaveLength(2);
+    expectTypeOf<Parameters<typeof lightDraw.update>[1]>().toEqualTypeOf<
+      EffectInstanceState | undefined
+    >();
     const lightScene = new THREE.Scene();
     lightScene.add(lightDraw.group);
-    lightDraw.dispose();
+    const completeState: EffectInstanceState = 'complete';
+    await lightDraw.update({} as THREE.WebGPURenderer, completeState);
     expect(lightDraw.group.parent).toBeNull();
     expect(lightDraw.lights.every(({ intensity }) => intensity === 0)).toBe(true);
 

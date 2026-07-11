@@ -36,6 +36,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m5-events/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-ambient/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m6-collision/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-character/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m7-ribbons/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/golden-slash/?backend=webgpu
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade

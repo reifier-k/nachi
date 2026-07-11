@@ -3,6 +3,7 @@ import type {
   BuiltEmitterKernels,
   CompiledDrawIndirectDescription,
   CompiledEmitterProgram,
+  EffectInstanceState,
   EffectTransformSource,
   GeometryRef,
   FieldRef,
@@ -1127,7 +1128,7 @@ export interface ThreeLightPoolDraw {
   readonly stats: ThreeLightSelectionStats;
   update(
     renderer: THREE.WebGPURenderer,
-    effectState?: 'active' | 'completed' | 'error' | 'released' | 'stopped',
+    effectState?: EffectInstanceState,
   ): Promise<ThreeLightSelectionStats>;
 }
 
