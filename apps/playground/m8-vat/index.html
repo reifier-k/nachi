@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nachi — Blender VAT runtime</title>
+  </head>
+  <body>
+    <main>
+      <section class="hud" aria-label="VAT runtime status">
+        <p class="eyebrow">M8 · mesh-fx VAT</p>
+        <h1>Blender VAT playback</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing</dd>
+          </div>
+          <div>
+            <dt>Layout</dt>
+            <dd>vertex X · frame Y</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing</dd>
+          </div>
+        </dl>
+        <p class="scope">Synthetic Float VAT · nearest/linear · vertex-stage normal</p>
+      </section>
+      <canvas id="vat-visual" width="576" height="96"></canvas>
+    </main>
+    <script type="module" src="/src/m8-vat.ts"></script>
+  </body>
+</html>

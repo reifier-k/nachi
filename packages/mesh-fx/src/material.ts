@@ -1,4 +1,10 @@
-import { dissolve, fresnel, polarUV as polarUvNode, rimLight, uvFlow } from '@nachi/tsl-kit';
+import {
+  dissolve,
+  fresnel,
+  polarUV as polarUvNode,
+  rimLight,
+  uvFlow as uvFlowNode,
+} from '@nachi/tsl-kit';
 import type { ColorInput, ScalarInput, TextureInput, Vec2Input } from '@nachi/tsl-kit';
 import {
   AdditiveBlending,
@@ -28,6 +34,16 @@ export interface PolarUvAuthoring {
   readonly rotation?: ScalarInput;
   readonly flows: readonly UvFlowAuthoringConfig[];
   flow(config: UvFlowAuthoringConfig): PolarUvAuthoring;
+}
+
+export interface CartesianUvFlowAuthoring {
+  readonly kind: 'uvFlow';
+  readonly speed: Vec2Input;
+}
+
+export function uvFlow(config: UvFlowAuthoringConfig): CartesianUvFlowAuthoring {
+  validateSpeed(config.speed, 'uvFlow.speed');
+  return Object.freeze({ kind: 'uvFlow' as const, speed: config.speed });
 }
 
 export function polarUV(config: PolarUvAuthoringConfig = {}): PolarUvAuthoring {
@@ -74,7 +90,7 @@ export interface FxFresnelConfig {
 export interface FxMaterialConfig {
   readonly color?: ColorRepresentation;
   readonly map?: TextureInput;
-  readonly uv?: PolarUvAuthoring;
+  readonly uv?: PolarUvAuthoring | CartesianUvFlowAuthoring;
   readonly dissolve?: FxDissolveConfig;
   readonly fresnel?: FxFresnelConfig;
   readonly blending?: FxBlending;
@@ -159,14 +175,20 @@ export function fxMaterial(config: FxMaterialConfig = {}): FxNodeMaterial {
   return material;
 }
 
-function lowerUv(authoring: PolarUvAuthoring | undefined, time: ScalarInput): Node<'vec2'> {
+function lowerUv(
+  authoring: PolarUvAuthoring | CartesianUvFlowAuthoring | undefined,
+  time: ScalarInput,
+): Node<'vec2'> {
   if (!authoring) return uv();
+  if (authoring.kind === 'uvFlow') {
+    return uvFlowNode({ uv: uv(), speed: authoring.speed, time });
+  }
   if (authoring.kind !== 'polarUV') invalid('fxMaterial.uv.kind', 'must be "polarUV"');
   let node = polarUvNode({
     ...(authoring.center === undefined ? {} : { center: authoring.center }),
     ...(authoring.rotation === undefined ? {} : { rotation: authoring.rotation }),
   });
-  for (const flow of authoring.flows) node = uvFlow({ uv: node, speed: flow.speed, time });
+  for (const flow of authoring.flows) node = uvFlowNode({ uv: node, speed: flow.speed, time });
   return node;
 }
 

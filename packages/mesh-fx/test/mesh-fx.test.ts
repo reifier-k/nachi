@@ -1,10 +1,19 @@
-import { DataTexture, RGBAFormat } from 'three';
+import {
+  BufferAttribute,
+  BufferGeometry,
+  DataTexture,
+  FloatType,
+  NoColorSpace,
+  RGBAFormat,
+} from 'three';
 import type Node from 'three/src/nodes/core/Node.js';
 import { float } from 'three/tsl';
+import * as THREE from 'three/webgpu';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
   MeshFxDiagnosticError,
+  applyVat,
   cone,
   createConeGeometry,
   createCylinderGeometry,
@@ -16,7 +25,9 @@ import {
   magicCircle,
   polarUV,
   ring,
+  resolveVatFrames,
   slashArc,
+  uvFlow,
 } from '../src';
 
 function texture(): DataTexture {
@@ -143,6 +154,147 @@ describe('@nachi/mesh-fx analytic geometry', () => {
   });
 });
 
+describe('@nachi/mesh-fx Blender VAT runtime', () => {
+  function vatTexture(width = 3, height = 4): DataTexture {
+    const result = new DataTexture(
+      new Float32Array(width * height * 4),
+      width,
+      height,
+      RGBAFormat,
+      FloatType,
+    );
+    result.colorSpace = NoColorSpace;
+    result.needsUpdate = true;
+    return result;
+  }
+
+  function vatMesh(width = 3): THREE.Mesh {
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array(width * 3), 3));
+    geometry.setAttribute(
+      'uv1',
+      new BufferAttribute(
+        new Float32Array(
+          Array.from({ length: width }, (_, index) => [(index + 0.5) / width, 0]).flat(),
+        ),
+        2,
+      ),
+    );
+    return new THREE.Mesh(geometry, new THREE.MeshStandardNodeMaterial());
+  }
+
+  it('resolves nearest and linear frame playback over an inclusive looping range', () => {
+    expect(
+      resolveVatFrames(0.125, {
+        fps: 4,
+        frameCount: 4,
+        interpolation: 'linear',
+        loop: true,
+      }),
+    ).toEqual({ frame0: 0, frame1: 1, mix: 0.5 });
+    expect(
+      resolveVatFrames(0.875, {
+        fps: 4,
+        frameCount: 4,
+        interpolation: 'linear',
+        loop: true,
+      }),
+    ).toEqual({ frame0: 3, frame1: 0, mix: 0.5 });
+    expect(
+      resolveVatFrames(0.125, {
+        fps: 4,
+        frameCount: 4,
+        interpolation: 'nearest',
+        loop: true,
+      }),
+    ).toEqual({ frame0: 1, frame1: 1, mix: 0 });
+  });
+
+  it('applies position and normal VAT nodes with package-owned or external clocks', () => {
+    const mesh = vatMesh();
+    const controls = applyVat(mesh, {
+      fps: 8,
+      frameCount: 4,
+      normalTexture: vatTexture(),
+      positionTexture: vatTexture(),
+    });
+    expect((mesh.material as THREE.MeshStandardNodeMaterial).positionNode?.isNode).toBe(true);
+    expect((mesh.material as THREE.MeshStandardNodeMaterial).normalNode?.isNode).toBe(true);
+    expect(mesh.frustumCulled).toBe(false);
+    controls.setFrame(2.5);
+    expect(controls.time?.value).toBe(2.5 / 8);
+
+    const external = applyVat(vatMesh(), {
+      axisMap: 'xz-y',
+      fps: 8,
+      frameCount: 4,
+      positionTexture: vatTexture(),
+      time: float(0.25),
+    });
+    expect(external.time).toBeNull();
+    expect(() => external.setTime(0.5)).toThrow(MeshFxDiagnosticError);
+  });
+
+  it('keeps controls.sampleAtTime aligned with an inclusive frameRange', () => {
+    const controls = applyVat(vatMesh(), {
+      fps: 1,
+      frameCount: 10,
+      frameRange: [2, 5],
+      positionTexture: vatTexture(3, 10),
+    });
+
+    expect(controls.sampleAtTime(0)).toEqual({ frame0: 2, frame1: 3, mix: 0 });
+    expect(controls.sampleAtTime(3.5)).toEqual({ frame0: 5, frame1: 2, mix: 0.5 });
+    expect(controls.sampleAtTime(4)).toEqual({ frame0: 2, frame1: 3, mix: 0 });
+  });
+
+  it('requires Blender vertex_anim uv1 by default and allows an explicit raw vertex-index fallback', () => {
+    const mesh = vatMesh();
+    mesh.geometry.deleteAttribute('uv1');
+    expect(() => applyVat(mesh, { fps: 8, frameCount: 4, positionTexture: vatTexture() })).toThrow(
+      MeshFxDiagnosticError,
+    );
+    const controls = applyVat(mesh, {
+      fps: 8,
+      frameCount: 4,
+      positionTexture: vatTexture(),
+      vertexLookup: 'vertex-index',
+    });
+    expect(controls.frameCount).toBe(4);
+  });
+
+  it('diagnoses missing textures, layout/count mismatch, float format, and frame overflow', () => {
+    const cases = [
+      () =>
+        applyVat(vatMesh(), {
+          fps: 24,
+          frameCount: 4,
+          positionTexture: undefined as never,
+        }),
+      () => applyVat(vatMesh(2), { fps: 24, frameCount: 4, positionTexture: vatTexture(3, 4) }),
+      () => applyVat(vatMesh(), { fps: 24, frameCount: 4, positionTexture: vatTexture(3, 3) }),
+      () => applyVat(vatMesh(), { fps: 24, frameCount: 4, positionTexture: texture() }),
+      () =>
+        applyVat(vatMesh(), {
+          fps: 24,
+          frameCount: 4,
+          frameRange: [1, 4],
+          positionTexture: vatTexture(),
+        }),
+      () => {
+        const controls = applyVat(vatMesh(), {
+          fps: 4,
+          frameCount: 4,
+          loop: false,
+          positionTexture: vatTexture(),
+        });
+        controls.setTime(1);
+      },
+    ];
+    for (const build of cases) expect(build).toThrow(MeshFxDiagnosticError);
+  });
+});
+
 describe('@nachi/mesh-fx fxMaterial', () => {
   it('lowers polar flow, dissolve curve, and Fresnel to one NodeMaterial graph', () => {
     const material = fxMaterial({
@@ -181,6 +333,15 @@ describe('@nachi/mesh-fx fxMaterial', () => {
     expect(material.fx.normalizedLife).toBeNull();
     expect(() => material.fx.setTime(2)).toThrow(MeshFxDiagnosticError);
     expect(() => material.fx.setNormalizedLife(0.4)).toThrow(MeshFxDiagnosticError);
+  });
+
+  it('lowers Cartesian UV flow for cylinder-style longitudinal animation', () => {
+    const material = fxMaterial({ map: texture(), time: 0.5, uv: uvFlow({ speed: [0, -2] }) });
+    let graphSize = 0;
+    material.colorNode?.traverse(() => {
+      graphSize += 1;
+    });
+    expect(graphSize).toBeGreaterThan(8);
   });
 
   it('reports stable synchronous diagnostics for invalid authoring data', () => {

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nachi — Golden Charge</title>
+  </head>
+  <body>
+    <main>
+      <section class="hud" aria-label="Golden charge status">
+        <p class="eyebrow">Golden #3 · M8 scope</p>
+        <h1>Converging magic charge</h1>
+        <dl>
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">Initializing</dd>
+          </div>
+          <div>
+            <dt>Mode</dt>
+            <dd>Offscreen RT readback</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="status-value">Initializing</dd>
+          </div>
+        </dl>
+        <p class="scope">M9 timeline choreography · M10 bloom/post</p>
+      </section>
+      <canvas id="golden-charge" width="640" height="400"></canvas>
+    </main>
+    <script type="module" src="/src/golden-charge.ts"></script>
+  </body>
+</html>

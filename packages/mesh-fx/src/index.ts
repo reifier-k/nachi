@@ -20,6 +20,8 @@ export {
 export {
   fxMaterial,
   polarUV,
+  uvFlow,
+  type CartesianUvFlowAuthoring,
   type FxBlending,
   type FxDissolveConfig,
   type FxFresnelConfig,
@@ -33,3 +35,19 @@ export {
   type UvFlowAuthoringConfig,
 } from './material';
 export { MeshFxDiagnosticError, type MeshFxDiagnostic } from './diagnostics';
+export {
+  applyVat,
+  resolveVatFrames,
+  type VatAxisMap,
+  type VatConfig,
+  type VatControls,
+  type VatFrameOrder,
+  type VatFrameSample,
+  type VatInterpolation,
+  type VatMesh,
+  type VatNormalEncoding,
+  type VatPositionEncoding,
+  type VatPositionMode,
+  type VatRemapRange,
+  type VatVertexLookup,
+} from './vat';
