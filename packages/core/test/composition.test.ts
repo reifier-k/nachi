@@ -310,15 +310,33 @@ describe('M9 emitter inheritance', () => {
   });
 
   it('preserves inherited values passed as explicit undefined and diagnoses duplicate order', () => {
+    const heat = attribute('heat', { default: 1, type: 'f32' });
+    const intensity = defineParameter('User.intensity', {
+      default: 1,
+      mutable: true,
+      type: 'f32',
+    });
     const base = defineEmitter({
+      attributes: { heat },
       capacity: 2,
+      lifecycle: { duration: 3, loopCount: 2 },
+      parameters: { 'User.intensity': intensity },
       render: computeRender,
       spawn: burst({ count: 1 }),
       update: [labeled('gravity', gravity(-9))],
     });
-    const inherited = defineEmitter(base, { capacity: undefined, spawn: undefined } as never);
+    const inherited = defineEmitter(base, {
+      attributes: { heat: undefined },
+      capacity: undefined,
+      lifecycle: { duration: undefined },
+      parameters: { 'User.intensity': undefined },
+      spawn: undefined,
+    } as never);
     expect(inherited.capacity).toBe(2);
     expect(inherited.spawn).toBe(base.spawn);
+    expect(inherited.attributes?.heat).toBe(heat);
+    expect(inherited.lifecycle).toEqual({ duration: 3, loopCount: 2 });
+    expect(inherited.parameters?.['User.intensity']).toBe(intensity);
 
     expect(() => defineEmitter(base, { update: { order: ['gravity', 'gravity'] } })).toThrowError(
       expect.objectContaining({

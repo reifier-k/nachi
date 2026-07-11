@@ -359,7 +359,8 @@ function collectInheritanceSchemaDiagnostics(
   overrides: EmitterOverrideConfig<AttributeSchema, ParameterSchema>,
 ) {
   const diagnostics = [];
-  for (const [name, definition] of Object.entries(overrides.attributes ?? {})) {
+  for (const [name, definition] of Object.entries(withoutUndefined(overrides.attributes))) {
+    if (definition === undefined) continue;
     const inherited = base.attributes?.[name];
     if (inherited && inherited.type !== definition.type) {
       diagnostics.push({
@@ -371,7 +372,8 @@ function collectInheritanceSchemaDiagnostics(
       });
     }
   }
-  for (const [path, definition] of Object.entries(overrides.parameters ?? {})) {
+  for (const [path, definition] of Object.entries(withoutUndefined(overrides.parameters))) {
+    if (definition === undefined) continue;
     const inherited = base.parameters?.[path as ParameterPath];
     if (inherited && inherited.type !== definition.type) {
       diagnostics.push({

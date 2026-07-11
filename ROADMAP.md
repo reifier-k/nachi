@@ -34,7 +34,7 @@
 
 | Niagara機能 | 対応マイルストーン | 状態 |
 |---|---|---|
-| System/Emitter階層・エミッタ継承 | M9 | 🚧 実装済み・M9監査待ち |
+| System/Emitter階層・エミッタ継承 | M9 | ✅ 2026-07-12監査確認(defineEmitter(base,overrides)のキー指定マージ、JSON往復保証。アセット参照継承・親変更伝播はM12=§16記録、System-stageモジュールなしは差分記録) |
 | 動的パーティクル属性(カスタム属性→バッファコンパイル) | M1 | ✅ 2026-07-11監査確認 |
 | 名前空間パラメータ (System/Emitter/Particles/User) | M1 | ✅ 2026-07-11監査確認(User.*のGPU反映まで実証。Emitter時間系uniformはM2) |
 | GPUシミュレーション(コンピュート) | M1–M2 | ✅ 2026-07-11監査確認(フリーリスト/compaction/間接描画まで) |
@@ -57,8 +57,8 @@
 | デカールレンダラ | M7 | ✅ 2026-07-11監査確認(深度再構成投影ボックス、期待領域内11889px実測。deferred/GBufferマテリアル・受け面法線棄却・screen-size fade・非等方sizeなし、単一カメラ・1フレーム遅延・WebGPU限定は差分記録) |
 | マテリアル表現(dissolve/flow/fresnel = UEマテリアル相当) | M8 | ✅ 2026-07-11監査確認(7部品CPUミラー項単位一致+両バックエンドRT byte照合。unlitのみ=lit particlesはM10、手続きノイズ・Material Instance相当なしは差分記録) |
 | VAT(頂点アニメーションテクスチャ)ランタイム | M8 | ✅ 2026-07-11監査確認(flement VAT互換、CPU/GPU全分岐一致、WebGL2でも動作。wrap/crop・アトラス・可変トポロジ・tangent VAT・バウンド自動導出なしはRFC§13.5診断化=差分記録) |
-| タイムライン/Sequencer統合 | M9 | 🚧 実装済み・M9監査待ち |
-| ユーザーパラメータのランタイムAPI | M9 | 🚧 実装済み・M9監査待ち |
+| タイムライン/Sequencer統合 | M9 | ✅ 2026-07-12監査確認(at/play/stop・分割不変トラック評価・loop/speed・シェイク決定論・hitStop分離を実測。キーフレームトラック・シーク/逆再生・クロス要素emitToなしは差分記録。hitStop/cameraShakeはNiagara本体にない第一級機能) |
+| ユーザーパラメータのランタイムAPI | M9 | ✅ 2026-07-12監査確認(型付きsetParameter+GPU反映実測+インスタンス独立。オブジェクト/アセット型パラメータ非対応は差分記録) |
 | ポスト連携(歪み・ブルーム)・lit particles | M10 | ⬜ |
 | αソート/OIT | M10 | ⬜ |
 | スケーラビリティ(品質段階・significance・プーリング) | M11 | ⬜ |
@@ -171,7 +171,7 @@
 - [x] cameraShake / hitStop(ローカル時間との統合) — callback/rig抽象、PCG決定論+線形減衰、marker/onAction、M2 fixed stepを単一分割してSystem.timeとeffect-local timeを分離
 - [x] User.*パラメータのランタイム設定API(型付き) — effect/emitter宣言合成、GPU uniform反映、インスタンス独立、負例診断
 - [x] エフェクト全体のプーリングと再利用(spawn/release) — materialized kernel/GPU buffer再利用、完全reset、上限診断、in-flight安全化
-- [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
+- [x] 🔍 **マイルストーン監査** — 2026-07-12実施。Codex(fresh読み取り専用)=FAIL(BLOCKER 3)/Claude(新規)=条件付きPASS→統括裁定で全指摘採用・修正・再検証して**条件付きPASS**(詳細はセッションログ)
 
 ## M10 — ポスト統合と半透明
 
@@ -228,6 +228,7 @@
 |---|---|
 | 2026-07-11 | **M9バッチ2(最終)実装**: npm公開準備済み`@nachi/timeline`を新設し、北極星シグネチャのat/play/stop/cameraShake/hitStopにmarker/onAction、安定時刻評価、track duration/loop/speedを追加。timelineがM2 fixed world stepをaction/hit-stop境界で分割し、loop境界はactive childを即時truncateしてtime-zero playからfresh lifecycle/pool再利用。カメラはThree非依存のabsolute additive sample callback、PCG lattice noise+effect-local線形減衰。raw mesh-fxはephemeral WeakMap resource+serializable placeholderへadaptし、instance別mesh/material controlsへeffect-local time/normalized lifeを束縛。core curve→immutable tuple loweringをtimeline fxMaterial surfaceで実装。`/m9-timeline/`へほぼそのままのskillSlash(arc/sparks/flash/shockwave)、発火時刻/order、GPU alive、shake同seed一致+減衰、hitStop world/local分離、loop/speed、overLife 2時点readback+非鏡像弁別、600f、consoleClean、独立perf、offscreen visualを常設。単体365本・静的typecheck通過。Codexサンドボックスはlocalhost listen EPERMのためページGPU実測/視覚基準は統括検収へ持ち越し。RFC§10.1/§10.2/§10.3/§13/§13.4/§16更新。**M9残: 別セッション監査のみ**。 |
 | 2026-07-12 | **M9バッチ2 検収・レビュー・裁定: 受入(コミット)**。①初回検収: 14検証中13合格、meshFxOverLifeGpuチェック自体の欠陥(鏡像探索でnull→無条件false)→専用GPUプローブに修正、**overLife無効化で当該チェックのみfalse=弁別性を実証**、status規約もcomplete統一 ②Claudeレビュー: **FAIL(BLOCKER 1)** — [B1]attachTo済みインスタンスのrelease()でシステム恒久フリーズ(実測: 以後の全updateがreject、無関係インスタンスも停止。coreと同じ同期削除で修正+回帰テスト)。[S1]hitStop中play子の残余hitStop非継承 [S2]raw fxMaterialのclone経路でfx制御無言消失→診断化(NACHI_TIMELINE_MESH_FX_MATERIAL_CLONE_UNSUPPORTED) [S3]core製timelineの正規化欠落(未ソート→全entry不発火を実測)→防御的正規化 [S4]t=0アクションがリスナー登録前発火で観測不能→初回update繰延 [S5]要素単位サブ定義分割でM5クロスエミッタemitToが壊れる→制限をRFC/ROADMAPに差分記録+子コンパイルエラーでparentをerror化。NIT6件消化。**レビュー実測で健全確認**: 分割不変性(1×0.6s vs 60×0.01sでアクションログbyte一致)、hitStop分離(local 0.05/world 0.09)、loop×lifecycle(境界truncate→fresh再生+プール相乗り)、シェイクPCG決定論、パッケージ境界(three非依存コールバック抽象)、北極星skillSlash一致 ③再検証: テスト372本、m9-timeline 14/14+弁別性再証明、回帰9ページ+スクショ緑 |
+| 2026-07-12 | **M9マイルストーン監査(Codex fresh読み取り専用+Claude新規、独立実施)→統括裁定: 全指摘採用・修正・再検証で条件付きPASS**。Codex=FAIL: [B1]継承のネスト明示的undefinedでTypeError [B2]timeline setParameter()の検証迂回 [B3]core製timelineのspeed値検証欠落(負値/0/NaNで時間逆行・停止)。Claude=条件付きPASS: [S-1]=B2を独立検出(**immutableが再生の合間に事実上書換可能**の実測含む)[S-2]timelineのper-instanceエラー封じ込め欠如(外部束縛time要素で全update恒久reject+onAction例外で残余worldデルタ喪失、実測2経路)[S-3]perf基準欠測(golden-ambient 3.12-4.25ms vs 記録0.605=M5/M7の計測区間変更レガシー)[S-4]ドキュメント陳腐化3回目。**両監査が独立に同一指摘へ収束**(setParameter検証・speed検証)。**修正**: ネストundefined親値保持/保存前core同等検証/speed・at値検証→診断付きerror化/per-instance封じ込め+markError+worldデルタ保全+外部束縛timeのauthoring診断+onAction例外の診断化/文書4点+**完了定義にREADME・CLAUDE更新を組込(PLAN恒久化)**/perfカメラ修正。**再検証**: テスト381本、全7ページ+スクショ回帰緑。**健全確認**(Claude検算): 時間意味論(hitStop+0.04オフセット伝播の厳密一致)・シェイクPCG決定論・プールリセット完全性(RFC§10.3と完全一致)・ゴールデン5/5回帰0差分。**perf基準記録**: m9-compose 2.864/15.485ms、m9-timeline 0.036/15.451ms、**golden-ambient現行帯を再記録: compute≈3.1-4.3ms**(計測区間変更後の正値。旧0.605は旧区間)、spike-compute 3.832ms・他は既存帯内。パリティ25/62 |
 | 2026-07-11 | **M9バッチ1実装**: `defineEmitter(base, overrides)`によるNiagara型のラベル/正規化index指定スタック継承(merge/append/replace・remove/order)、effect/emitter `User.*`宣言合成と型付き`setParameter()`、WeakMapコンパイルキャッシュと分離したmaterialized kernel/GPU bufferプール(maxPoolSize既定16・in-flight release安全化)を実装。再利用initializeは全属性lane/free-list/counter/event/spawnGeneration/spawnOrder/birth ringを初期化。`/m9-compose/`に親子GPU readback、User uniform/負例、同一buffer参照+同seed再spawn bit一致、非対称非鏡像点、linear visual閾値、consoleClean、独立perf v1を追加。RFC§6/§9/§10.3/§16更新。 |
 | 2026-07-11 | **M9バッチ1 検収・レビュー・裁定: 受入(コミット)**。Claudeレビュー: **PASS(BLOCKER 0)** — 継承マージ11ケース+プールin-flight挙動3ケースをスクラッチ実測、JSONラウンドトリップ完全一致、プール状態リセットの完全性(GPU全カウンタ/birth ring sentinel/イベントword/CPU側フレッシュ構築)を構造確認。採用SHOULD5件を修正: [S1]エラー状態インスタンスが遅延release経路でプールされる実測バグ→release時点のpoolability捕捉 [S2]プール帳簿のGC乖離→定義キーWeakMap値へ [S3]WebGL2 initializeのTF varying予算未検証→検証対象化 [S4]プール退避のレンダラ通知→フック+Threeアダプタでindirect instanceCount 0化 [S5]スモーク弁別の穴→死亡後dirty lane再利用+onDeath→emitTo付き再利用ケース追加。NIT7件消化(spawn失敗時のリソースリーク、undefined clobber防御、RFC文言群)。再検証: テスト358本、m9-compose全緑、m2-webgl緑、回帰8ページ+スクショ緑。**運用障害: resumeが実行されない空振り(5回目の実行系障害)→以後の差し戻しは自己完結仕様のfresh運用に切替** |
 | 2026-07-10 | エコシステム調査、計画策定、PLAN.md/ROADMAP.md作成 |

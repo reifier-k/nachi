@@ -621,7 +621,8 @@ function isParameterValue(type: AttributeType, value: unknown): boolean {
   return true;
 }
 
-function validateRuntimeParameter(
+/** @internal Shared with composition runtimes that expose the core parameter contract. */
+export function validateRuntimeParameter(
   definitions: ParameterSchema,
   path: string,
   value: unknown,

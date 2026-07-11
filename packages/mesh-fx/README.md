@@ -42,8 +42,9 @@ uses centered Cartesian primary UVs for `polarUV()` and publishes concentric ang
 as `uv1`.
 
 `fxMaterial` creates writable time and normalized-life uniforms when they are omitted. Pass TSL
-nodes through `time` and `normalizedLife` to bind an effect-local clock instead. M9 will supply the
-timeline adapter; no wall clock is read implicitly.
+nodes through `time` and `normalizedLife` for standalone externally owned bindings. The
+`@nachi/timeline` adapter drives its effect-local clock through the writable controls, so timeline
+materials must omit `time`; no wall clock is read implicitly.
 
 Three.js is a peer dependency pinned to the r185 compatibility line. The package is ESM-only and
 declares `sideEffects: false`.

@@ -91,6 +91,7 @@ export function defineEffect<
     Object.entries(config.elements).map(([key, element]) => {
       const resource = asMeshFxResource(element);
       if (!resource) return [key, element];
+      validateTimelineMeshFxResource(resource, key);
       resources.set(key, resource);
       return [
         key,
@@ -225,6 +226,19 @@ export function cloneTimelineFxMaterial(
       'NACHI_TIMELINE_MESH_FX_MATERIAL_CLONE_UNSUPPORTED',
       'mesh-fx materials used in timeline elements must be created with @nachi/timeline fxMaterial() so instance controls can be regenerated safely.',
       path,
+    ),
+  ]);
+}
+
+function validateTimelineMeshFxResource(resource: MeshFxRuntimeResource, key: string): void {
+  if (!('fx' in resource.mesh.material)) return;
+  const config = materialConfigs.get(resource.mesh.material as FxNodeMaterial);
+  if (config?.time === undefined) return;
+  throw new VfxDiagnosticError([
+    diagnostic(
+      'NACHI_TIMELINE_MESH_FX_TIME_BINDING_UNSUPPORTED',
+      'Timeline mesh-fx materials must omit time so the timeline can own the writable effect-local clock.',
+      `elements.${key}.material.time`,
     ),
   ]);
 }

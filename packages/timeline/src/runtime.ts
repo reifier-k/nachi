@@ -3,6 +3,7 @@ import {
   VfxDiagnosticError,
   hashModuleLabel,
   pcgRandomFloat,
+  validateRuntimeParameter,
   type DefinitionParameterValue,
   type EffectDefinition,
   type EffectElementDefinition,
@@ -107,6 +108,29 @@ function normalizedTimeline(definition: RuntimeDefinition): TimelineDefinition {
   const source = Array.isArray(value)
     ? ({ entries: value, kind: 'timeline' } as TimelineDefinition)
     : (value as TimelineDefinition);
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const [entryIndex, entry] of source.entries.entries()) {
+    if (!Number.isFinite(entry.at) || entry.at < 0) {
+      diagnostics.push(
+        runtimeDiagnostic(
+          'NACHI_TIMELINE_TIME_INVALID',
+          'Timeline entry time must be non-negative and finite.',
+          `timeline.entries[${entryIndex}].at`,
+        ),
+      );
+    }
+  }
+  const speed = source.speed ?? 1;
+  if (!Number.isFinite(speed) || speed <= 0) {
+    diagnostics.push(
+      runtimeDiagnostic(
+        'NACHI_TIMELINE_SPEED_INVALID',
+        'Timeline speed must be positive and finite.',
+        'timeline.speed',
+      ),
+    );
+  }
+  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   const entries = source.entries
     .map((entry, authorIndex) => ({ authorIndex, entry }))
     .sort((left, right) => left.entry.at - right.entry.at || left.authorIndex - right.authorIndex)
@@ -116,7 +140,7 @@ function normalizedTimeline(definition: RuntimeDefinition): TimelineDefinition {
     duration: source.duration ?? entries.at(-1)?.at ?? 0,
     entries,
     kind: 'timeline',
-    speed: source.speed ?? 1,
+    speed,
   };
 }
 
@@ -245,7 +269,14 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.definition = definition;
     this.id = id;
     this.#scene = isSceneTarget(scene) ? scene : undefined;
-    this.#timeline = normalizedTimeline(definition);
+    let timelineDiagnostics: readonly VfxDiagnostic[] = [];
+    try {
+      this.#timeline = normalizedTimeline(definition);
+    } catch (error) {
+      if (!(error instanceof VfxDiagnosticError)) throw error;
+      this.#timeline = { duration: 0, entries: [], kind: 'timeline', speed: 1 };
+      timelineDiagnostics = error.diagnostics;
+    }
     this.#baseTimeScale = options.timeScale ?? 1;
     this.#seed = options.seed ?? 0;
     this.#position = options.position;
@@ -253,6 +284,11 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.#cameraShakeTarget = options.cameraShakeTarget ?? defaultCameraShakeTarget;
     this.#spawnEmitter = spawnEmitter;
     this.#parameters = { ...(options.parameters as Record<string, unknown> | undefined) };
+    if (timelineDiagnostics.length > 0) {
+      this.diagnostics.push(...timelineDiagnostics);
+      this.#state = 'error';
+      return;
+    }
     for (const [key, resource] of getMeshFxResources(definition)) {
       const mesh = cloneMesh(key, resource);
       setMeshTransform(mesh, this.#position, this.#rotation);
@@ -382,6 +418,13 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     value: DefinitionParameterValue<Definition, Path>,
   ): void {
     this.#assertNotReleased();
+    const parameterDiagnostic = validateRuntimeParameter(
+      this.definition.parameters ?? {},
+      String(path),
+      value,
+      true,
+    );
+    if (parameterDiagnostic) throw new VfxDiagnosticError([parameterDiagnostic]);
     this.#parameters[String(path)] = value;
     for (const emitter of this.#activeEmitters.values()) emitter.setParameter(path, value);
   }
@@ -424,6 +467,23 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.#eventListeners.clear();
     this.#released = true;
     this.#state = 'released';
+  }
+
+  /** @internal Contains one instance failure without rejecting the system update. */
+  markError(diagnostic: VfxDiagnostic): void {
+    if (this.#released || this.#state === 'error') return;
+    this.diagnostics.push(diagnostic);
+    this.#state = 'error';
+    try {
+      this.#stopAllElements();
+    } catch (error) {
+      this.diagnostics.push(
+        runtimeDiagnostic(
+          'NACHI_TIMELINE_ERROR_CLEANUP_FAILED',
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
+    }
   }
 
   /** @internal World seconds until the next action, loop, shake, mesh-life, or hit-stop boundary. */
@@ -516,7 +576,19 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
           localTime: entry.at,
           sequence: this.#sequence++,
         };
-        for (const listener of this.#actionListeners) listener(event);
+        for (const listener of this.#actionListeners) {
+          try {
+            listener(event);
+          } catch (error) {
+            this.markError(
+              runtimeDiagnostic(
+                'NACHI_TIMELINE_ACTION_CALLBACK_FAILED',
+                error instanceof Error ? error.message : String(error),
+              ),
+            );
+            return;
+          }
+        }
         if (this.#state !== 'active') return;
       }
     }
@@ -766,7 +838,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     }
     const run = async () => {
       this.#deleteReleasedInstances();
-      for (const instance of this.#instances.values()) instance.beginUpdate();
+      for (const instance of this.#instances.values()) {
+        this.#advanceInstance(instance, () => instance.beginUpdate());
+      }
       const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
       if (delta === 0) await this.#core.update(0);
       for (const step of steps) await this.#advanceStep(step);
@@ -807,15 +881,34 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       const activeInstances = [...this.#instances.values()].filter(
         (instance) => instance.state === 'active',
       );
-      for (const instance of activeInstances) instance.syncAttachment();
+      for (const instance of activeInstances) {
+        this.#advanceInstance(instance, () => instance.syncAttachment());
+      }
+      const healthyInstances = activeInstances.filter((instance) => instance.state === 'active');
       const boundary = Math.min(
         remaining,
-        ...activeInstances.map((instance) => instance.timeToBoundary()),
+        ...healthyInstances.map((instance) => instance.timeToBoundary()),
       );
       const segment = Number.isFinite(boundary) && boundary > EPSILON ? boundary : remaining;
       await this.#core.update(segment);
-      for (const instance of activeInstances) instance.advanceSegment(segment);
+      for (const instance of healthyInstances) {
+        this.#advanceInstance(instance, () => instance.advanceSegment(segment));
+      }
       remaining = Math.max(0, remaining - segment);
+    }
+  }
+
+  #advanceInstance(instance: TimelineEffectInstance, operation: () => void): void {
+    if (instance.state !== 'active') return;
+    try {
+      operation();
+    } catch (error) {
+      instance.markError(
+        runtimeDiagnostic(
+          'NACHI_TIMELINE_INSTANCE_UPDATE_FAILED',
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
     }
   }
 

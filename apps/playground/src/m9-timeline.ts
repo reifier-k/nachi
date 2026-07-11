@@ -439,7 +439,9 @@ async function measurePerformance(): Promise<void> {
   });
   await system.update(0.12);
   renderer.setRenderTarget(new THREE.RenderTarget(64, 64));
-  renderer.render(scene, new THREE.OrthographicCamera(-2, 2, 2, -2, 0.1, 10));
+  const camera = new THREE.OrthographicCamera(-2, 2, 2, -2, 0.1, 10);
+  camera.position.z = 5;
+  renderer.render(scene, camera);
   await renderer.resolveTimestampsAsync('render');
   await monitor.resolveGpuTimestamps();
   monitor.publish();

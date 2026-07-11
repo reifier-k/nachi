@@ -7,6 +7,7 @@ import {
   curve,
   defineEffect as defineCoreEffect,
   defineEmitter,
+  defineParameter,
   emitTo,
   lifetime,
   marker as coreMarker,
@@ -15,6 +16,7 @@ import {
   type EffectInstanceState,
   type VfxDiagnostic,
   type VfxEffectInstance,
+  VfxDiagnosticError,
 } from '@nachi/core';
 import { fxMaterial as meshFxMaterial, ring, slashArc } from '@nachi/mesh-fx';
 import * as THREE from 'three';
@@ -152,6 +154,21 @@ describe('@nachi/timeline authoring', () => {
     );
   });
 
+  it('rejects externally bound mesh-fx time during timeline authoring', () => {
+    const arc = slashArc({ angle: 90, material: fxMaterial({ time: 0 }) });
+
+    expect(() => defineEffect({ elements: { arc }, timeline: [at(0, play('arc'))] })).toThrowError(
+      expect.objectContaining({
+        diagnostics: [
+          expect.objectContaining({
+            code: 'NACHI_TIMELINE_MESH_FX_TIME_BINDING_UNSUPPORTED',
+            path: 'elements.arc.material.time',
+          }),
+        ],
+      }),
+    );
+  });
+
   it('rejects unknown targets and invalid loop duration synchronously', () => {
     expect(() =>
       defineEffect({
@@ -204,6 +221,124 @@ describe('@nachi/timeline runtime', () => {
     expect(markers).toEqual(['time-zero', 'late']);
     expect(instance.localTime).toBeCloseTo(0.1, 10);
     expect(instance.state).toBe('complete');
+  });
+
+  it.each([
+    ['zero speed', coreTimeline<never>([], { speed: 0 }), 'NACHI_TIMELINE_SPEED_INVALID'],
+    ['negative speed', coreTimeline<never>([], { speed: -1 }), 'NACHI_TIMELINE_SPEED_INVALID'],
+    ['NaN speed', coreTimeline<never>([], { speed: Number.NaN }), 'NACHI_TIMELINE_SPEED_INVALID'],
+    [
+      'negative entry time',
+      coreTimeline([coreAt(-0.1, coreMarker('invalid'))]),
+      'NACHI_TIMELINE_TIME_INVALID',
+    ],
+    [
+      'NaN entry time',
+      coreTimeline([coreAt(Number.NaN, coreMarker('invalid'))]),
+      'NACHI_TIMELINE_TIME_INVALID',
+    ],
+  ])('marks a core-authored timeline with %s as an error', (_label, invalidTimeline, code) => {
+    const effect = defineCoreEffect({ elements: {}, timeline: invalidTimeline });
+    const system = new VFXSystem({});
+    const instance = system.spawn(effect);
+
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code, phase: 'runtime', severity: 'error' }),
+    );
+  });
+
+  it('validates inactive setParameter writes before storing them for a later play', () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const mutable = defineParameter('User.mutable', {
+      default: 1,
+      mutable: true,
+      type: 'f32',
+    });
+    const immutable = defineParameter('User.immutable', { default: 2, type: 'f32' });
+    const effect = defineEffect({
+      elements: { child: emitter },
+      parameters: { 'User.immutable': immutable, 'User.mutable': mutable },
+      timeline: [at(1, play('child'))],
+    });
+    const instance = new VFXSystem({}).spawn(effect);
+    const expectDiagnostic = (operation: () => void, code: string) => {
+      try {
+        operation();
+        throw new Error('Expected parameter validation to fail.');
+      } catch (error) {
+        expect(error).toBeInstanceOf(VfxDiagnosticError);
+        expect((error as VfxDiagnosticError).diagnostics).toContainEqual(
+          expect.objectContaining({ code }),
+        );
+      }
+    };
+
+    expectDiagnostic(
+      () => instance.setParameter('User.missing' as never, 1),
+      'NACHI_PARAMETER_UNKNOWN',
+    );
+    expectDiagnostic(
+      () => instance.setParameter('User.mutable', 'bad' as never),
+      'NACHI_PARAMETER_TYPE_MISMATCH',
+    );
+    expectDiagnostic(() => instance.setParameter('User.immutable', 3), 'NACHI_PARAMETER_IMMUTABLE');
+  });
+
+  it('contains onAction failures per instance and preserves the full world delta', async () => {
+    const effect = defineEffect({
+      elements: {},
+      timeline: timeline([at(0.09, marker('explode'))], { duration: 0.2 }),
+    });
+    const system = new VFXSystem({});
+    const instance = system.spawn(effect);
+    instance.onAction(() => {
+      throw new Error('gameplay callback failed');
+    });
+
+    await expect(system.update(0.12)).resolves.toBeUndefined();
+    expect(system.time).toBeCloseTo(0.12, 10);
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_TIMELINE_ACTION_CALLBACK_FAILED',
+        message: 'gameplay callback failed',
+        phase: 'runtime',
+      }),
+    );
+  });
+
+  it('contains per-instance integration failures while unrelated instances keep advancing', async () => {
+    const effect = defineEffect({
+      elements: {},
+      timeline: timeline([at(0.2, marker('done'))], { duration: 0.2 }),
+    });
+    const system = new VFXSystem({});
+    const failing = system.spawn(effect);
+    let attachmentReads = 0;
+    failing.attachTo({
+      getWorldTransform: () => {
+        attachmentReads += 1;
+        if (attachmentReads > 1) throw new Error('transform source failed');
+        return { position: [0, 0, 0] };
+      },
+    });
+    const healthy = system.spawn(effect);
+
+    await expect(system.update(0.12)).resolves.toBeUndefined();
+    expect(system.time).toBeCloseTo(0.12, 10);
+    expect(failing.state).toBe('error');
+    expect(failing.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_TIMELINE_INSTANCE_UPDATE_FAILED',
+        message: 'transform source failed',
+      }),
+    );
+    expect(healthy.localTime).toBeCloseTo(0.12, 10);
   });
 
   it('plays every element for an effect without an authored timeline', async () => {

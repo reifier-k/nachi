@@ -4,7 +4,11 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 
 ## Repository layout
 
-- `packages/core`: public `@nachi/core` API types and future compiler/runtime.
+- `packages/core`: public `@nachi/core` API types, compiler, and particle runtime.
+- `packages/trails`: ribbon/trail definitions and renderer integration.
+- `packages/tsl-kit`: standalone reusable Three Shading Language helpers.
+- `packages/mesh-fx`: procedural effect meshes, materials, and VAT runtime.
+- `packages/timeline`: effect composition, sequencing, hit stop, and mesh-fx lifecycle runtime.
 - `apps/playground`: Vite/TypeScript playground plus compute and depth spikes.
 - `tools`: Playwright-based WebGPU probes, spike collection, and screenshots.
 - `docs/rfc`: normative design RFCs; keep implementation and RFC terminology aligned.
@@ -45,6 +49,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m8-meshfx/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m8-vat/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m8-vat/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-charge/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m9-compose/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m9-timeline/?backend=webgpu
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
@@ -52,6 +58,11 @@ node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png
 
 `webgpu-probe` serves its own localhost page. `spike-runner` adds `headless=1` and reads `data-spike-result` plus the `nachi.perf-baseline` record in `data-perf-result`. Screenshot regression defaults to WebGL2 because headless WebGPU cannot present a canvas.
 For pages that publish artifact screenshots, existing PNGs pass when the exact changed-pixel ratio is below `0.5%`; use `--update-screenshots` to intentionally re-record the baselines.
+
+Core `defineEffect()` composes elements and parameters but deliberately does not runtime-validate
+timeline targets or timeline values. That validation belongs to `@nachi/timeline` authoring and its
+defensive runtime normalization, including for definitions created through the core compatibility
+factories.
 
 ## Three-layer verification
 
