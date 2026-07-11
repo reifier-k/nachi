@@ -10,6 +10,7 @@ import {
   attribute,
   burst,
   collidePlane,
+  collideSceneDepth,
   defineEffect,
   defineEmitter,
   defineParameter,
@@ -479,6 +480,62 @@ describe('emitter lifecycle state machine', () => {
 });
 
 describe('VFXSystem runtime scheduler', () => {
+  const sceneDepthRenderer = (): VfxRuntimeRenderer => {
+    const base = new FakeRuntimeRenderer();
+    return {
+      kernelAdapter: {
+        ...base.kernelAdapter,
+        capabilities: { ...base.kernelAdapter.capabilities, sceneDepth: true },
+        sampleSceneDepth: () => new FakeNode(),
+      },
+      submitCompute: (kernel) => base.submitCompute(kernel),
+      submitComputeIndirect: (kernel) => base.submitComputeIndirect(kernel),
+    };
+  };
+  const sceneDepthEffect = () =>
+    defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 1,
+          integration: 'none',
+          render: computeRender,
+          spawn: burst({ count: 1 }),
+          update: [collideSceneDepth()],
+        }),
+      },
+    });
+
+  it('warns when scene-depth collision is spawned before camera uniforms are set', () => {
+    const instance = new VFXSystem(sceneDepthRenderer()).spawn(sceneDepthEffect());
+
+    expect(instance.state).toBe('active');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_SCENE_DEPTH_CAMERA_UNSET',
+        severity: 'warning',
+      }),
+    );
+  });
+
+  it('warns when scene-depth collision receives a reverse-z projection', () => {
+    const system = new VFXSystem(sceneDepthRenderer());
+    const projectionMatrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.01, -1, 0, 0, 0.1, 0];
+    system.setCamera({
+      projectionMatrix,
+      viewMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      viewportSize: [64, 64],
+    });
+    const instance = system.spawn(sceneDepthEffect());
+
+    expect(instance.state).toBe('active');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_SCENE_DEPTH_REVERSE_Z_UNSUPPORTED',
+        severity: 'warning',
+      }),
+    );
+  });
+
   it('caches compilation by effect-definition identity', () => {
     const renderer = new FakeRuntimeRenderer();
     const system = new VFXSystem(renderer);

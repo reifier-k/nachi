@@ -48,10 +48,10 @@
 | ベクタフィールド(FGAインポート) | M4 | ✅ 2026-07-11監査確認(ASCII FGA+トリリニア+texel中心補正。world固定・バイナリ.vf非対応は§16保留) |
 | 向き制御・回転・kill volume | M4 | ✅ 2026-07-11監査確認(shortest-arc quat検算済み。killVolumeはemitter-local固定=差分記録) |
 | GPUイベント&サブエミッタ(属性継承) | M5 | ✅ 2026-07-11監査確認(onDeath完全動作・多段連鎖drain保証。onCollision=M6・onCustom=予約、1レコード=子1体、float≤4成分継承は差分記録) |
-| 深度バッファ衝突 | M6 | ⬜ |
-| 解析的コライダ/SDF衝突 | M6 | ⬜ |
-| メッシュ表面サンプリング(静的+スキン) | M6 | ⬜ |
-| ソケット/ボーン追従 | M6 | ⬜ |
+| 深度バッファ衝突 | M6 | ✅ 2026-07-11監査確認(初回FAIL→WebGPU NDC規約統一+線形float深度コピーで再検証PASS。傾斜面bounce法線再構成・動的occluder・thickness棄却をGPU実測。1フレーム遅延・非MSAA・単一カメラ・WebGPU限定=RFC文書化、CCDなし) |
+| 解析的コライダ/SDF衝突 | M6 | ✅ 2026-07-11監査確認(plane=CPU参照軌道float32一致、sphere/box pushout、SDF=独立GPUプローブ4ケース厳密一致+スモーク実測。capsule/cylinder・メッシュ→SDFベイク(M12)・CCDは差分記録) |
+| メッシュ表面サンプリング(静的+スキン) | M6 | ✅ 2026-07-11監査確認(面積CDF一様+スキンはCPUスキニング再アップロード。頂点/ボーンサンプリング・マテリアルフィルタ・表面速度継承なし、三角形上限=RFC文書化) |
+| ソケット/ボーン追従 | M6 | ✅ 2026-07-11監査確認(socketError=0、毎fixedステップ前同期。エフェクト単位のみ=パーティクル単位ボーンアタッチなしは差分記録) |
 | リボンレンダラ(マルチリボン・UVモード) | M7 | ⬜ |
 | ライトレンダラ | M7 | ⬜ |
 | デカールレンダラ | M7 | ⬜ |
@@ -136,14 +136,14 @@
 
 ## M6 — ワールドインタラクション
 
-- [x] 深度バッファ衝突(バウンス・摩擦・消滅)— 前フレーム深度コピー経由+法線再構成、GPU実証。thicknessは最終バッチで
+- [x] 深度バッファ衝突(バウンス・摩擦・消滅)— M6監査差し戻し→修正済み(2026-07-11): WebGPU NDC規約(particleDepth=ndc.z、逆投影clip z=depth)+線形float深度コピー+許容±0.02級+capability診断(WebGL2/MSAA/reverse-z/カメラ未設定)。傾斜面bounce・動的occluder・thickness棄却をGPU実測(12/12×3回)
 - [x] 解析的コライダ:plane / sphere / box — CPU参照軌道一致で物理実証、space規約統一
 - [x] SDFテクスチャ衝突(SDFベイクユーティリティ含む)— 正準SDF式+勾配法線、texel中心補正
 - [x] 静的メッシュ表面サンプリング(スポーン位置・法線)— 面積CDF一様サンプリング(数学検算済み)
 - [x] スキンメッシュ表面サンプリング — v1はCPUスキニング+テクスチャ再アップロード(制約RFC文書化。GPUスキニングDIは将来)
 - [x] ソケット/ボーン追従 — attachTo(同フレーム反映、EffectTransformSource抽象でcore非依存維持)
-- [x] 🎯 ゴールデン#6「キャラクター付随」が動く — /golden-character/ 6検証+視覚基準。**ゴールデン3/7達成**
-- [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
+- [x] 🎯 ゴールデン#6「キャラクター付随」が動く — M6監査差し戻し→修正済み(2026-07-11): 視覚基準が失敗カード画像だった問題をオフスクリーンRT readback化で解消、実描画を目視確認して基準再取得(7検証+visualReadback前景比0.124)。**ゴールデン3/7達成**
+- [x] 🔍 **マイルストーン監査** — 2026-07-11実施。Codex(fresh読み取り専用)+Claude(新規)独立監査→両者FAIL→統括裁定で2項目差し戻し→修正→限定再検証+Claudeレビュー(PASS/BLOCKER 0)で**条件付きPASS**(詳細はセッションログ)
 
 ## M7 — レンダラ第二陣
 
@@ -236,6 +236,8 @@
 | 2026-07-10 | ライブラリ名 **nachi** に決定(ユーザー選定)。@nachi/core・@nachi/playground へ改名、LICENSE holder更新、licenseフィールド追加(Codex)→検収全緑→コミット。**M0はマイルストーン監査(別セッション)を残して全項目完了** |
 | 2026-07-10 | **M0マイルストーン監査実施**(/goal継続のため同セッション内だが、独立性はCodex=freshスレッド・Claude=新規エージェントで担保)。Codex判定FAIL/Claude判定条件付きPASS→統括裁定: ①Codex「pnpm test失敗」は監査サンドボックスがread-only(build EROFSが証拠)による артефакт として**却下**(実環境3回連続7/7+CI相当全緑) ②「drawExecuted未証明」は既知の条件付き項目と同一 ③残る指摘は全採用し修正: spawn()型強化+負例テスト、EffectInstanceStateに'error'追加+RFC§12.3信号経路、シリアライズ語彙をnachi系へ改名(com.nachi.effect/nachi-workspace/nachi.perf-baseline)、$integrate=M1コンパイル時正規化とRFC明記、parametersキー=path検証、ヘッドレス深度比較の時刻固定、CIにbuild+prettier追加、prettier違反修正、README新規、@tweakpane/core固定+root vite削除。**最終判定: 条件付きPASS、M1着手可**。ベースライン(SwiftShader): GPU computeMs≈4.2-5.0ms/100k粒子、depth WebGPU renderMs≈34ms/640×360。**残NIT**(次回委譲へ): fade閾値0.35の校正コメント+ロジック一元化、computeCalls=0の意味明記、VfxDiagnostic統一(M1)、engines.node表記。**条件**: Windows実GPU目視3項目(間接描画実行/WebGPU深度フェード/perf HUD)をM2の生存数駆動実装着手前までに |
 | 2026-07-11 | M6完了(監査待ち): 解析コライダ+深度バッファ衝突(前フレーム深度コピー+法線再構成+thickness)+onCollision実体化+SDF衝突+メッシュ表面サンプリング(静的+スキン)+ソケット追従+**ゴールデン#6達成(3/7)**。テスト292本・全スモーク緑。レビュー2回とも物理/数学の全検算でPASS |
+| 2026-07-11 | **M6監査(Codex fresh読み取り専用+Claude新規、独立実施)→統括裁定: FAIL(2項目差し戻し)**。両監査が独立に同一の深度規約バグへ到達。**[B1]深度NDC規約**(両者一致・数値実証): カーネルが `ndc.z*0.5+0.5`/`depth*2-1` のGL式変換を使用、three r185 WebGPURendererはカメラをWebGPU規約(z∈[0,1])に書き換えるため不整合。スモーク側の深度コピーがRenderPipelineデフォルト outputColorTransform=true でsRGB符号化+8bit量子化されており、sRGB(x)≈(x+1)/2 (x≈1) で両誤差が偶然相殺し偽合格(貼り付き位置: 相殺後0.14948 vs 実測0.14946一致、物理期待値≈0.002 → 系統誤差+0.147。RFC準拠の線形深度なら衝突不発=貫通)。許容帯 z∈(-0.4,0.5) が隠蔽。**[B2]golden-character視覚基準が失敗画像**(Codex検出、統括が画像確認): renderer.renderのcanvas直接presentがヘッドレス制約(present即device lost)に抵触、artifacts/golden-character.png は「Golden character failed」カードのスクショ。explosionパターン(オフスクリーンRT→readback→putImageData)へ修正。**[B3]深度capability診断欠如**(Codex): テクスチャ存在のみで有効化、WebGL2/reverse-z/MSAA/カメラ未設定の診断なし。**採用SHOULD**: SDFスモーク追加(物理はClaude監査の独立GPUプローブで4ケース厳密一致=正しい、欠落はカバレッジのみ)/深度スモーク識別力強化(動的occluder・傾斜面bounce・thickness対照)/CLAUDE.md追記。**却下**: Codexサンドボックスのtest(ENOENT)/build(EROFS)失敗=環境起因(4回目)。**健全確認**: 他3パリティ項目(解析/SDF・メッシュサンプリング・ソケット)、ゴールデン#2/#4回帰0差分、性能退行なし(spike 4.174ms、m6-collision 0.075ms、golden-character 0.11ms)。NIT持ち越し: メッシュ空間規約RFC明記/CDF検証強化/深度スモークstickのみ。修正バッチをCodex(fresh --write)へ委譲済み |
+| 2026-07-11 | **M6監査 修正→限定再検証→判定: 条件付きPASS**。Codex修正バッチ(NDC規約統一/線形float深度コピー/golden-characterオフスクリーンreadback化/capability診断/SDF・深度スモーク追加/RFC・CLAUDE.md追記)を検収。検収中に新規障害を統括の証拠駆動切り分けで特定: **three r185 PassNodeのFRAME単位updateBefore重複排除**により、提示ループ外でRenderPipeline.render()を連打するスモークのcopySceneDepth()がシーン再レンダーをスキップし古い深度を黙って返す(決定的証拠: slopeコピーのcenterDepth=0.9834116697311401が直前moving構成と完全一致。カーネルはCPU再現・単独GPUプローブ・同一ページ内先行実行の3経路で無実を証明)→ Codexが深度プリパスを明示2段レンダー(DepthTexture付きRT)+staleトリップワイヤに修正。**再検証結果**: m6-collision 12/12×3回(傾斜面bounce(0.8675,0,0.4974)≈理論値・貼り付き0.002±0.02・slope深度0.98498)、golden-character 7/7+実描画目視確認+視覚基準再取得(前景比0.124)、全回帰緑(m1/m2×3/m3/m4/m5/golden×3/spike×2)、テスト296本、深度NDC系統誤差+0.147は消滅。**Claudeレビュー: PASS(BLOCKER 0)** — three r185実ソースとの整合(makePerspective係数・reversedDepth配線・PassNode dedup・renderOutputスキップ)を独立検算で全確認。**S2(CLAUDE.mdの--update-screenshots常設=B2再発経路)は統括が即時修正**。**持ち越し**: [S1]reverse-z警告のdedupなし無限蓄積(毎フレームsetCamera運用で増殖→code単位dedup要) [N1]CAMERA_UNSET警告がspawn時点判定(初回update時が正確) [N2]staleトリップワイヤが中心1画素の厳密一致依存(構造的に薄い) [N3]depthNormalBounceのy成分未検証 [N4]golden-characterスクショは線形空間+HUD込み(自己一貫だが純粋視覚基準ではない) [N5]sceneDepthSampleCountのrenderTarget?.samplesフォールバック0がテスト未カバー(実害なし)。ゴールデン#6正式達成(3/7)、パリティ17/62 |
 | 2026-07-11 | **M5マイルストーン監査**: Codex=FAIL(多段連鎖の最終イベント消失/interval≥2完了競合=精密なコードパス指摘)/Claude=条件付きPASS(11検証2回再現・並行安全性の構造検証)→裁定で全採用・修正: イベントグラフ深度drain・強制readback・eventPayload語彙強制・timestamp計測分離。m5-events 13検証に拡張、テスト251本。性能: m5-events 0.067ms(M5基準)、全ベースライン劣化なし。**最終判定: 条件付きPASS** |
 | 2026-07-11 | M5完了(監査待ち): GPUイベント&サブエミッタ — onDeath→emitTo連鎖が完全動作(/m5-events/ 11検証、payloadMatchesParent=GPU直接照合)。差し戻し3回の白眉は**診断readback恒久化による証拠駆動切り分け**(機能は正常でスモークのスロット選択誤りと判明)。テスト246本。**持ち越しNIT4**: storageBufferCountのステージ別集計化(M7)/overflow報告の「up to N」表現/純イベント駆動エミッタの糖衣(M9)/emitEvent予約の型コメント |
 | 2026-07-11 | **M4マイルストーン監査**: Codex=FAIL/Claude=条件付きPASS→裁定: Codexビルド系は既知環境起因で却下、実質指摘を全採用し修正→**条件付きPASS**。修正: ①curlNoiseをシンプレックスポテンシャルの数値curl(発散ゼロ)に刷新+GPU検証(sin/cos場のM1実装がRFC未記載のまま残っていた黙認逸脱を解消) ②vector fieldのtexel中心補正+RepeatWrapping+非対称場の数値検証 ③velocityOverLifeを比率形式lut(t)/lut(t_prev)に(ステップレート非依存、30/60Hz一致検証) ④落ち葉回転検証をmesh描画が実際に消費するquat属性に接続 ⑤M4 range()の独立sampleOffset ⑥視覚回帰に許容誤差0.5%方針(firefliesがcompaction順非決定論でバイト再現不能とGPU実証→§16注記) ⑦縮退値診断。性能(SwiftShader): m4-behaviors 0.114ms/golden-ambient 0.605+16.8msをM4基準として記録、既存ベースライン劣化なし。テスト221本 |

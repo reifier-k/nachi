@@ -77,6 +77,8 @@ export interface ThreeKernelAdapterOptions {
   readonly resolveVectorField?: ThreeVectorFieldResolver;
   /** Sampleable color copy of the previous frame's normalized scene depth. */
   readonly sceneDepthTexture?: THREE.Texture;
+  /** Sample count of the source copied into sceneDepthTexture. Must be one for collisions. */
+  readonly sceneDepthSampleCount?: number;
 }
 
 export interface ThreeSpriteMaterializationOptions {
@@ -404,6 +406,11 @@ function materializeInstancedArray(length: number, type: TslStorageType): Kernel
 export function createThreeKernelAdapter(
   options: ThreeKernelAdapterOptions = {},
 ): KernelTslAdapter {
+  const sourceRenderTarget = options.sceneDepthTexture as
+    | (THREE.Texture & { readonly renderTarget?: { readonly samples?: number } })
+    | undefined;
+  const sceneDepthSampleCount =
+    options.sceneDepthSampleCount ?? sourceRenderTarget?.renderTarget?.samples ?? 1;
   const base: KernelTslAdapter = {
     capabilities: {
       atomics: options.backend !== 'webgl2',
@@ -411,6 +418,7 @@ export function createThreeKernelAdapter(
       indirectDispatch: options.backend !== 'webgl2',
       indirectDraw: options.backend !== 'webgl2',
       sceneDepth: options.sceneDepthTexture !== undefined,
+      ...(options.sceneDepthTexture === undefined ? {} : { sceneDepthSampleCount }),
     },
     instanceIndex: asNode(instanceIndex),
     atomicAdd: (target, value, returnValue = false) =>

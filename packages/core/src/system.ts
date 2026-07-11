@@ -75,7 +75,7 @@ export interface VfxSystemOptions {
 export interface VfxCameraState {
   /** World-to-view matrix in column-major order. */
   readonly viewMatrix: readonly number[];
-  /** View-to-clip matrix in column-major order. */
+  /** View-to-clip WebGPU projection matrix (NDC z in [0, 1]) in column-major order. */
   readonly projectionMatrix: readonly number[];
   /** Width and height of the bound previous-frame depth texture. */
   readonly viewportSize: readonly [number, number];
@@ -416,14 +416,33 @@ function asRuntimeRenderer(renderer: unknown): VfxRuntimeRenderer | undefined {
     : undefined;
 }
 
-function runtimeDiagnostic(code: string, message: string, path?: string): VfxDiagnostic {
+function runtimeDiagnostic(
+  code: string,
+  message: string,
+  path?: string,
+  severity: 'error' | 'warning' = 'error',
+): VfxDiagnostic {
   return {
     code,
     message,
     ...(path === undefined ? {} : { path }),
     phase: 'runtime',
-    severity: 'error',
+    severity,
   };
+}
+
+function reverseZCameraDiagnostic(camera: VfxCameraState): VfxDiagnostic | undefined {
+  // three.js WebGPU perspective and orthographic projections both store the depth scale and
+  // offset at column-major elements 10 and 14. Both switch from negative to positive for reverse-z.
+  if ((camera.projectionMatrix[10] ?? 0) <= 0 || (camera.projectionMatrix[14] ?? 0) <= 0) {
+    return undefined;
+  }
+  return runtimeDiagnostic(
+    'NACHI_SCENE_DEPTH_REVERSE_Z_UNSUPPORTED',
+    'collideSceneDepth() does not support a reverse-z projection matrix.',
+    'System.projectionMatrix',
+    'warning',
+  );
 }
 
 function setUniform(
@@ -707,6 +726,12 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
 
   get hasEventPipeline(): boolean {
     return this.program.events.length > 0 || this.kernels.eventInputs.length > 0;
+  }
+
+  get usesSceneDepth(): boolean {
+    return this.program.kernels.update.modules.some(
+      ({ type }) => type === 'core/collide-scene-depth',
+    );
   }
 
   beginFinalEventDrain(): void {
@@ -1104,6 +1129,10 @@ export class VfxEffectInstance<
     return this.clock.timeScale;
   }
 
+  get usesSceneDepth(): boolean {
+    return [...this.#emitters.values()].some((emitter) => emitter.usesSceneDepth);
+  }
+
   addEmitter(key: string, emitter: RuntimeEmitter): void {
     this.#emitters.set(key, emitter);
   }
@@ -1296,6 +1325,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #now: () => number;
   readonly #prewarmStepSeconds: number;
   #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
+  #cameraConfigured = false;
   #compilationCount = 0;
   #deviceLossDiagnostic?: VfxDiagnostic;
   #instanceSequence = 0;
@@ -1356,7 +1386,14 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   setCamera(camera: VfxCameraState): void {
     this.#cameraState = validateCameraState(camera);
-    for (const instance of this.#instances.values()) instance.setCamera(this.#cameraState);
+    this.#cameraConfigured = true;
+    const reverseZDiagnostic = reverseZCameraDiagnostic(this.#cameraState);
+    for (const instance of this.#instances.values()) {
+      instance.setCamera(this.#cameraState);
+      if (instance.usesSceneDepth && reverseZDiagnostic) {
+        instance.recordDiagnostic(reverseZDiagnostic);
+      }
+    }
   }
 
   spawn<
@@ -1393,6 +1430,23 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         throw new Error('VFXSystem renderer must provide kernelAdapter and submitCompute().');
       }
       const compiled = this.#compile(definition);
+      const usesSceneDepth = compiled.emitters.some(({ program }) =>
+        program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth'),
+      );
+      if (usesSceneDepth && !this.#cameraConfigured) {
+        instance.recordDiagnostic(
+          runtimeDiagnostic(
+            'NACHI_SCENE_DEPTH_CAMERA_UNSET',
+            'collideSceneDepth() is using identity camera uniforms because VFXSystem.setCamera() was not called.',
+            'System.projectionMatrix',
+            'warning',
+          ),
+        );
+      }
+      const reverseZDiagnostic = reverseZCameraDiagnostic(this.#cameraState);
+      if (usesSceneDepth && this.#cameraConfigured && reverseZDiagnostic) {
+        instance.recordDiagnostic(reverseZDiagnostic);
+      }
       instance.setEventDrainFrames(compiled.eventDrainFrames);
       const parameters = effectParameters(
         parameterDefinitions,

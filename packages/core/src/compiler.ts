@@ -379,6 +379,8 @@ export interface KernelAdapterCapabilities {
   readonly indirectDispatch: boolean;
   readonly indirectDraw: boolean;
   readonly sceneDepth?: boolean;
+  /** Sample count of the bound scene-depth source. Values greater than one are unsupported. */
+  readonly sceneDepthSampleCount?: number;
 }
 
 export interface KernelTslAdapter {
@@ -2175,19 +2177,41 @@ function createBuildKernels(
         });
       }
     }
-    if (
-      program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth') &&
-      (adapter.capabilities.sceneDepth !== true || adapter.sampleSceneDepth === undefined)
-    ) {
-      buildDiagnostics.push({
-        code: 'NACHI_SCENE_DEPTH_UNAVAILABLE',
-        hint: 'Bind a previous-frame depth copy through the renderer kernel adapter.',
-        message:
-          'collideSceneDepth() requires an explicit sampleable previous-frame scene-depth texture.',
-        path: 'update',
-        phase: 'compile',
-        severity: 'error',
-      });
+    const usesSceneDepth = program.kernels.update.modules.some(
+      ({ type }) => type === 'core/collide-scene-depth',
+    );
+    if (usesSceneDepth) {
+      if (backend === 'webgl2') {
+        buildDiagnostics.push({
+          code: 'NACHI_SCENE_DEPTH_BACKEND_UNSUPPORTED',
+          hint: 'Use the WebGPU backend for scene-depth collision.',
+          message: 'collideSceneDepth() is not supported by the WebGL2 backend.',
+          path: 'update',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      if ((adapter.capabilities.sceneDepthSampleCount ?? 1) > 1) {
+        buildDiagnostics.push({
+          code: 'NACHI_SCENE_DEPTH_MSAA_UNSUPPORTED',
+          hint: 'Resolve and copy scene depth into a single-sample linear float texture.',
+          message: 'collideSceneDepth() cannot sample an MSAA depth texture directly.',
+          path: 'update',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      if (adapter.capabilities.sceneDepth !== true || adapter.sampleSceneDepth === undefined) {
+        buildDiagnostics.push({
+          code: 'NACHI_SCENE_DEPTH_UNAVAILABLE',
+          hint: 'Bind a previous-frame depth copy through the renderer kernel adapter.',
+          message:
+            'collideSceneDepth() requires an explicit sampleable previous-frame scene-depth texture.',
+          path: 'update',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
     }
     const storageBufferLimit = adapter.deviceLimits?.maxStorageBuffersPerShaderStage;
     // Incoming queues are effect-owned and therefore absent from standalone emitter meta. Event
@@ -3928,7 +3952,8 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .div(clipPosition.w.mul(clipPosition.w).sqrt().clamp(0.000001, 1e20));
       const ndc = clipPosition.xyz.mul(inverseW);
       const uv = context.adapter.vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5));
-      const particleDepth = ndc.z.mul(0.5).add(0.5);
+      // WebGPURenderer supplies a WebGPU projection matrix, whose NDC z is already [0, 1].
+      const particleDepth = ndc.z;
       const sceneDepth = sampleDepth(uv);
       const viewport = context.uniform('System.viewportSize');
       const texel = context.adapter.vec2(
@@ -3939,7 +3964,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         const clip = context.adapter.vec4(
           sampleUv.x.mul(2).sub(1),
           sampleUv.y.mul(2).sub(1),
-          depth.mul(2).sub(1),
+          depth,
           1,
         );
         const homogeneous = context.adapter.inverse(projectionMatrix).mul(clip);

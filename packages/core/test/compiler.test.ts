@@ -2340,6 +2340,61 @@ describe('emitter kernel compiler', () => {
     ).toThrow(VfxDiagnosticError);
   });
 
+  it('rejects scene-depth collision on WebGL2 and with an MSAA source', () => {
+    const program = compileEmitter(
+      baseEmitter({ integration: 'none', update: [collideSceneDepth()] }),
+    );
+    const adapter = fakeAdapter();
+    const codes = (callback: () => unknown) => {
+      try {
+        callback();
+        return [];
+      } catch (error) {
+        if (!(error instanceof VfxDiagnosticError)) throw error;
+        return error.diagnostics.map(({ code }) => code);
+      }
+    };
+
+    expect(
+      codes(() =>
+        program.buildKernels({
+          ...adapter,
+          capabilities: { ...adapter.capabilities, backend: 'webgl2' },
+        }),
+      ),
+    ).toContain('NACHI_SCENE_DEPTH_BACKEND_UNSUPPORTED');
+    expect(
+      codes(() =>
+        program.buildKernels({
+          ...adapter,
+          capabilities: { ...adapter.capabilities, sceneDepthSampleCount: 4 },
+        }),
+      ),
+    ).toContain('NACHI_SCENE_DEPTH_MSAA_UNSUPPORTED');
+  });
+
+  it('round-trips WebGPU NDC depth through the r185 perspective projection convention', () => {
+    const near = Math.fround(0.1);
+    const far = Math.fround(20);
+    const viewZ = Math.fround(-5);
+    // Column-major depth terms produced by Matrix4.makePerspective(..., WebGPUCoordinateSystem).
+    const projection = new Float32Array(16);
+    projection[10] = Math.fround(-far / (far - near));
+    projection[11] = -1;
+    projection[14] = Math.fround((-far * near) / (far - near));
+    const clipZ = Math.fround(Math.fround(projection[10]! * viewZ) + projection[14]!);
+    const clipW = Math.fround(projection[11]! * viewZ);
+    const depth = Math.fround(clipZ / clipW);
+    // CPU mirror of multiplying (x_ndc, y_ndc, depth, 1) by inverse(projection).
+    const reconstructedViewZ = Math.fround(
+      projection[14]! / Math.fround(depth * projection[11]! - projection[10]!),
+    );
+
+    expect(depth).toBeGreaterThan(0);
+    expect(depth).toBeLessThan(1);
+    expect(Math.abs(reconstructedViewZ - viewZ)).toBeLessThan(1e-5);
+  });
+
   it('materializes collideSceneDepth with camera uniforms and a bound depth sampler', () => {
     const program = compileEmitter(
       baseEmitter({ integration: 'none', update: [collideSceneDepth({ mode: 'stick' })] }),

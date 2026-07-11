@@ -1,10 +1,12 @@
 import {
   VFXSystem,
+  bakeSdf,
   billboard,
   burst,
   collideBox,
   collidePlane,
   collideSceneDepth,
+  collideSdf,
   collideSphere,
   defineEffect,
   defineEmitter,
@@ -16,11 +18,13 @@ import {
 } from '@nachi/core';
 import type { Vec3, VfxEmitterRuntimeView } from '@nachi/core';
 import * as THREE from 'three/webgpu';
-import { pass, screenUV, vec4 } from 'three/tsl';
+import { screenUV, texture, vec4 } from 'three/tsl';
 
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
+  createThreeSdfResolver,
+  createThreeSdfResource,
   readLogicalAttribute,
 } from './three-kernel-adapter';
 import { createPerformanceMonitor } from './perf';
@@ -100,7 +104,11 @@ function particleEmitter(options: {
   readonly integration?: 'euler' | 'none';
   readonly lifetimeSeconds?: number;
   readonly update: ReturnType<
-    typeof collidePlane | typeof collideSphere | typeof collideBox | typeof collideSceneDepth
+    | typeof collidePlane
+    | typeof collideSphere
+    | typeof collideBox
+    | typeof collideSceneDepth
+    | typeof collideSdf
   >[];
   readonly velocity?: Vec3;
 }) {
@@ -171,23 +179,73 @@ async function run(): Promise<void> {
     new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
   );
   depthScene.add(occluder);
-  const scenePass = pass(depthScene, camera);
-  const sceneDepth = scenePass.getTextureNode('depth').sample(screenUV).r;
+  const sceneDepthTexture = new THREE.DepthTexture(WIDTH, HEIGHT, THREE.UnsignedIntType);
+  sceneDepthTexture.minFilter = THREE.NearestFilter;
+  sceneDepthTexture.magFilter = THREE.NearestFilter;
+  const depthSceneTarget = new THREE.RenderTarget(WIDTH, HEIGHT, {
+    depthBuffer: true,
+    depthTexture: sceneDepthTexture,
+    samples: 0,
+  });
+  const sceneDepth = texture(sceneDepthTexture, screenUV).r;
   const depthPipeline = new THREE.RenderPipeline(renderer);
+  depthPipeline.outputColorTransform = false;
   depthPipeline.outputNode = vec4(sceneDepth, sceneDepth, sceneDepth, 1);
-  const depthCopyTarget = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: false });
+  const depthCopyTarget = new THREE.RenderTarget(WIDTH, HEIGHT, {
+    depthBuffer: false,
+    format: THREE.RGBAFormat,
+    type: THREE.FloatType,
+  });
   depthCopyTarget.texture.minFilter = THREE.NearestFilter;
   depthCopyTarget.texture.magFilter = THREE.NearestFilter;
-  renderer.setRenderTarget(depthCopyTarget);
-  depthPipeline.render();
-  const depthPixels = await renderer.readRenderTargetPixelsAsync(
-    depthCopyTarget,
-    0,
-    0,
-    WIDTH,
-    HEIGHT,
+  depthCopyTarget.texture.colorSpace = THREE.NoColorSpace;
+  const centerPixelOffset = (Math.floor(HEIGHT / 2) * WIDTH + Math.floor(WIDTH / 2)) * 4;
+  const centerDepthOf = (pixels: ArrayLike<number>): number =>
+    Number(pixels[centerPixelOffset] ?? Number.NaN);
+  let previousDepthCopy: { readonly centerDepth: number; readonly configuration: string } | null =
+    null;
+  const copySceneDepth = async (configuration: string) => {
+    try {
+      // three r185 PassNode uses FRAME updateBefore semantics, so RenderPipeline.render() calls
+      // outside the presentation loop can reuse its prior depth. Render the prepass explicitly.
+      renderer.setRenderTarget(depthSceneTarget);
+      renderer.render(depthScene, camera);
+      renderer.setRenderTarget(depthCopyTarget);
+      depthPipeline.render();
+      const pixels = await renderer.readRenderTargetPixelsAsync(
+        depthCopyTarget,
+        0,
+        0,
+        WIDTH,
+        HEIGHT,
+      );
+      const centerDepth = centerDepthOf(pixels);
+      if (previousDepthCopy !== null && centerDepth === previousDepthCopy.centerDepth) {
+        throw new Error(
+          `Stale scene-depth copy: ${configuration} retained center depth from ${previousDepthCopy.configuration}.`,
+        );
+      }
+      previousDepthCopy = { centerDepth, configuration };
+      return pixels;
+    } finally {
+      renderer.setRenderTarget(null);
+    }
+  };
+  const depthPixels = await copySceneDepth('frontal-z0');
+
+  const sdfRef = {
+    assetType: 'sdf',
+    kind: 'asset-ref',
+    uri: 'procedural://m6-collision/sphere',
+  } as const;
+  const sdfResource = createThreeSdfResource(
+    bakeSdf({
+      boundsMax: [2, 2, 2],
+      boundsMin: [-2, -2, -2],
+      resolution: [33, 33, 33],
+      shapes: [{ center: [0, 0, 0], radius: 1, shape: 'sphere' }],
+    }),
   );
-  renderer.setRenderTarget(null);
 
   const adapter = createThreeKernelAdapter({
     backend: 'webgpu',
@@ -197,6 +255,8 @@ async function run(): Promise<void> {
       : {
           maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage,
         }),
+    resolveSdf: createThreeSdfResolver(new Map([[sdfRef.uri, sdfResource]])),
+    sceneDepthSampleCount: 1,
     sceneDepthTexture: depthCopyTarget.texture,
   });
   const runtimeRenderer = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
@@ -361,6 +421,23 @@ async function run(): Promise<void> {
     box.view.kernels,
     'position',
   )) as Float32Array;
+  const sdf = await runSingle(
+    [0.5, 0, 0],
+    [collideSdf({ bounce: 0.5, field: sdfRef, friction: 0, mode: 'bounce' })],
+    { velocity: [-1, 0, 0] },
+  );
+  const sdfPosition = (await readLogicalAttribute(
+    renderer,
+    sdf.view.program,
+    sdf.view.kernels,
+    'position',
+  )) as Float32Array;
+  const sdfVelocity = (await readLogicalAttribute(
+    renderer,
+    sdf.view.program,
+    sdf.view.kernels,
+    'velocity',
+  )) as Float32Array;
   const killed = await runSingle(
     [0, -0.1, 0],
     [collidePlane({ mode: 'kill', normal: [0, 1, 0], offset: 0 })],
@@ -405,39 +482,114 @@ async function run(): Promise<void> {
     'position',
   )) as Float32Array;
 
-  const depthSystem = new VFXSystem(runtimeRenderer, undefined, {
-    fixedTimeStep: { stepSeconds: STEP },
+  const runDepthCollision = async (options: {
+    readonly collision: ReturnType<typeof collideSceneDepth>;
+    readonly frames?: number;
+    readonly integration?: 'euler' | 'none';
+    readonly position: Vec3;
+    readonly seed: number;
+    readonly velocity: Vec3;
+  }) => {
+    const system = new VFXSystem(runtimeRenderer, undefined, {
+      fixedTimeStep: { stepSeconds: STEP },
+    });
+    system.setCamera(cameraState);
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          particles: particleEmitter({
+            ...(options.integration === undefined ? {} : { integration: options.integration }),
+            update: [options.collision],
+            velocity: options.velocity,
+          }),
+        },
+      }),
+      { position: options.position, seed: options.seed },
+    ) as RuntimeInstance;
+    const view = emitter(instance);
+    await system.update(0);
+    for (let frame = 0; frame < (options.frames ?? 1); frame += 1) await system.update(STEP);
+    return {
+      diagnostics: instance.diagnostics,
+      position: (await readLogicalAttribute(
+        renderer,
+        view.program,
+        view.kernels,
+        'position',
+      )) as Float32Array,
+      velocity: (await readLogicalAttribute(
+        renderer,
+        view.program,
+        view.kernels,
+        'velocity',
+      )) as Float32Array,
+      system,
+      view,
+    };
+  };
+
+  const depth = await runDepthCollision({
+    collision: collideSceneDepth({ mode: 'stick', surfaceOffset: 0.002, thickness: 0.15 }),
+    frames: 90,
+    integration: 'euler',
+    position: [0, 0, 1],
+    seed: 40,
+    velocity: [0, 0, -1],
   });
-  depthSystem.setCamera(cameraState);
-  const depthInstance = depthSystem.spawn(
-    defineEffect({
-      elements: {
-        particles: particleEmitter({
-          update: [collideSceneDepth({ mode: 'stick', surfaceOffset: 0.002, thickness: 0.15 })],
-          velocity: [0, 0, -1],
-        }),
-      },
-    }),
-    { position: [0, 0, 1], seed: 40 },
-  ) as RuntimeInstance;
-  const depthView = emitter(depthInstance);
-  await depthSystem.update(0);
-  for (let frame = 0; frame < 90; frame += 1) await depthSystem.update(STEP);
-  const depthPosition = (await readLogicalAttribute(
+  const centerDepth = centerDepthOf(depthPixels);
+
+  occluder.position.z = 0.2;
+  occluder.rotation.y = 0;
+  await copySceneDepth('moving-z0.2');
+  const movingDepth = await runDepthCollision({
+    collision: collideSceneDepth({ mode: 'stick', surfaceOffset: 0.002, thickness: 0.5 }),
+    integration: 'none',
+    position: [0, 0, 0.1],
+    seed: 41,
+    velocity: [0, 0, 0],
+  });
+  occluder.position.z = 0.35;
+  const movedDepthPixels = await copySceneDepth('moving-z0.35');
+  await movingDepth.system.update(STEP);
+  const movingDepthNextPosition = (await readLogicalAttribute(
     renderer,
-    depthView.program,
-    depthView.kernels,
+    movingDepth.view.program,
+    movingDepth.view.kernels,
     'position',
   )) as Float32Array;
-  const depthVelocity = (await readLogicalAttribute(
-    renderer,
-    depthView.program,
-    depthView.kernels,
-    'velocity',
-  )) as Float32Array;
-  const centerDepth =
-    Number(depthPixels[((Math.floor(HEIGHT / 2) * WIDTH + Math.floor(WIDTH / 2)) * 4) | 0] ?? 0) /
-    255;
+  const movedCenterDepth = centerDepthOf(movedDepthPixels);
+
+  const slopeAngle = Math.PI / 6;
+  occluder.position.z = 0;
+  occluder.rotation.y = slopeAngle;
+  const slopeDepthPixels = await copySceneDepth('slope-y-pi-over-6-z0');
+  const slopeCenterDepth = centerDepthOf(slopeDepthPixels);
+  const slopeDepth = await runDepthCollision({
+    collision: collideSceneDepth({ bounce: 1, friction: 0, mode: 'bounce', thickness: 0.2 }),
+    integration: 'none',
+    position: [0, 0, -0.03],
+    seed: 42,
+    velocity: [0, 0, -1],
+  });
+  const slopeNormal: Vec3 = [Math.sin(slopeAngle), 0, Math.cos(slopeAngle)];
+  const incoming: Vec3 = [0, 0, -1];
+  const normalSpeed =
+    incoming[0] * slopeNormal[0] + incoming[1] * slopeNormal[1] + incoming[2] * slopeNormal[2];
+  const expectedSlopeVelocity: Vec3 = [
+    incoming[0] - 2 * normalSpeed * slopeNormal[0],
+    incoming[1] - 2 * normalSpeed * slopeNormal[1],
+    incoming[2] - 2 * normalSpeed * slopeNormal[2],
+  ];
+
+  occluder.rotation.y = 0;
+  await copySceneDepth('thickness-frontal-z0');
+  const thicknessDepth = await runDepthCollision({
+    collision: collideSceneDepth({ mode: 'stick', thickness: 0.1 }),
+    integration: 'none',
+    position: [0, 0, -1],
+    seed: 43,
+    velocity: [0, 0, -1],
+  });
   await measureGpuPerformance();
 
   const validation = {
@@ -448,9 +600,18 @@ async function run(): Promise<void> {
     depthCollision:
       centerDepth > 0 &&
       centerDepth < 1 &&
-      (depthPosition[2] ?? Number.NaN) > -0.4 &&
-      (depthPosition[2] ?? Number.NaN) < 0.5 &&
-      Math.abs(depthVelocity[2] ?? Number.NaN) < 0.002,
+      close(depth.position[2] ?? Number.NaN, 0.002, 0.02) &&
+      Math.abs(depth.velocity[2] ?? Number.NaN) < 0.002,
+    depthMovingOccluder:
+      movedCenterDepth < centerDepth &&
+      close(movingDepth.position[2] ?? Number.NaN, 0.202, 0.02) &&
+      close(movingDepthNextPosition[2] ?? Number.NaN, 0.352, 0.02),
+    depthNormalBounce:
+      close(slopeDepth.velocity[0] ?? Number.NaN, expectedSlopeVelocity[0], 0.04) &&
+      close(slopeDepth.velocity[2] ?? Number.NaN, expectedSlopeVelocity[2], 0.04),
+    depthThicknessReject:
+      close(thicknessDepth.position[2] ?? Number.NaN, -1, 0.002) &&
+      close(thicknessDepth.velocity[2] ?? Number.NaN, -1, 0.002),
     deterministic:
       bytesEqual(plane.position, planeDuplicate.position) &&
       bytesEqual(plane.velocity, planeDuplicate.velocity),
@@ -464,6 +625,11 @@ async function run(): Promise<void> {
       (plane.position[1] ?? Number.NaN) >= -0.0001 &&
       close(plane.position[1] ?? Number.NaN, planeCpu.position, 0.003) &&
       close(plane.velocity[1] ?? Number.NaN, planeCpu.velocity, 0.003),
+    sdfBounce:
+      close(sdfVelocity[0] ?? Number.NaN, 0.5, 0.01) &&
+      close(sdfVelocity[1] ?? Number.NaN, 0, 0.01) &&
+      close(sdfVelocity[2] ?? Number.NaN, 0, 0.01),
+    sdfPushout: close(sdfPosition[0] ?? Number.NaN, 1, 0.01),
   };
   const result = {
     analytic: {
@@ -474,9 +640,23 @@ async function run(): Promise<void> {
     depth: {
       cameraUniforms: ['System.viewMatrix', 'System.projectionMatrix', 'System.viewportSize'],
       centerDepth,
-      position: [...depthPosition.slice(0, 3)],
-      source: 'previous-frame-pass-depth-color-copy',
-      velocity: [...depthVelocity.slice(0, 3)],
+      moving: {
+        centerDepth: movedCenterDepth,
+        firstFramePosition: [...movingDepth.position.slice(0, 3)],
+        nextFramePosition: [...movingDepthNextPosition.slice(0, 3)],
+      },
+      normalBounce: {
+        centerDepth: slopeCenterDepth,
+        expectedVelocity: expectedSlopeVelocity,
+        velocity: [...slopeDepth.velocity.slice(0, 3)],
+      },
+      position: [...depth.position.slice(0, 3)],
+      source: 'explicit-render-target-depth-prepass-linear-float-depth-color-copy',
+      thicknessReject: {
+        position: [...thicknessDepth.position.slice(0, 3)],
+        velocity: [...thicknessDepth.velocity.slice(0, 3)],
+      },
+      velocity: [...depth.velocity.slice(0, 3)],
     },
     event: {
       callbackCount: collisionCallbacks.reduce((sum, count) => sum + count, 0),
@@ -490,6 +670,11 @@ async function run(): Promise<void> {
       cpu: planeCpu,
       position: [...plane.position.slice(0, 3)],
       velocity: [...plane.velocity.slice(0, 3)],
+    },
+    sdf: {
+      expected: { position: [1, 0, 0], velocity: [0.5, 0, 0] },
+      position: [...sdfPosition.slice(0, 3)],
+      velocity: [...sdfVelocity.slice(0, 3)],
     },
     validation,
   };

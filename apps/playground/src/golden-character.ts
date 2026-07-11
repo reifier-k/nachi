@@ -43,7 +43,6 @@ const headless = query.get('headless') === '1';
 const backendValue = requireElement<HTMLElement>('#backend-value');
 const modeValue = requireElement<HTMLElement>('#mode-value');
 const statusValue = requireElement<HTMLElement>('#status-value');
-const sceneHost = requireElement<HTMLDivElement>('#scene');
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -91,6 +90,32 @@ function bytesEqual(left: ArrayBufferView, right: ArrayBufferView): boolean {
   const a = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
   const b = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
   return a.every((value, index) => value === b[index]);
+}
+
+function paintReadback(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): number {
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Golden character preview canvas has no 2D context.');
+  const image = context.createImageData(WIDTH, HEIGHT);
+  const background = [pixels[0] ?? 0, pixels[1] ?? 0, pixels[2] ?? 0] as const;
+  let foregroundPixels = 0;
+  for (let y = 0; y < HEIGHT; y += 1) {
+    const sourceY = HEIGHT - 1 - y;
+    for (let x = 0; x < WIDTH; x += 1) {
+      const source = (sourceY * WIDTH + x) * 4;
+      const target = (y * WIDTH + x) * 4;
+      image.data[target] = pixels[source] ?? 0;
+      image.data[target + 1] = pixels[source + 1] ?? 0;
+      image.data[target + 2] = pixels[source + 2] ?? 0;
+      image.data[target + 3] = pixels[source + 3] ?? 255;
+      const difference =
+        Math.abs((pixels[source] ?? 0) - background[0]) +
+        Math.abs((pixels[source + 1] ?? 0) - background[1]) +
+        Math.abs((pixels[source + 2] ?? 0) - background[2]);
+      if (difference > 12) foregroundPixels += 1;
+    }
+  }
+  context.putImageData(image, 0, 0);
+  return foregroundPixels / (WIDTH * HEIGHT);
 }
 
 function buildCharacter() {
@@ -159,7 +184,6 @@ async function run(): Promise<void> {
   const renderer = await createPlaygroundRenderer({ antialias: true, trackTimestamp: false });
   renderer.setPixelRatio(1);
   renderer.setSize(WIDTH, HEIGHT);
-  sceneHost.append(renderer.domElement);
   await renderer.init();
   const backend = renderer.backend as BackendLike;
   if (!backend.isWebGPUBackend) throw new Error('Golden character requires WebGPU.');
@@ -361,7 +385,21 @@ async function run(): Promise<void> {
   const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 30);
   camera.position.set(0, 0.7, 5.2);
   camera.lookAt(0, 0.25, 0);
+  const visualTarget = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  renderer.setRenderTarget(visualTarget);
   renderer.render(scene, camera);
+  const visualPixels = await renderer.readRenderTargetPixelsAsync(
+    visualTarget,
+    0,
+    0,
+    WIDTH,
+    HEIGHT,
+  );
+  renderer.setRenderTarget(null);
+  const foregroundPixelRatio = paintReadback(
+    requireElement<HTMLCanvasElement>('#golden-character'),
+    visualPixels,
+  );
 
   const performanceRenderer = await createPlaygroundRenderer({
     antialias: false,
@@ -401,10 +439,12 @@ async function run(): Promise<void> {
     meshNormalVelocity: maximumNormalVelocityError < 0.0001,
     socketFollow: socketError < 0.0001,
     surfaceSpawn: surfaceDistance < 0.7,
+    visualReadback: foregroundPixelRatio > 0.01,
   };
   const result = {
     artifact: 'artifacts/golden-character.png',
     consoleMessages,
+    foregroundPixelRatio,
     maximumNormalVelocityError,
     maximumPoseDelta,
     mode: headless ? 'headless' : 'visual',
@@ -415,7 +455,7 @@ async function run(): Promise<void> {
     validation,
   };
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'golden-character.png', selector: '#scene canvas' },
+    { filename: 'golden-character.png', selector: '#golden-character' },
   ]);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';
