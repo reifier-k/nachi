@@ -44,6 +44,9 @@ importers:
       '@nachi/trails':
         specifier: workspace:*
         version: link:../../packages/trails
+      '@nachi/tsl-kit':
+        specifier: workspace:*
+        version: link:../../packages/tsl-kit
       three:
         specifier: 0.185.1
         version: 0.185.1
@@ -75,6 +78,15 @@ importers:
       '@types/three':
         specifier: 0.185.0
         version: 0.185.0
+
+  packages/tsl-kit:
+    devDependencies:
+      '@types/three':
+        specifier: 0.185.0
+        version: 0.185.0
+      three:
+        specifier: 0.185.1
+        version: 0.185.1
 
 packages:
 

@@ -1,0 +1,55 @@
+{
+  "name": "@nachi/tsl-kit",
+  "version": "0.0.0",
+  "description": "Standalone TSL shader building blocks for Three.js NodeMaterial",
+  "keywords": [
+    "three.js",
+    "tsl",
+    "webgpu",
+    "webgl",
+    "shader",
+    "vfx"
+  ],
+  "license": "MIT",
+  "sideEffects": false,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachi-vfx/nachi.git",
+    "directory": "packages/tsl-kit"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./math": {
+      "types": "./dist/math.d.ts",
+      "import": "./dist/math.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "pnpm build",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@types/three": ">=0.185.0 <0.186.0",
+    "three": ">=0.185.0 <0.186.0"
+  },
+  "peerDependenciesMeta": {
+    "@types/three": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/three": "0.185.0",
+    "three": "0.185.1"
+  }
+}
