@@ -1,5 +1,7 @@
 # RFC 002: Effekseer `.efkefc` import compatibility study
 
+> Language: English (this page) / [日本語](./002-effekseer-compatibility.ja.md)
+
 - Status: Research complete; implementation deferred
 - Date: 2026-07-12
 - Recommendation: reconsider after nachi 1.0

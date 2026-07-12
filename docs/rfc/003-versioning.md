@@ -1,5 +1,7 @@
 # RFC 003: Versioning, compatibility, and deprecation
 
+> Language: English (this page) / [日本語](./003-versioning.ja.md)
+
 - **Status:** Proposed for the 1.0 release gate
 - **Scope:** All public `@nachi/*` packages and the `nachi-effect` asset format
 - **Normative references:** [RFC 001](./001-api.md), especially §12, §13, and §16

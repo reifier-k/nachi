@@ -1,5 +1,7 @@
 # nachi
 
+> Language: English (this page) / [日本語](./README.ja.md)
+
 Code-first, TSL/WebGPU-native VFX for Three.js, designed around Niagara's staged simulation model.
 Nachi is preparing its 1.0 release candidate; M12 includes JSON assets, advanced simulation, React
 Three Fiber bindings, release automation, and a buildable documentation gallery.
