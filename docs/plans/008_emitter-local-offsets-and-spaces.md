@@ -2,8 +2,11 @@
 
 - 重大度: 高(体験。4/5 の制作エージェントが独立に痛点として報告)
 - 対象: `@nachi/core`(init/update モジュールの空間意味論、EmitterConfig)
-- 状態: 提案
+- 状態: 承認済み(実装待ち。既定統一は RFC 起票が前提)
 - 出典: showcase-ice / showcase-machina / showcase-beam / showcase-barrier 制作エージェント
+- 裁定: 2026-07-13 ユーザー承認 — 追加 API(center/arc/offset)に加え、**RFC を起票した上で
+  既定空間の 'emitter' 統一(破壊的変更)まで本ハードニングで断行**する。changeset の
+  major/minor 判断は RFC 内で確定させる。
 
 ## 症状
 
