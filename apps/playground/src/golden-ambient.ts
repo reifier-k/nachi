@@ -95,7 +95,7 @@ const leafRef: GeometryRef = {
   uri: 'procedural://golden-ambient/leaf-quad',
 };
 
-// ROADMAP golden #4: M4スコープ=ループ+挙動（カリング/significance/大量インスタンスはM11で拡張）。
+// Golden #4 keeps the M4 visual baseline; M11 stress acceptance runs after baseline capture below.
 const goldenAmbient = defineEffect({
   elements: {
     fireflies: defineEmitter({
@@ -402,6 +402,32 @@ async function run(): Promise<void> {
   const leafPixels = await render([primary.leaves]);
   paintReadback(requireElement<HTMLCanvasElement>('#ambient-fireflies'), fireflyPixels);
   paintReadback(requireElement<HTMLCanvasElement>('#ambient-leaves'), leafPixels);
+
+  // Run the M11 scale/significance phase only after both baseline images have been captured so the
+  // established golden-ambient-fireflies/leaves pixels remain unchanged.
+  const stressSystem = new VFXSystem(runtimeRenderer, undefined, {
+    significanceBudget: { maxActiveInstances: 12, maxParticles: 3 * (128 + 160) },
+  });
+  const stressInstances = Array.from({ length: 24 }, (_, index) =>
+    stressSystem.spawn(goldenAmbient, {
+      position: [(index % 6) * 0.15, Math.floor(index / 6) * 0.1, 0],
+      priority: 24 - index,
+      seed: 9_000 + index,
+    }),
+  );
+  await stressSystem.update(0);
+  const stressActions = stressInstances.map(({ scalability }) => scalability);
+  const stressCounts = {
+    culled: stressActions.filter(({ action }) => action === 'culled').length,
+    full: stressActions.filter(({ action }) => action === 'full').length,
+    spawnSuppressed: stressActions.filter(({ action }) => action === 'spawn-suppressed').length,
+  };
+  const scaleSignificanceStress =
+    stressCounts.full === 3 &&
+    stressCounts.spawnSuppressed === 9 &&
+    stressCounts.culled === 12 &&
+    stressActions.some(({ reasons }) => reasons.includes('significance-particle-budget')) &&
+    stressActions.some(({ reasons }) => reasons.includes('significance-instance-budget'));
   const fireflySteady = fireflyAliveHistory.slice(-8);
   const leafSteady = leafAliveHistory.slice(-8);
   const stableBand = (values: readonly number[], tolerance: number) =>
@@ -430,6 +456,7 @@ async function run(): Promise<void> {
     fireflyMotion:
       liveFireflyPositions.length > 0 && positionVariance > 0.001 && maximumFireflyRadius < 6,
     leavesFallAndRotate,
+    scaleSignificanceStress,
     // Churn bands scale with capacity: 28 / 128 ~= 22% for fireflies and
     // 22 / 160 ~= 14% for leaves, covering each emitter's expected spawn/retire cadence.
     steadyState:
@@ -463,6 +490,7 @@ async function run(): Promise<void> {
       leafMinimumRotationDelta: 0.01,
       simulatedSeconds: 12,
     },
+    stress: { instanceCount: stressInstances.length, ...stressCounts },
     validation,
   };
   root.dataset.artifactScreenshots = JSON.stringify([

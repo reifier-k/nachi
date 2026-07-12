@@ -252,6 +252,14 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
   }
 }
 
+class DrawTrackingRuntimeRenderer extends FakeRuntimeRenderer {
+  drawCount = 0;
+
+  getRenderableIndirectDrawCount(): number {
+    return this.drawCount;
+  }
+}
+
 class ZeroReadbackRenderer extends FakeRuntimeRenderer {
   readStorage(): Promise<ArrayBuffer> {
     return Promise.resolve(new Uint32Array(4).buffer);
@@ -263,6 +271,47 @@ class CacheRuntimeRenderer extends ZeroReadbackRenderer {
 
   writeStorage(_storage: KernelStorageNode, data: ArrayBufferView, byteOffset = 0): void {
     this.uploads.push({ byteLength: data.byteLength, byteOffset });
+  }
+}
+
+class DeferredUploadRenderer extends FakeRuntimeRenderer {
+  readonly cpu = new Map<KernelStorageNode, Uint8Array>();
+  readonly gpu = new Map<KernelStorageNode, Uint8Array>();
+  flushCount = 0;
+  readonly replayReady = new WeakSet<object>();
+
+  clearStorageReplayReady(kernels: object): void {
+    this.replayReady.delete(kernels);
+  }
+
+  isStorageReplayReady(kernels: object): boolean {
+    return this.replayReady.has(kernels);
+  }
+
+  markStorageReplayReady(kernels: object): void {
+    this.replayReady.add(kernels);
+  }
+
+  writeStorage(storage: KernelStorageNode, data: ArrayBufferView, byteOffset = 0): void {
+    const size = Math.max(this.cpu.get(storage)?.byteLength ?? 0, byteOffset + data.byteLength);
+    const target = new Uint8Array(size);
+    target.set(this.cpu.get(storage)?.subarray(0, size) ?? []);
+    target.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), byteOffset);
+    this.cpu.set(storage, target);
+    if (!this.gpu.has(storage)) {
+      const stale = new Uint8Array(size);
+      new Uint32Array(stale.buffer)[0] = 8;
+      this.gpu.set(storage, stale);
+    }
+  }
+
+  flushStorageWrites(): void {
+    this.flushCount += 1;
+    for (const [storage, bytes] of this.cpu) this.gpu.set(storage, bytes.slice());
+  }
+
+  readStorage(storage: KernelStorageNode): Promise<ArrayBuffer> {
+    return Promise.resolve((this.gpu.get(storage) ?? new Uint8Array(128)).slice().buffer);
   }
 }
 
@@ -1759,6 +1808,15 @@ describe('VFXSystem runtime scheduler', () => {
 });
 
 describe('M11 debug capture scheduling', () => {
+  it('diagnoses attribute capture before the emitter initialization kernel has run', async () => {
+    const system = new VFXSystem(new ZeroReadbackRenderer());
+    const instance = system.spawn(runtimeEffect());
+
+    await expect(instance.debug.captureAttributes('particles')).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_DEBUG_EMITTER_UNINITIALIZED' })],
+    });
+  });
+
   it('keeps multi-storage capture and profile on one frame before a concurrent update', async () => {
     const base = new FakeRuntimeRenderer();
     const pendingReads = new Map<KernelStorageNode, (buffer: ArrayBuffer) => void>();
@@ -1941,6 +1999,84 @@ describe('M11 VFXSystem scalability scheduling', () => {
     expect(low.scalability.action).toBe('culled');
     expect(low.scalability.reasons).toContain('significance-instance-budget');
     expect(high.scalability.score).toBeGreaterThan(low.scalability.score);
+  });
+
+  it('suppresses normal scheduler births at the particle budget with the normative reason', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      significanceBudget: { maxActiveInstances: 2, maxParticles: 4 },
+    });
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 4,
+          render: computeRender,
+          spawn: burst({ count: 4 }),
+        }),
+      },
+    });
+    const full = system.spawn(definition, { priority: 1 });
+    const suppressed = system.spawn(definition, { priority: 0 });
+
+    expect(full.scalability.action).toBe('full');
+    expect(suppressed.scalability).toMatchObject({
+      action: 'spawn-suppressed',
+      reasons: ['significance-particle-budget'],
+    });
+    await system.update(0);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
+  });
+
+  it('reports indirect draws one frame late and keeps culled, paused, and unmaterialized frames at zero', async () => {
+    const renderer = new DrawTrackingRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          bounds: { radius: 0.1 },
+          capacity: 1,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 1 }),
+        }),
+      },
+      scalability: { culling: { distance: { fadeEnd: 5 }, frustum: false } },
+    });
+    const instance = system.spawn(definition);
+    await system.update(0);
+    const unmaterialized = await system.debug.captureProfile();
+    expect(unmaterialized).toMatchObject({
+      frame: 1,
+      system: { indirectDraws: { value: 0 } },
+    });
+
+    // Host materialization/render completes after update/capture. The same scheduler frame remains
+    // unchanged; the next top-level update publishes that completed draw frame.
+    renderer.drawCount = 1;
+    expect((await system.debug.captureProfile()).system.indirectDraws).toMatchObject({ value: 0 });
+    await system.update(1 / 60);
+    expect(await system.debug.captureProfile()).toMatchObject({
+      frame: 2,
+      system: { indirectDraws: { value: 1 } },
+    });
+
+    instance.setTransform([10, 0, 0]);
+    await system.update(1 / 60);
+    expect(instance.scalability.action).toBe('culled');
+    expect((await system.debug.captureProfile()).system.indirectDraws).toMatchObject({ value: 0 });
+
+    instance.setTransform([0, 0, 0]);
+    await system.update(0);
+    expect((await system.debug.captureProfile()).system.indirectDraws).toMatchObject({ value: 0 });
+
+    renderer.drawCount = 0;
+    await system.update(1 / 60);
+    expect((await system.debug.captureProfile()).system.indirectDraws).toMatchObject({ value: 0 });
+
+    instance.stop();
+    await system.update(1 / 60);
+    expect((await system.debug.captureProfile()).system.indirectDraws).toMatchObject({ value: 0 });
   });
 
   it('keeps the admitted instance through a narrow score crossing and switches outside the band', async () => {
@@ -2272,6 +2408,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
       maximumAttributeError: 0,
     });
     expect(cache.metadata.sourceBackend).toBe('webgpu');
+    expect(cache.metadata.qualityTier).toBe('epic');
     expect(estimateSimulationCacheMemory(cache)).toMatchObject({
       binaryBytes: cache.data.byteLength,
       uploadBytesPerFrame: expect.any(Number),
@@ -2311,6 +2448,110 @@ describe('M11 VFXSystem scalability scheduling', () => {
     ).rejects.toMatchObject({
       diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_BACKEND_MISMATCH' })],
     });
+  });
+
+  it('flushes replay uploads before immediate debug readback and resumes from a completed seek', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 8,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const renderer = new DeferredUploadRenderer();
+    const system = new VFXSystem(renderer);
+    const cache = await bakeSimulation(system, definition, { frames: 2 });
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
+    const player = await replaySimulation(system, definition, cache);
+
+    expect(renderer.flushCount).toBeGreaterThan(0);
+    await expect(player.instance.debug.captureAttributes('particles')).resolves.toMatchObject({
+      aliveCount: 0,
+      rows: [],
+    });
+
+    player.play();
+    await player.update(player.duration);
+    expect(player.state).toBe('complete');
+    await player.seek(player.duration / 2);
+    const seekTime = player.localTime;
+    player.play();
+    expect(player.localTime).toBe(seekTime);
+    await player.update(player.duration / 4);
+    expect(player.localTime).toBeCloseTo((player.duration * 3) / 4);
+  });
+
+  it('rejects hostile cache layouts and indices with structured metadata diagnostics', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 4,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const floatCache = await bakeSimulation(new VFXSystem(new CacheRuntimeRenderer()), definition, {
+      frames: 1,
+    });
+    const quantizedCache = await bakeSimulation(
+      new VFXSystem(new CacheRuntimeRenderer()),
+      definition,
+      { compression: 'quantized-u16', frames: 1 },
+    );
+    const corrupt = (
+      source: typeof floatCache,
+      mutate: (metadata: typeof floatCache.metadata, data: ArrayBuffer) => void,
+    ) => {
+      const metadata = JSON.parse(JSON.stringify(source.metadata)) as typeof floatCache.metadata;
+      const data = source.data.slice(0);
+      mutate(metadata, data);
+      return { data, kind: 'simulation-cache' as const, metadata };
+    };
+    const fixtures = [
+      corrupt(floatCache, (metadata, data) => {
+        Object.assign(metadata.emitters[0]!, { aliveCounts: [2] });
+        const emitter = metadata.emitters[0]!;
+        new Uint32Array(data, emitter.aliveIndicesOffsetBytes, 2).set([0, 0]);
+      }),
+      corrupt(floatCache, (metadata, data) => {
+        Object.assign(metadata.emitters[0]!, { aliveCounts: [1] });
+        const emitter = metadata.emitters[0]!;
+        new Uint32Array(data, emitter.aliveIndicesOffsetBytes, 1)[0] = emitter.capacity;
+      }),
+      corrupt(floatCache, (metadata) => {
+        Object.assign(metadata.emitters[0]!.attributes[0]!, { offsetBytes: 1 });
+      }),
+      corrupt(floatCache, (metadata) => {
+        Object.assign(metadata.emitters[0]!.attributes[0]!, {
+          frameStrideBytes: Number.MAX_SAFE_INTEGER,
+        });
+      }),
+      corrupt(floatCache, (metadata) => {
+        Object.assign(metadata.emitters[0]!.attributes[0]!, { logicalType: 'u32' });
+      }),
+      corrupt(floatCache, (metadata) => {
+        const emitter = metadata.emitters[0]!;
+        Object.assign(emitter.attributes[0]!, { offsetBytes: emitter.aliveIndicesOffsetBytes });
+      }),
+      corrupt(quantizedCache, (metadata) => {
+        const quantization = metadata.emitters[0]!.attributes[0]!.quantization!;
+        Object.assign(quantization, {
+          maximum: quantization.maximum.map(() => -1),
+          minimum: quantization.minimum.map(() => 1),
+        });
+      }),
+    ];
+
+    for (const fixture of fixtures) {
+      expect(() => estimateSimulationCacheMemory(fixture)).toThrowError(
+        expect.objectContaining({
+          diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_METADATA_INVALID' })],
+        }),
+      );
+    }
   });
 
   it('warms up by sampleStartFrame fixed steps before recording cache frames', async () => {
@@ -2356,6 +2597,39 @@ describe('M11 VFXSystem scalability scheduling', () => {
       ],
     });
     expect(renderer.submissions).toEqual([]);
+  });
+
+  it('rejects culled and particle-budget-suppressed bake instances', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          bounds: { radius: 0.1 },
+          capacity: 4,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 4 }),
+        }),
+      },
+      scalability: { culling: { frustum: true } },
+    });
+    const culledSystem = new VFXSystem(new CacheRuntimeRenderer());
+    culledSystem.setCamera({ ...camera, coordinateSystem: 'webgl' });
+    await expect(
+      bakeSimulation(culledSystem, definition, {
+        frames: 1,
+        spawn: { position: [3, 0, 0] },
+      }),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED' })],
+    });
+
+    const suppressedSystem = new VFXSystem(new CacheRuntimeRenderer(), undefined, {
+      significanceBudget: { maxParticles: 0 },
+    });
+    await expect(bakeSimulation(suppressedSystem, definition, { frames: 1 })).rejects.toMatchObject(
+      {
+        diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED' })],
+      },
+    );
   });
 
   it('rebuilds valid sorted draw indirection during cache replay', async () => {

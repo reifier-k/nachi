@@ -2,17 +2,19 @@ import { describe, expect, it } from 'vitest';
 
 import {
   VfxDiagnosticError,
-  aggregateProfileFrame,
   attributeStorageComponentIndex,
   billboard,
   burst,
-  captureEmitterAttributes,
   compileEmitter,
   defineEmitter,
-  formatAttributeSnapshot,
   positionSphere,
   tslModule,
 } from '../src/index.js';
+import {
+  aggregateProfileFrame,
+  captureEmitterAttributes,
+  formatAttributeSnapshot,
+} from '../src/debug.js';
 import type {
   KernelStorageNode,
   ResolvedAttribute,
@@ -339,5 +341,39 @@ describe('M11 profiler aggregation', () => {
     expect(snapshot.system.alive).toMatchObject({ status: 'unavailable', value: null });
     expect(snapshot.system.indirectDraws).toMatchObject({ status: 'unavailable', value: null });
     expect(snapshot.gpu.computeMs).toMatchObject({ status: 'unavailable', value: null });
+  });
+
+  it('distinguishes pending alive readback and rejects invalid GPU timing samples', () => {
+    const snapshot = aggregateProfileFrame(
+      1,
+      [
+        {
+          aliveCount: undefined,
+          aliveReadbackEnabled: true,
+          capacity: 2,
+          computeDispatches: 0,
+          cpuUpdateMs: 0,
+          emitterId: 'pending',
+          indirectDraws: 0,
+          instanceId: 'a',
+          spawnCount: 0,
+        },
+      ],
+      { computeMs: Number.NaN, reason: null, renderMs: -1, status: 'available' },
+    );
+
+    expect(snapshot.emitters[0]?.alive).toMatchObject({
+      reason: expect.stringContaining('not yet been measured'),
+    });
+    expect(snapshot.gpu.computeMs).toMatchObject({
+      code: 'NACHI_PROFILE_GPU_TIMESTAMP_INVALID',
+      status: 'error',
+      value: null,
+    });
+    expect(snapshot.gpu.renderMs).toMatchObject({
+      code: 'NACHI_PROFILE_GPU_TIMESTAMP_INVALID',
+      status: 'error',
+      value: null,
+    });
   });
 });

@@ -1,19 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
+import { billboard, burst, defineEffect, defineEmitter, meshRenderer } from '../src/index.js';
 import {
   applyEmitterQualityTier,
-  billboard,
-  burst,
-  defineEffect,
-  defineEmitter,
   detectDeviceQualityTier,
   mergeBoundingSpheres,
-  meshRenderer,
   resolveEmitterQuality,
   selectDeviceQualityTier,
   significanceScore,
   sphereIntersectsFrustum,
-} from '../src/index.js';
+} from '../src/scalability.js';
 
 describe('M11 quality tiers and device selection', () => {
   it('selects deterministic tiers from backend limits/features and exposes reasons', async () => {

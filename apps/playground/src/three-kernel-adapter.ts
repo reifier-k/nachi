@@ -399,6 +399,7 @@ const createUniform = uniform as unknown as (value: unknown, type: string) => un
 type StorageArray = Float32Array | Int32Array | Uint32Array;
 type StorageArrayConstructor = new (length: number) => StorageArray;
 
+const THREE_STORAGE_ATTRIBUTE_TYPE = 3;
 const THREE_INDIRECT_ATTRIBUTE_TYPE = 4;
 const indirectAttributesByAdapter = new WeakMap<
   KernelTslAdapter,
@@ -671,6 +672,8 @@ export function createThreeRuntimeRenderer(
   setInstanceCount?: VfxRuntimeRenderer['setInstanceCount'],
 ): VfxRuntimeRenderer {
   const initializedIndirectAttributes = new WeakSet<THREE.IndirectStorageBufferAttribute>();
+  const replayReadyKernels = new WeakSet<BuiltEmitterKernels>();
+  const pendingStorageWrites = new Set<THREE.StorageBufferAttribute>();
   const initializeIndirectAttributes = (): void => {
     const attributes = (
       renderer as unknown as {
@@ -732,12 +735,66 @@ export function createThreeRuntimeRenderer(
     );
     value.addUpdateRange?.(byteOffset / 4, data.byteLength / 4);
     value.needsUpdate = true;
+    pendingStorageWrites.add(value as THREE.StorageBufferAttribute);
+  };
+  const flushStorageWrites = (): void => {
+    const attributes = (
+      renderer as unknown as {
+        readonly _attributes?: {
+          update(attribute: THREE.StorageBufferAttribute, type: number): void;
+        };
+      }
+    )._attributes;
+    if (!attributes) {
+      throw new Error('Three renderer must be initialized before flushing Nachi storage uploads.');
+    }
+    for (const attribute of pendingStorageWrites) {
+      attributes.update(
+        attribute,
+        attribute instanceof THREE.IndirectStorageBufferAttribute
+          ? THREE_INDIRECT_ATTRIBUTE_TYPE
+          : THREE_STORAGE_ATTRIBUTE_TYPE,
+      );
+    }
+    pendingStorageWrites.clear();
+  };
+  const prepareStorageReadback = (storageNode: KernelStorageNode): void => {
+    const attributes = (
+      renderer as unknown as {
+        readonly _attributes?: {
+          update(attribute: THREE.StorageBufferAttribute, type: number): void;
+        };
+      }
+    )._attributes;
+    if (!attributes) {
+      throw new Error('Three renderer must be initialized before reading Nachi storage.');
+    }
+    const attribute = storageNode.value as THREE.StorageBufferAttribute;
+    // getArrayBufferAsync() goes straight to the backend and assumes its GPU buffer already exists.
+    // Replay can reach this path before either compute or render has materialized the attribute, so
+    // pass every requested storage through Three's attribute manager first. This also publishes a
+    // pending CPU replay upload when readStorage is used without a separate explicit flush.
+    attributes.update(
+      attribute,
+      attribute instanceof THREE.IndirectStorageBufferAttribute
+        ? THREE_INDIRECT_ATTRIBUTE_TYPE
+        : THREE_STORAGE_ATTRIBUTE_TYPE,
+    );
+    pendingStorageWrites.delete(attribute);
   };
   const base = {
+    clearStorageReplayReady: (kernels: BuiltEmitterKernels) => replayReadyKernels.delete(kernels),
+    getRenderableIndirectDrawCount: (kernels: BuiltEmitterKernels) =>
+      drawObjectsByKernels.get(kernels)?.size ?? 0,
+    isStorageReplayReady: (kernels: BuiltEmitterKernels) => replayReadyKernels.has(kernels),
     kernelAdapter,
+    flushStorageWrites,
+    markStorageReplayReady: (kernels: BuiltEmitterKernels) => replayReadyKernels.add(kernels),
     prepareKernelsForPooling,
-    readStorage: (storageNode: KernelStorageNode) =>
-      renderer.getArrayBufferAsync(storageNode.value as never),
+    readStorage: (storageNode: KernelStorageNode) => {
+      prepareStorageReadback(storageNode);
+      return renderer.getArrayBufferAsync(storageNode.value as never);
+    },
     setUniformValue: setThreeUniformValue,
     setRenderOrder: (kernels: BuiltEmitterKernels, order: number) => {
       renderOrderByKernels.set(kernels, order);

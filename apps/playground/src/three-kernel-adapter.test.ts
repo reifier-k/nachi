@@ -1,6 +1,5 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
-  applyEmitterQualityTier,
   billboard,
   bakeSdf,
   burst,
@@ -29,6 +28,7 @@ import {
   vortex,
   createCoreKernelModuleRegistry,
 } from '@nachi/core';
+import { applyEmitterQualityTier } from '../../../packages/core/src/scalability.js';
 import type { EffectInstanceState } from '@nachi/core';
 import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
 import { materializeThreeRibbonDraw } from '@nachi/trails/three';
@@ -724,7 +724,13 @@ describe('three kernel adapter', () => {
     );
     const adapter = createThreeKernelAdapter();
     const kernels = program.buildKernels(adapter);
+    const uploadTypes: number[] = [];
     const renderer = {
+      _attributes: {
+        update(_attribute: THREE.StorageBufferAttribute, type: number) {
+          uploadTypes.push(type);
+        },
+      },
       async computeAsync() {},
       async getArrayBufferAsync() {
         return new ArrayBuffer(0);
@@ -741,6 +747,53 @@ describe('three kernel adapter', () => {
     runtime.writeStorage?.(kernels.drawIndirect!, new Uint32Array([2]), byteOffset);
     expect((indirect.array as Uint32Array)[byteOffset / 4]).toBe(2);
     expect(indirect.updateRanges).toContainEqual({ count: 1, start: byteOffset / 4 });
+    runtime.flushStorageWrites?.();
+    expect(uploadTypes).toEqual([3, 4]);
+  });
+
+  it('materializes replay storage before immediate pre-render readback', async () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 2,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 0 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const materialized = new WeakSet<object>();
+    const updated: object[] = [];
+    const renderer = {
+      _attributes: {
+        update(attribute: THREE.StorageBufferAttribute) {
+          materialized.add(attribute);
+          updated.push(attribute);
+        },
+      },
+      async computeAsync() {},
+      async getArrayBufferAsync(attribute: THREE.StorageBufferAttribute) {
+        if (!materialized.has(attribute)) {
+          throw new TypeError("Cannot read properties of undefined (reading 'size')");
+        }
+        const array = attribute.array as Float32Array | Int32Array | Uint32Array;
+        return array.slice().buffer;
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    const positionNode = kernels.storages.position!;
+    const position = positionNode.value as THREE.StorageBufferAttribute;
+    const replayFrame = new Float32Array([1.25, -2.5, 3.75, 0]);
+
+    runtime.writeStorage?.(positionNode, replayFrame);
+    runtime.flushStorageWrites?.();
+
+    expect(
+      Array.from(new Float32Array(await runtime.readStorage!(positionNode))).slice(0, 4),
+    ).toEqual(Array.from(replayFrame));
+    const untouchedNode = kernels.storages.velocity!;
+    await expect(runtime.readStorage!(untouchedNode)).resolves.toBeInstanceOf(ArrayBuffer);
+    expect(updated).toContain(position);
+    expect(updated).toContain(untouchedNode.value);
   });
 
   it('applies culling visibility both before and after draw materialization', () => {
@@ -760,8 +813,10 @@ describe('three kernel adapter', () => {
       },
     } as unknown as THREE.WebGPURenderer;
     const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(0);
     runtime.setVisibility?.(kernels, false);
     const mesh = materializeThreeSpriteDraw(program, kernels);
+    expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(1);
     expect(mesh.visible).toBe(false);
     runtime.setVisibility?.(kernels, true);
     expect(mesh.visible).toBe(true);

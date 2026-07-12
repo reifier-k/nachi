@@ -31,10 +31,12 @@ export interface DebugGpuPassTiming {
 
 export interface EmitterProfileCounters {
   readonly aliveCount: number | undefined;
+  readonly aliveReadbackEnabled?: boolean;
   readonly capacity: number;
   readonly computeDispatches: number;
   readonly cpuUpdateMs: number;
   readonly emitterId: string;
+  /** Materialized/renderable indirect records in the most recently completed render frame. */
   readonly indirectDraws: number | undefined;
   readonly instanceId: string;
   readonly spawnCount: number;
@@ -281,6 +283,15 @@ export async function captureEmitterAttributes(
   emitterId: string,
   options?: CaptureAttributesOptions,
 ): Promise<AttributeSnapshot> {
+  if (view.initialized === false && renderer.isStorageReplayReady?.(view.kernels) !== true) {
+    throw new VfxDiagnosticError([
+      runtimeDiagnostic(
+        'NACHI_DEBUG_EMITTER_UNINITIALIZED',
+        'Attribute capture requires an initialized emitter. Advance the owning VFXSystem at least once before readback.',
+        `elements.${emitterId}`,
+      ),
+    ]);
+  }
   if (!renderer.readStorage) {
     throw new VfxDiagnosticError([
       runtimeDiagnostic(
@@ -380,7 +391,15 @@ function gpuMetric(
     );
   }
   const value = timing[path];
-  if (timing.status === 'available' && value !== null) return available(value);
+  if (timing.status === 'available' && value !== null) {
+    if (Number.isFinite(value) && value >= 0) return available(value);
+    return {
+      code: 'NACHI_PROFILE_GPU_TIMESTAMP_INVALID',
+      reason: `GPU ${path} must be finite and non-negative.`,
+      status: 'error',
+      value: null,
+    };
+  }
   return {
     code: 'NACHI_PROFILE_GPU_TIMESTAMP_UNAVAILABLE',
     reason: timing.reason ?? `GPU ${path} is ${timing.status}.`,
@@ -402,7 +421,9 @@ export function aggregateProfileFrame(
         counter.aliveCount === undefined
           ? unavailable(
               'NACHI_PROFILE_ALIVE_READBACK_UNAVAILABLE',
-              'Enable aliveCountReadbackInterval to expose an authoritative GPU alive count.',
+              counter.aliveReadbackEnabled
+                ? 'Authoritative GPU alive count is enabled but has not yet been measured.'
+                : 'Enable aliveCountReadbackInterval to expose an authoritative GPU alive count.',
             )
           : available(counter.aliveCount),
       capacity: counter.capacity,

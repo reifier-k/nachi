@@ -94,10 +94,20 @@ export interface VfxRuntimeRenderer {
   setInstanceCount?(kernels: BuiltEmitterKernels, count: number): void;
   /** Hides materialized draw objects when a fully culled instance skips rendering. */
   setVisibility?(kernels: BuiltEmitterKernels, visible: boolean): void;
+  /** Returns the currently materialized indirect draw records owned by these kernels. */
+  getRenderableIndirectDrawCount?(kernels: BuiltEmitterKernels): number;
   /** Applies VFXSystem's stable far-to-near emitter order to backend draw objects. */
   setRenderOrder?(kernels: BuiltEmitterKernels, order: number): void;
   /** Uploads cache replay bytes into an existing materialized storage resource. */
   writeStorage?(storage: KernelStorageNode, data: ArrayBufferView, byteOffset?: number): void;
+  /** Makes preceding writeStorage calls visible to immediate storage readback/compute submission. */
+  flushStorageWrites?(): Promise<void> | void;
+  /** Marks cache-uploaded kernels as coherent for immediate readback. */
+  markStorageReplayReady?(kernels: BuiltEmitterKernels): void;
+  /** Clears replay ownership when kernels are assigned to a fresh live instance. */
+  clearStorageReplayReady?(kernels: BuiltEmitterKernels): void;
+  /** Reports whether cache uploads, rather than simulation initialization, own current storage. */
+  isStorageReplayReady?(kernels: BuiltEmitterKernels): boolean;
   submitCompute(kernel: KernelComputeNode): Promise<void> | void;
   submitComputeIndirect?(
     kernel: KernelComputeNode,
@@ -143,7 +153,7 @@ export interface VfxCameraState {
   readonly coordinateSystem?: 'webgl' | 'webgpu';
   /** World-to-view matrix in column-major order. */
   readonly viewMatrix: readonly number[];
-  /** View-to-clip WebGPU projection matrix (NDC z in [0, 1]) in column-major order. */
+  /** View-to-clip matrix using coordinateSystem's WebGPU or WebGL NDC z convention. */
   readonly projectionMatrix: readonly number[];
   /** Width and height of the bound previous-frame depth texture. */
   readonly viewportSize: readonly [number, number];
@@ -512,6 +522,7 @@ type AdvanceContext = {
 export interface VfxEmitterRuntimeView {
   readonly aliveCount: number | undefined;
   readonly definition: EmitterDefinition;
+  readonly initialized: boolean;
   readonly kernels: BuiltEmitterKernels;
   readonly lifecycleState: EmitterLifecycleState;
   readonly loopIndex: number;
@@ -782,6 +793,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #capacityScale = 1;
   #profileComputeDispatches = 0;
   #profileCpuUpdateMs = 0;
+  // Draw materialization is observed by the following scheduler frame. This keeps captureProfile(),
+  // which is FIFO-serialized immediately after update(), on the last completed render frame.
   #profileIndirectDraws: number | undefined;
   #profileSpawnCount = 0;
   #spawnRateScale = 1;
@@ -816,6 +829,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.controller = new EmitterLifecycleController(definition.lifecycle);
     this.kernels =
       reusedKernels ?? program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
+    renderer.clearStorageReplayReady?.(this.kernels);
     this.setQualityTier(qualityTier);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', transform);
@@ -826,6 +840,10 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
 
   get aliveCount(): number | undefined {
     return this.#exactAliveCount;
+  }
+
+  get initialized(): boolean {
+    return this.#initialized;
   }
 
   get lifecycleState(): EmitterLifecycleState {
@@ -917,9 +935,22 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#profileCpuUpdateMs = 0;
     this.#profileSpawnCount = 0;
     this.#profileIndirectDraws =
-      this.#renderer.kernelAdapter.capabilities.backend === 'webgpu'
-        ? this.program.draws.filter((draw) => 'indirect' in draw).length
-        : undefined;
+      this.#renderer.kernelAdapter.capabilities.backend === 'webgpu' ? 0 : undefined;
+  }
+
+  markRenderable(): void {
+    if (this.#profileIndirectDraws !== undefined) {
+      // Draw objects are materialized by the host render integration between top-level updates, so
+      // this sample describes the render frame completed before the current update/capture pair.
+      this.#profileIndirectDraws = Math.max(
+        0,
+        this.#renderer.getRenderableIndirectDrawCount?.(this.kernels) ?? 0,
+      );
+    }
+  }
+
+  markNotRenderable(): void {
+    if (this.#profileIndirectDraws !== undefined) this.#profileIndirectDraws = 0;
   }
 
   recordCpuUpdate(milliseconds: number): void {
@@ -929,6 +960,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   profileCounters(instanceId: string, emitterId: string): EmitterProfileCounters {
     return {
       aliveCount: this.#exactAliveCount,
+      aliveReadbackEnabled:
+        this.#aliveCountReadbackInterval !== undefined && this.#renderer.readStorage !== undefined,
       capacity: this.estimatedParticleCost,
       computeDispatches: this.#profileComputeDispatches,
       cpuUpdateMs: this.#profileCpuUpdateMs,
@@ -1742,7 +1775,10 @@ export class VfxEffectInstance<
 
   stop(): void {
     this.#assertNotReleased();
-    if (this.#state === 'active') this.#state = 'stopped';
+    if (this.#state === 'active') {
+      this.#state = 'stopped';
+      for (const emitter of this.#emitters.values()) emitter.markNotRenderable();
+    }
   }
 
   markError(diagnostic: VfxDiagnostic): void {
@@ -1784,6 +1820,9 @@ export class VfxEffectInstance<
     }
     this.#initialized = true;
     this.#completeIfFinished();
+    if (this.#state === 'active') {
+      for (const emitter of this.#emitters.values()) emitter.markRenderable();
+    }
   }
 
   async advance(worldDelta: number, systemTime: number, prewarmStepSeconds: number): Promise<void> {
@@ -1806,6 +1845,10 @@ export class VfxEffectInstance<
       await this.#measureEmitter(emitter, () => emitter.advance(localDelta, context));
     }
     this.#completeIfFinished();
+    for (const emitter of this.#emitters.values()) {
+      if (this.#state === 'active' && localDelta > TIME_EPSILON) emitter.markRenderable();
+      else if (this.#state !== 'active') emitter.markNotRenderable();
+    }
   }
 
   #completeIfFinished(): void {

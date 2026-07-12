@@ -9,6 +9,7 @@ import type {
   EffectSpawnOptions,
   EmptyParameterSchema,
   ParameterSchema,
+  QualityTier,
   ResolvedAttribute,
   ResolvedAttributeSchema,
   ResolvedAttributeStorage,
@@ -61,6 +62,7 @@ export interface SimulationCacheMetadata {
     readonly maximumAttributeError: number;
     readonly tolerance: number;
   };
+  readonly qualityTier: QualityTier;
   readonly sampleStartFrame: number;
   readonly sourceBackend: 'webgl2' | 'webgpu';
   readonly uploadBytesPerFrame: number;
@@ -154,13 +156,77 @@ function align(value: number, alignment: number): number {
   return Math.ceil(value / alignment) * alignment;
 }
 
-function validateCacheStructure(cache: SimulationCache): void {
+function assertLittleEndian(): void {
+  const bytes = new Uint8Array(new Uint16Array([0x0102]).buffer);
+  if (bytes[0] !== 0x02) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_ENDIAN_UNSUPPORTED',
+      'Simulation-cache binary encoding requires a little-endian host.',
+    );
+  }
+}
+
+type PayloadRegion = { readonly end: number; readonly path: string; readonly start: number };
+
+function payloadRegion(
+  regions: PayloadRegion[],
+  offset: number,
+  stride: number,
+  frames: number,
+  alignment: number,
+  byteLength: number,
+  path: string,
+): void {
+  const size = stride * frames;
+  const end = offset + size;
+  if (
+    !Number.isSafeInteger(offset) ||
+    !Number.isSafeInteger(stride) ||
+    !Number.isSafeInteger(size) ||
+    !Number.isSafeInteger(end) ||
+    offset < 0 ||
+    stride <= 0 ||
+    offset % alignment !== 0 ||
+    stride % alignment !== 0 ||
+    end > byteLength
+  ) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_METADATA_INVALID',
+      `${path} has an unsafe, unaligned, or out-of-bounds binary region.`,
+      path,
+    );
+  }
+  regions.push({ end, path, start: offset });
+}
+
+const ATTRIBUTE_COMPONENTS: Readonly<Record<AttributeType, number>> = {
+  bool: 1,
+  color: 4,
+  f32: 1,
+  i32: 1,
+  mat3: 9,
+  mat4: 16,
+  quat: 4,
+  u32: 1,
+  vec2: 2,
+  vec3: 3,
+  vec4: 4,
+};
+
+function validateCacheStructureUnchecked(cache: SimulationCache): void {
   if (
     cache.kind !== 'simulation-cache' ||
     cache.metadata.kind !== 'nachi-simulation-cache-metadata' ||
     cache.metadata.version !== 1
   ) {
     throw cacheDiagnostic('NACHI_SIM_CACHE_VERSION_UNSUPPORTED', 'Unsupported simulation cache.');
+  }
+  if (!(cache.data instanceof ArrayBuffer)) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_METADATA_INVALID',
+      'Simulation cache data must be an ArrayBuffer.',
+      'data',
+    );
   }
   const { frameCount, frameRate } = cache.metadata;
   if (
@@ -174,6 +240,10 @@ function validateCacheStructure(cache: SimulationCache): void {
     !['float32', 'quantized-u16'].includes(cache.metadata.compression) ||
     !['nearest', 'linear'].includes(cache.metadata.interpolation) ||
     !['webgl2', 'webgpu'].includes(cache.metadata.sourceBackend) ||
+    !['low', 'medium', 'high', 'epic'].includes(cache.metadata.qualityTier) ||
+    !Number.isSafeInteger(cache.metadata.uploadBytesPerFrame) ||
+    cache.metadata.uploadBytesPerFrame < 0 ||
+    !Array.isArray(cache.metadata.emitters) ||
     typeof cache.metadata.loop.aliveIndicesMatch !== 'boolean' ||
     typeof cache.metadata.loop.continuous !== 'boolean' ||
     typeof cache.metadata.loop.enabled !== 'boolean' ||
@@ -194,8 +264,17 @@ function validateCacheStructure(cache: SimulationCache): void {
     );
   }
   const keys = new Set<string>();
+  const regions: PayloadRegion[] = [];
   for (const emitter of cache.metadata.emitters) {
-    if (keys.has(emitter.key) || !Number.isSafeInteger(emitter.capacity) || emitter.capacity <= 0) {
+    if (
+      typeof emitter.key !== 'string' ||
+      emitter.key.length === 0 ||
+      keys.has(emitter.key) ||
+      !Number.isSafeInteger(emitter.capacity) ||
+      emitter.capacity <= 0 ||
+      !Array.isArray(emitter.aliveCounts) ||
+      !Array.isArray(emitter.attributes)
+    ) {
       throw cacheDiagnostic(
         'NACHI_SIM_CACHE_METADATA_INVALID',
         `Emitter metadata for ${emitter.key} has a duplicate key or invalid capacity.`,
@@ -206,18 +285,40 @@ function validateCacheStructure(cache: SimulationCache): void {
     if (
       emitter.aliveCounts.length !== frameCount ||
       emitter.aliveCounts.some(
-        (count) => !Number.isSafeInteger(count) || count < 0 || count > emitter.capacity,
+        (count: number) => !Number.isSafeInteger(count) || count < 0 || count > emitter.capacity,
       ) ||
-      emitter.aliveIndicesFrameStrideBytes !== emitter.capacity * 4 ||
-      emitter.aliveIndicesOffsetBytes < 0 ||
-      emitter.aliveIndicesOffsetBytes + emitter.aliveIndicesFrameStrideBytes * frameCount >
-        cache.data.byteLength
+      emitter.aliveIndicesFrameStrideBytes !== emitter.capacity * 4
     ) {
       throw cacheDiagnostic(
         'NACHI_SIM_CACHE_METADATA_INVALID',
         `Emitter ${emitter.key} alive-index metadata is outside the binary payload.`,
         `metadata.emitters.${emitter.key}.aliveIndicesOffsetBytes`,
       );
+    }
+    payloadRegion(
+      regions,
+      emitter.aliveIndicesOffsetBytes,
+      emitter.aliveIndicesFrameStrideBytes,
+      frameCount,
+      Uint32Array.BYTES_PER_ELEMENT,
+      cache.data.byteLength,
+      `metadata.emitters.${emitter.key}.aliveIndicesOffsetBytes`,
+    );
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      const count = emitter.aliveCounts[frame]!;
+      const alive = new Uint32Array(
+        cache.data,
+        emitter.aliveIndicesOffsetBytes + frame * emitter.aliveIndicesFrameStrideBytes,
+        count,
+      );
+      const seen = new Set<number>();
+      if (alive.some((index) => index >= emitter.capacity || seen.size === seen.add(index).size)) {
+        throw cacheDiagnostic(
+          'NACHI_SIM_CACHE_METADATA_INVALID',
+          `Emitter ${emitter.key} frame ${frame} has an out-of-capacity or duplicate alive index.`,
+          `metadata.emitters.${emitter.key}.aliveIndices`,
+        );
+      }
     }
     const hasBirthOrder = emitter.birthIndicesOffsetBytes !== undefined;
     if (
@@ -227,11 +328,9 @@ function validateCacheStructure(cache: SimulationCache): void {
         (emitter.birthIndicesFrameStrideBytes !== emitter.capacity * 4 ||
           emitter.nextSpawnOrders!.length !== frameCount ||
           emitter.nextSpawnOrders!.some(
-            (value) => !Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff,
+            (value: number) => !Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff,
           ) ||
-          emitter.birthIndicesOffsetBytes! < 0 ||
-          emitter.birthIndicesOffsetBytes! + emitter.birthIndicesFrameStrideBytes! * frameCount >
-            cache.data.byteLength))
+          !Array.isArray(emitter.nextSpawnOrders)))
     ) {
       throw cacheDiagnostic(
         'NACHI_SIM_CACHE_METADATA_INVALID',
@@ -239,21 +338,44 @@ function validateCacheStructure(cache: SimulationCache): void {
         `metadata.emitters.${emitter.key}.birthIndicesOffsetBytes`,
       );
     }
+    if (hasBirthOrder) {
+      payloadRegion(
+        regions,
+        emitter.birthIndicesOffsetBytes!,
+        emitter.birthIndicesFrameStrideBytes!,
+        frameCount,
+        Uint32Array.BYTES_PER_ELEMENT,
+        cache.data.byteLength,
+        `metadata.emitters.${emitter.key}.birthIndicesOffsetBytes`,
+      );
+    }
     const attributeNames = new Set<string>();
     for (const attribute of emitter.attributes) {
+      const logicalType = attribute.logicalType as AttributeType;
       const validEncoding = ['float32', 'int32', 'quantized-u16', 'uint32'].includes(
         attribute.encoding,
       );
       const bytesPerComponent = attribute.encoding === 'quantized-u16' ? 2 : 4;
       const expectedStride = emitter.capacity * attribute.components * bytesPerComponent;
+      const expectedEncoding =
+        attribute.logicalType === 'bool' || attribute.logicalType === 'u32'
+          ? 'uint32'
+          : attribute.logicalType === 'i32'
+            ? 'int32'
+            : cache.metadata.compression === 'quantized-u16'
+              ? 'quantized-u16'
+              : 'float32';
       if (
+        typeof attribute.name !== 'string' ||
+        attribute.name.length === 0 ||
         attributeNames.has(attribute.name) ||
         !validEncoding ||
+        !(attribute.logicalType in ATTRIBUTE_COMPONENTS) ||
         !Number.isSafeInteger(attribute.components) ||
-        attribute.components <= 0 ||
+        attribute.components !== ATTRIBUTE_COMPONENTS[logicalType] ||
+        attribute.encoding !== expectedEncoding ||
         attribute.frameStrideBytes !== expectedStride ||
-        attribute.offsetBytes < 0 ||
-        attribute.offsetBytes + attribute.frameStrideBytes * frameCount > cache.data.byteLength
+        (attribute.encoding === 'quantized-u16') !== (attribute.quantization !== undefined)
       ) {
         throw cacheDiagnostic(
           'NACHI_SIM_CACHE_METADATA_INVALID',
@@ -262,12 +384,25 @@ function validateCacheStructure(cache: SimulationCache): void {
         );
       }
       attributeNames.add(attribute.name);
+      payloadRegion(
+        regions,
+        attribute.offsetBytes,
+        attribute.frameStrideBytes,
+        frameCount,
+        bytesPerComponent,
+        cache.data.byteLength,
+        `metadata.emitters.${emitter.key}.attributes.${attribute.name}.offsetBytes`,
+      );
       if (
         attribute.encoding === 'quantized-u16' &&
         (attribute.quantization?.minimum.length !== attribute.components ||
           attribute.quantization.maximum.length !== attribute.components ||
-          attribute.quantization.minimum.some((value) => !Number.isFinite(value)) ||
-          attribute.quantization.maximum.some((value) => !Number.isFinite(value)))
+          attribute.quantization.minimum.some((value: number) => !Number.isFinite(value)) ||
+          attribute.quantization.maximum.some((value: number) => !Number.isFinite(value)) ||
+          attribute.quantization.minimum.some(
+            (value: number, component: number) =>
+              value > attribute.quantization!.maximum[component]!,
+          ))
       ) {
         throw cacheDiagnostic(
           'NACHI_SIM_CACHE_METADATA_INVALID',
@@ -276,6 +411,32 @@ function validateCacheStructure(cache: SimulationCache): void {
         );
       }
     }
+  }
+  regions.sort((left, right) => left.start - right.start || left.end - right.end);
+  for (let index = 1; index < regions.length; index += 1) {
+    const previous = regions[index - 1]!;
+    const current = regions[index]!;
+    if (current.start < previous.end) {
+      throw cacheDiagnostic(
+        'NACHI_SIM_CACHE_METADATA_INVALID',
+        `Simulation cache payload regions overlap: ${previous.path} and ${current.path}.`,
+        current.path,
+      );
+    }
+  }
+}
+
+function validateCacheStructure(cache: SimulationCache): void {
+  assertLittleEndian();
+  try {
+    validateCacheStructureUnchecked(cache);
+  } catch (error) {
+    if (error instanceof VfxDiagnosticError) throw error;
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_METADATA_INVALID',
+      `Malformed simulation cache metadata: ${error instanceof Error ? error.message : String(error)}.`,
+      'metadata',
+    );
   }
 }
 
@@ -355,6 +516,12 @@ async function recordEmitterFrame(
   view: VfxEmitterRuntimeView,
   selected: readonly ResolvedAttribute[],
 ): Promise<RecordedEmitterFrame> {
+  if (!view.initialized) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_EMITTER_UNINITIALIZED',
+      'Simulation-cache readback requires an initialized emitter.',
+    );
+  }
   if (!renderer.readStorage) {
     throw cacheDiagnostic(
       'NACHI_SIM_CACHE_READBACK_UNAVAILABLE',
@@ -508,7 +675,7 @@ function buildCache(
       | 'loopTolerance'
       | 'sampleStartFrame'
     >
-  > & { readonly sourceBackend: 'webgl2' | 'webgpu' },
+  > & { readonly qualityTier: QualityTier; readonly sourceBackend: 'webgl2' | 'webgpu' },
 ): SimulationCache {
   let offset = 0;
   let uploadBytesPerFrame = 0;
@@ -648,6 +815,7 @@ function buildCache(
         maximumAttributeError: loopError.maximum,
         tolerance: options.loopTolerance,
       },
+      qualityTier: options.qualityTier,
       sampleStartFrame: options.sampleStartFrame,
       sourceBackend: options.sourceBackend,
       uploadBytesPerFrame,
@@ -670,6 +838,7 @@ export async function bakeSimulation<
   definition: EffectDefinition<Elements, Parameters>,
   options: BakeSimulationOptions<EffectDefinition<Elements, Parameters>>,
 ): Promise<SimulationCache> {
+  assertLittleEndian();
   requirePositiveSafeInteger(options.frames, 'frames');
   if (
     options.compression !== undefined &&
@@ -707,6 +876,16 @@ export async function bakeSimulation<
     instance.release();
     throw new VfxDiagnosticError(diagnostics);
   }
+  if (instance.scalability.action !== 'full') {
+    const action = instance.scalability.action;
+    const reasons = instance.scalability.reasons.join(', ') || 'unspecified';
+    instance.release();
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED',
+      `Simulation baking requires full scalability execution; instance action is ${action} (${reasons}).`,
+      'instance.scalability',
+    );
+  }
   const entries = Object.entries(definition.elements).filter(
     (entry) => entry[1].kind === 'emitter',
   );
@@ -725,12 +904,26 @@ export async function bakeSimulation<
       };
     });
     await system.update(0);
+    if (instance.scalability.action !== 'full') {
+      throw cacheDiagnostic(
+        'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED',
+        `Simulation baking was suppressed by scalability action ${instance.scalability.action}.`,
+        'instance.scalability',
+      );
+    }
     const step = 1 / frameRate;
     for (let frame = 0; frame < sampleStartFrame; frame += 1) await system.update(step);
     for (let frame = 0; frame < options.frames; frame += 1) {
       if (frame > 0) await system.update(step);
       await Promise.all(
         recorded.map(async (emitter) => {
+          if (instance.scalability.action !== 'full') {
+            throw cacheDiagnostic(
+              'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED',
+              `Simulation baking was suppressed by scalability action ${instance.scalability.action}.`,
+              'instance.scalability',
+            );
+          }
           const view = instance.getEmitter(emitter.key);
           if (!view) throw new Error(`Runtime emitter ${emitter.key} disappeared during bake.`);
           emitter.frames.push(await recordEmitterFrame(renderer, view, emitter.selected));
@@ -747,6 +940,7 @@ export async function bakeSimulation<
     interpolation: options.interpolation ?? 'nearest',
     loop: options.loop ?? false,
     loopTolerance,
+    qualityTier: system.qualitySelection.tier,
     sampleStartFrame,
     sourceBackend: renderer.kernelAdapter.capabilities.backend,
   });
@@ -1011,7 +1205,6 @@ export class SimulationCachePlayer<Definition = AnyEffectDefinition> {
 
   play(): void {
     this.#assertNotReleased();
-    if (this.#state === 'complete') this.#time = 0;
     this.#state = 'playing';
   }
 
@@ -1158,6 +1351,8 @@ export class SimulationCachePlayer<Definition = AnyEffectDefinition> {
           view.kernels.drawIndirectOffsetBytes + Uint32Array.BYTES_PER_ELEMENT,
         );
       }
+      await this.#renderer.flushStorageWrites?.();
+      this.#renderer.markStorageReplayReady?.(view.kernels);
       if (view.kernels.prepareSort && view.kernels.sortPasses) {
         await this.#renderer.submitCompute(view.kernels.prepareSort);
         for (const pass of view.kernels.sortPasses) await this.#renderer.submitCompute(pass);

@@ -246,7 +246,7 @@ async function run(): Promise<void> {
   const renderer = await createPlaygroundRenderer({
     antialias: false,
     forceWebGL: requestedBackend === 'webgl',
-    trackTimestamp: true,
+    trackTimestamp: false,
   });
   renderer.setPixelRatio(1);
   renderer.setSize(WIDTH, HEIGHT);
@@ -283,11 +283,6 @@ async function run(): Promise<void> {
       : { maxTransformFeedbackSeparateAttribs: transformFeedbackLimit }),
   });
   const baseRuntime = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
-  const monitor = createPerformanceMonitor(renderer, {
-    gpuScopes: webgpu ? ['compute', 'render'] : ['render'],
-    mode: query.get('headless') === '1' ? 'headless' : 'visual',
-    page: 'm11-cache',
-  });
   const loopingEffect = defineEffect({
     elements: {
       particles: defineEmitter({
@@ -316,6 +311,53 @@ async function run(): Promise<void> {
   });
   const seed = 0x5a17;
   const spawn = { position: [0.21, -0.13, 0] as const, seed };
+  const capturePerformance = async (): Promise<void> => {
+    // Keep the timestamp-enabled renderer wholly outside the correctness renderer's lifetime-sensitive
+    // draw/readback sequence. In particular, #cache-visual must be read from the renderer that owns
+    // and rendered the live/replay scenes before this short measurement renderer is initialized.
+    const performanceRenderer = await createPlaygroundRenderer({
+      antialias: false,
+      forceWebGL: requestedBackend === 'webgl',
+      trackTimestamp: true,
+    });
+    performanceRenderer.setSize(1, 1);
+    await performanceRenderer.init();
+    const performanceBackend = performanceRenderer.backend as BackendLike;
+    const performanceAdapter = createThreeKernelAdapter({
+      backend: performanceBackend.isWebGPUBackend === true ? 'webgpu' : 'webgl2',
+      ...(performanceBackend.device?.limits?.maxStorageBuffersPerShaderStage === undefined
+        ? {}
+        : {
+            maxStorageBuffersPerShaderStage:
+              performanceBackend.device.limits.maxStorageBuffersPerShaderStage,
+          }),
+    });
+    const performanceRuntime = createThreeRuntimeRenderer(
+      performanceRenderer,
+      performanceAdapter,
+      performanceBackend.device?.lost,
+    );
+    const monitor = createPerformanceMonitor(performanceRenderer, {
+      gpuScopes: webgpu ? ['compute'] : ['render'],
+      mode: query.get('headless') === '1' ? 'headless' : 'visual',
+      page: 'm11-cache',
+    });
+    const performanceSystem = new VFXSystem(performanceRuntime);
+    performanceSystem.spawn(singleShotEffect, spawn);
+    await performanceSystem.update(0);
+    await performanceSystem.update(1 / FRAME_RATE);
+    const performanceTarget = new THREE.RenderTarget(1, 1);
+    performanceRenderer.setRenderTarget(performanceTarget);
+    performanceRenderer.render(
+      new THREE.Scene(),
+      new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10),
+    );
+    await performanceRenderer.readRenderTargetPixelsAsync(performanceTarget, 0, 0, 1, 1);
+    performanceRenderer.setRenderTarget(null);
+    performanceTarget.dispose();
+    await monitor.resolveGpuTimestamps();
+    monitor.publish();
+  };
   const loopBakeOptions = {
     compression: 'float32',
     frameRate: FRAME_RATE,
@@ -369,8 +411,7 @@ async function run(): Promise<void> {
       validation: { loopContinuity: false },
     };
     root.dataset.spikeError = message;
-    await monitor.resolveGpuTimestamps();
-    monitor.publish();
+    await capturePerformance();
     root.dataset.spikeResult = JSON.stringify(result);
     root.dataset.spikeStatus = 'complete';
     root.dataset.sceneReady = 'true';
@@ -407,6 +448,7 @@ async function run(): Promise<void> {
     const memory = estimateSimulationCacheMemory(cache);
     root.dataset.cacheMemory = JSON.stringify(memory);
     required<HTMLElement>('#memory-value').textContent = `${memory.totalBytes} bytes`;
+    await capturePerformance();
     const validation = {
       bakeReadback:
         cache.metadata.frameCount === LOOP_FRAMES + 1 &&
@@ -443,8 +485,6 @@ async function run(): Promise<void> {
       ok: Object.values(validation).every(Boolean),
       validation,
     };
-    await monitor.resolveGpuTimestamps();
-    monitor.publish();
     root.dataset.spikeResult = JSON.stringify(result);
     root.dataset.spikeStatus = 'complete';
     root.dataset.sceneReady = 'true';
@@ -502,6 +542,7 @@ async function run(): Promise<void> {
   const loopedTime = player.localTime;
   player.stop();
   await player.seek(0.25);
+  const immediateReplaySnapshot = await player.instance.debug.captureAttributes('particles');
   const replayView = view(player.instance);
 
   const camera = new THREE.OrthographicCamera(-1.2, 1.2, 0.75, -0.75, 0.1, 10);
@@ -534,6 +575,9 @@ async function run(): Promise<void> {
     }
     return Math.abs(left - right) > 200;
   })();
+  // The correctness renderer has completed both scene renders and readbacks before the separate
+  // timestamp-enabled renderer is allowed to initialize.
+  await capturePerformance();
   const validation = {
     attributeEquivalent: attributes.maximum <= 1e-6 && attributes.mismatchCount === 0,
     consoleClean: consoleMessages.length === 0,
@@ -552,6 +596,9 @@ async function run(): Promise<void> {
     renderReadsOnly:
       cache.metadata.emitters[0]?.attributes.map(({ name }) => name).join(',') ===
       'color,position,size,spriteRotation',
+    replayReadbackImmediatelyCoherent:
+      immediateReplaySnapshot.aliveCount ===
+      cache.metadata.emitters[0]?.aliveCounts[comparisonFrame],
     replaySimulationCostZero:
       replayCounter.counts.simulation === 0 && replayCounter.counts.indirect === 0,
     sourceBackendRecorded: cache.metadata.sourceBackend === 'webgpu',
@@ -574,10 +621,12 @@ async function run(): Promise<void> {
       scaledTime,
       stoppedTime,
     },
+    replayReadback: {
+      aliveCount: immediateReplaySnapshot.aliveCount,
+      expectedAliveCount: cache.metadata.emitters[0]?.aliveCounts[comparisonFrame],
+    },
     validation,
   };
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.spikeStatus = 'complete';
   root.dataset.sceneReady = 'true';

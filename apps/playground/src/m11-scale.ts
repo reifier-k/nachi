@@ -1,6 +1,5 @@
 import {
   VFXSystem,
-  applyEmitterQualityTier,
   billboard,
   burst,
   defineEffect,
@@ -10,7 +9,6 @@ import {
   positionSphere,
   rate,
   selectDeviceQualityTier,
-  sphereIntersectsFrustum,
   type VfxDiagnostic,
   type VfxEmitterRuntimeView,
 } from '@nachi/core';
@@ -251,8 +249,6 @@ async function run(): Promise<void> {
       render: billboard({ blending: 'alpha', lit: true, soft: true, sorted: true }),
       spawn: burst({ count: 8 }),
     });
-    const low = applyEmitterQualityTier(authored, 'low');
-    const lowRender = Array.isArray(low.render) ? low.render[0] : low.render;
     const effect = defineEffect({
       elements: { particles: authored },
       scalability: {
@@ -267,6 +263,9 @@ async function run(): Promise<void> {
     const instance = system.spawn(effect, { seed: 41 });
     await system.update(0);
     const runtimeView = view(instance);
+    const lowRender = Array.isArray(runtimeView.definition.render)
+      ? runtimeView.definition.render[0]
+      : runtimeView.definition.render;
     const logicalAlive = runtimeView.aliveCount;
     const timeBeforeCull = instance.localTime;
     instance.setTransform([0, 0, -5]);
@@ -317,10 +316,13 @@ async function run(): Promise<void> {
     ).tierSwitchDiagnostics = tierSwitchDiagnostics;
 
     const runtimeCamera = cameraState(camera);
+    const frustumInside = system.spawn(effect, { position: [0, 0, 0], seed: 53 });
+    const frustumOutside = system.spawn(effect, { position: [3, 0, 0], seed: 59 });
+    await system.update(0);
     const actualProjectionFrustum =
-      sphereIntersectsFrustum({ center: [0, 0, 1.8], radius: 0.02 }, runtimeCamera) &&
-      !sphereIntersectsFrustum({ center: [0, 0, 1.96], radius: 0.01 }, runtimeCamera) &&
-      !sphereIntersectsFrustum({ center: [0, 0, -9], radius: 0.1 }, runtimeCamera);
+      frustumInside.scalability.action === 'full' &&
+      frustumOutside.scalability.action === 'culled' &&
+      frustumOutside.scalability.reasons.includes('frustum');
     const config = lowRender?.config as Record<string, unknown> | undefined;
     const validation = {
       actualProjectionFrustum,
@@ -450,13 +452,24 @@ async function run(): Promise<void> {
   cullingSystem.setCamera(identityCameraState());
   const culled = cullingSystem.spawn(cullingEffect, { position: [0, 0, 2], seed: 7 });
   await cullingSystem.update(0.2);
+  const cullingView = view(culled);
+  const cullingMesh = materializeThreeSpriteDraw(cullingView.program, cullingView.kernels);
+  const unmaterializedOrUnrendered = await cullingSystem.debug.captureProfile();
+  const cullingScene = new THREE.Scene();
+  cullingScene.add(cullingMesh);
+  renderer.setRenderTarget(target);
+  renderer.clear();
+  renderer.render(cullingScene, visualCamera);
+  cullingScene.remove(cullingMesh);
+  culled.setTransform([0, 0, 5]);
+  await cullingSystem.update(1 / 60);
+  const renderableProfile = await cullingSystem.debug.captureProfile();
   const aliveBeforeCull = view(culled).aliveCount;
   const timeBeforeCull = culled.localTime;
-  culled.setTransform([0, 0, 5]);
-  await cullingSystem.update(0);
   const fadeAtFive = culled.scalability.fade;
   culled.setTransform([0, 0, 8]);
   await cullingSystem.update(0.5);
+  const culledProfile = await cullingSystem.debug.captureProfile();
   const aliveWhileCulled = view(culled).aliveCount;
   const timeWhileCulled = culled.localTime;
   culled.setTransform([0, 0, 1]);
@@ -485,9 +498,26 @@ async function run(): Promise<void> {
   const budgetTie = budgetSystem.spawn(budgetEffect, { position: [0.1, -0.4, 2], priority: 0 });
   await budgetSystem.update(0);
 
-  const asymmetricFrustum =
-    sphereIntersectsFrustum({ center: [0.72, 0.13, 0.5], radius: 0.1 }, identityCameraState()) &&
-    !sphereIntersectsFrustum({ center: [-1.31, 0.13, 0.5], radius: 0.1 }, identityCameraState());
+  const frustumEffect = defineEffect({
+    elements: {
+      particles: defineEmitter({
+        bounds: { center: [0, 0, 0], radius: 0.1 },
+        capacity: 1,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 1 }),
+      }),
+    },
+    scalability: { culling: { frustum: true } },
+  });
+  const frustumSystem = new VFXSystem(runtime);
+  frustumSystem.setCamera(cameraState(visualCamera));
+  const frustumInside = frustumSystem.spawn(frustumEffect, { position: [0, 0, 0] });
+  const frustumOutside = frustumSystem.spawn(frustumEffect, { position: [4, 0, 0] });
+  await frustumSystem.update(0);
+  const actualSystemFrustum =
+    frustumInside.scalability.action === 'full' &&
+    frustumOutside.scalability.action === 'culled' &&
+    frustumOutside.scalability.reasons.includes('frustum');
   const validation = {
     aliveReadbackTierScale: lowCountView.aliveCount === 12 && epicCountView.aliveCount === 48,
     consoleClean: messages.length === 0,
@@ -496,6 +526,10 @@ async function run(): Promise<void> {
       aliveBeforeCull === aliveWhileCulled &&
       timeBeforeCull === timeWhileCulled &&
       (aliveAfterResume ?? 0) > (aliveWhileCulled ?? 0),
+    profilerDrawCulling:
+      unmaterializedOrUnrendered.system.indirectDraws.value === 0 &&
+      renderableProfile.system.indirectDraws.value === 1 &&
+      culledProfile.system.indirectDraws.value === 0,
     deviceReasonPublished: deviceSelection.reasons.length > 0,
     featureGates:
       lowQualityDraw?.kind === 'billboard' &&
@@ -506,7 +540,10 @@ async function run(): Promise<void> {
       'lit' in epicQualityDraw.fragment &&
       'soft' in epicQualityDraw.fragment &&
       epicQualityDraw.indirect.physicalIndex === 'sorted-indices',
-    nonMirrorFrustum: asymmetricFrustum,
+    actualSystemFrustum,
+    particleBudgetSpawnSuppressed:
+      budgetTie.scalability.action === 'spawn-suppressed' &&
+      budgetTie.scalability.reasons.includes('significance-particle-budget'),
     significanceDiscrimination:
       highPriority.scalability.action === 'full' &&
       lowPriority.scalability.action !== 'full' &&
@@ -526,6 +563,11 @@ async function run(): Promise<void> {
       aliveWhileCulled,
       diagnostics: culled.scalability,
       fadeAtFive,
+      profile: {
+        culled: culledProfile,
+        renderable: renderableProfile,
+        unmaterializedOrUnrendered,
+      },
       timeBeforeCull,
       timeWhileCulled,
     },

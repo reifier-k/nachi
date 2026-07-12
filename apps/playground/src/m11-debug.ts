@@ -1,5 +1,6 @@
 import {
   VFXSystem,
+  VfxDiagnosticError,
   billboard,
   burst,
   defineEffect,
@@ -8,13 +9,18 @@ import {
   tslModule,
   type AttributeSnapshot,
   type DebugAttributeValue,
+  type VfxEmitterRuntimeView,
   type VfxProfileSnapshot,
 } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
 import { normalizeRgba8Readback } from './readback';
-import { createThreeKernelAdapter, createThreeRuntimeRenderer } from './three-kernel-adapter';
+import {
+  createThreeKernelAdapter,
+  createThreeRuntimeRenderer,
+  materializeThreeSpriteDraw,
+} from './three-kernel-adapter';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m11-debug.css';
 
@@ -70,6 +76,31 @@ function fixtureEmitter(scale: number, bias: number) {
 
 function numeric(value: DebugAttributeValue | undefined): number {
   return typeof value === 'number' ? value : Number.NaN;
+}
+
+function emitterView(instance: {
+  getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+}): VfxEmitterRuntimeView {
+  const emitter = instance.getEmitter('particles');
+  if (!emitter) throw new Error('M11 debugger fixture emitter is missing.');
+  return emitter;
+}
+
+async function renderProfileDrawFrame(
+  renderer: THREE.WebGPURenderer,
+  draws: readonly THREE.Object3D[],
+): Promise<void> {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 4);
+  camera.position.z = 2;
+  scene.add(...draws);
+  const target = new THREE.RenderTarget(1, 1);
+  renderer.setRenderTarget(target);
+  renderer.clear();
+  renderer.render(scene, camera);
+  await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+  renderer.setRenderTarget(null);
+  target.dispose();
 }
 
 function analyticRows(snapshot: AttributeSnapshot, scale: number, bias: number): boolean {
@@ -330,6 +361,22 @@ async function run(): Promise<void> {
   const control = system.spawn(defineEffect({ elements: { particles: fixtureEmitter(3, 1.5) } }), {
     seed: 17,
   });
+  const profileEmitters = [emitterView(fixture), emitterView(control)];
+  // Materialization precedes scheduler accounting; the completed offscreen render below makes the
+  // reported records the most recently completed draw frame rather than an inferred static count.
+  const profileDraws = webgpu
+    ? profileEmitters.map((emitter) => materializeThreeSpriteDraw(emitter.program, emitter.kernels))
+    : [];
+  let uninitializedDiagnostic = '';
+  try {
+    await fixture.debug.captureAttributes('particles');
+  } catch (error) {
+    if (error instanceof VfxDiagnosticError) {
+      uninitializedDiagnostic = error.diagnostics[0]?.code ?? '';
+    } else {
+      throw error;
+    }
+  }
   await system.update(0);
   const fixtureSnapshot = await fixture.debug.captureAttributes('particles');
   const controlSnapshot = await control.debug.captureAttributes('particles');
@@ -341,6 +388,7 @@ async function run(): Promise<void> {
   required<HTMLElement>('#truncation-value').textContent =
     `capture limit ${truncated.truncation.limit}: returned ${truncated.truncation.returned}/${truncated.truncation.totalAlive}, truncated=${truncated.truncation.truncated}`;
   const visual = await offscreenReadback(renderer, webgpu, fixtureSnapshot, controlSnapshot);
+  if (webgpu) await renderProfileDrawFrame(renderer, profileDraws);
   await monitor.resolveGpuTimestamps();
   const perf = monitor.publish();
   const profile = await system.debug.captureProfile({ gpuTiming: perf.gpu });
@@ -379,6 +427,7 @@ async function run(): Promise<void> {
           return Array.isArray(position) && numeric(row.attributes.size) === position[0];
         }),
     consoleClean: consoleMessages.length === 0,
+    uninitializedCaptureDiagnostic: uninitializedDiagnostic === 'NACHI_DEBUG_EMITTER_UNINITIALIZED',
     offscreenReadback:
       visual.foregroundPixels > 100 && Math.abs(visual.leftEnergy - visual.rightEnergy) > 500,
     profilerKnownCounts:

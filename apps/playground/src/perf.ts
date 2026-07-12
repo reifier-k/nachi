@@ -44,6 +44,8 @@ export type PerformanceSnapshot = {
     drawCalls: number;
     renderCalls: number;
     computeCalls: number;
+    computeCallsStatus: 'available' | 'unreliable';
+    computeCallsReason: string | null;
     triangles: number;
     points: number;
     lines: number;
@@ -76,7 +78,8 @@ export type PerformanceMonitorOptions = {
 //   frame:{fps,averageMs,p95Ms},
 //   gpu:{status,source,renderMs,computeMs,totalMs,reason},
 //   heap:{status,usedBytes,totalBytes,limitBytes,reason},
-//   renderer:{drawCalls,renderCalls,computeCalls,triangles,points,lines} }
+//   renderer:{drawCalls,renderCalls,computeCalls,computeCallsStatus,computeCallsReason,
+//             triangles,points,lines} }
 // Numeric metrics always carry {status,value,reason}; unavailable values are null, never silent 0.
 // renderer.computeCalls is Three.js's current-frame counter. Three resets it at frame boundaries,
 // so headless spike-compute can publish 0 after submitted compute work has already been reset.
@@ -170,6 +173,11 @@ export class PerformanceMonitor {
       page: this.#options.page,
       renderer: {
         computeCalls: info.compute.frameCalls,
+        computeCallsReason:
+          info.compute.frameCalls === 0
+            ? 'Three resets the current-frame compute counter at frame boundaries; zero does not prove that no compute work was submitted.'
+            : null,
+        computeCallsStatus: info.compute.frameCalls === 0 ? 'unreliable' : 'available',
         drawCalls: info.render.drawCalls,
         lines: info.render.lines,
         points: info.render.points,
