@@ -41,3 +41,21 @@ export function compactRgba8Readback(
   }
   return dense;
 }
+
+/** Compacts WebGPU padding and normalizes both backends to top-down rows for DOM presentation. */
+export function normalizeRgba8Readback(
+  source: Uint8Array,
+  width: number,
+  height: number,
+  webgpu: boolean,
+): Uint8Array {
+  const dense = compactRgba8Readback(source, width, height, webgpu);
+  if (webgpu) return dense;
+  const bytesPerRow = width * 4;
+  const topDown = new Uint8Array(dense.byteLength);
+  for (let row = 0; row < height; row += 1) {
+    const sourceOffset = (height - 1 - row) * bytesPerRow;
+    topDown.set(dense.subarray(sourceOffset, sourceOffset + bytesPerRow), row * bytesPerRow);
+  }
+  return topDown;
+}

@@ -12,8 +12,15 @@ import {
   type EventInputBinding,
   type EventQueueResources,
 } from './compiler.js';
-import { packedComponentIndex, resolvePackedAttributeAddress } from './attributes.js';
+import { attributeStorageComponentIndex } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
+import {
+  aggregateProfileFrame,
+  captureEmitterAttributes,
+  type CaptureProfileOptions,
+  type EmitterProfileCounters,
+  type VfxSystemDebug,
+} from './debug.js';
 import { collectEmitterModules } from './emitter-modules.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
 import {
@@ -31,10 +38,12 @@ import {
 } from './scalability.js';
 import type {
   AttributeType,
+  CaptureAttributesOptions,
   DefinitionParameterValue,
   EffectDefinition,
   EffectElements,
   EffectInstance,
+  EffectInstanceDebug,
   EffectEventCallback,
   EffectEventSummary,
   EffectInstanceState,
@@ -49,6 +58,7 @@ import type {
   PositionInput,
   RotationInput,
   QualityTier,
+  AttributeSnapshot,
   UserParameterKeys,
   VfxDiagnostic,
 } from './types.js';
@@ -770,6 +780,10 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #spawnOrderWrapWarned = false;
   #spawnGeneration = 0;
   #capacityScale = 1;
+  #profileComputeDispatches = 0;
+  #profileCpuUpdateMs = 0;
+  #profileIndirectDraws: number | undefined;
+  #profileSpawnCount = 0;
   #spawnRateScale = 1;
   #spawnSuppressed = false;
   #transform: readonly number[];
@@ -898,6 +912,40 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     return Math.max(0, Math.floor(this.definition.capacity * this.#capacityScale));
   }
 
+  beginProfileFrame(): void {
+    this.#profileComputeDispatches = 0;
+    this.#profileCpuUpdateMs = 0;
+    this.#profileSpawnCount = 0;
+    this.#profileIndirectDraws =
+      this.#renderer.kernelAdapter.capabilities.backend === 'webgpu'
+        ? this.program.draws.filter((draw) => 'indirect' in draw).length
+        : undefined;
+  }
+
+  recordCpuUpdate(milliseconds: number): void {
+    this.#profileCpuUpdateMs += milliseconds;
+  }
+
+  profileCounters(instanceId: string, emitterId: string): EmitterProfileCounters {
+    return {
+      aliveCount: this.#exactAliveCount,
+      capacity: this.estimatedParticleCost,
+      computeDispatches: this.#profileComputeDispatches,
+      cpuUpdateMs: this.#profileCpuUpdateMs,
+      emitterId,
+      indirectDraws: this.#profileIndirectDraws,
+      instanceId,
+      spawnCount: this.#profileSpawnCount,
+    };
+  }
+
+  captureAttributes(
+    emitterId: string,
+    options?: CaptureAttributesOptions,
+  ): Promise<AttributeSnapshot> {
+    return captureEmitterAttributes(this.#renderer, this, emitterId, options);
+  }
+
   setRenderOrder(order: number): void {
     this.#renderer.setRenderOrder?.(this.kernels, order);
   }
@@ -969,12 +1017,24 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#renderer.prepareKernelsForPooling?.(this.kernels);
   }
 
+  async #submitCompute(kernel: KernelComputeNode): Promise<void> {
+    this.#profileComputeDispatches += 1;
+    await this.#renderer.submitCompute(kernel);
+  }
+
+  async #submitComputeIndirect(kernel: KernelComputeNode, resource: unknown): Promise<void> {
+    const submit = this.#renderer.submitComputeIndirect;
+    if (!submit) throw new Error('Indirect compute submission is unavailable.');
+    this.#profileComputeDispatches += 1;
+    await submit.call(this.#renderer, kernel, resource);
+  }
+
   async prepareEventFrame(writeBank: 0 | 1): Promise<void> {
     this.#forceReadbackThisFrame = false;
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventWriteBank', writeBank);
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventReadBank', 1 - writeBank);
     for (const output of Object.values(this.kernels.eventOutputs)) {
-      await this.#renderer.submitCompute(output.reset);
+      await this.#submitCompute(output.reset);
     }
   }
 
@@ -984,12 +1044,12 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       if (!this.#renderer.submitComputeIndirect) {
         throw new Error('M5 event consumption requires indirect compute submission.');
       }
-      await this.#renderer.submitCompute(input.prepare);
-      await this.#renderer.submitComputeIndirect(
+      await this.#submitCompute(input.prepare);
+      await this.#submitComputeIndirect(
         input.spawn,
         input.binding.resources.indirect.indirectResource,
       );
-      await this.#renderer.submitCompute(input.finalize);
+      await this.#submitCompute(input.finalize);
       this.#pendingGpuSpawnRequested += input.binding.queue.capacity;
     }
     if (this.kernels.eventInputs.length > 0) await this.#compactAlive();
@@ -997,7 +1057,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
 
   async advance(deltaSeconds: number, context: AdvanceContext): Promise<void> {
     if (!this.#initialized) {
-      await this.#renderer.submitCompute(this.kernels.initialize);
+      await this.#submitCompute(this.kernels.initialize);
       this.#initialized = true;
       await this.#compactAlive();
     }
@@ -1044,7 +1104,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
             await this.#dispatchSpawn(this.#stepSpawnCount(step, this.#pendingDistance));
             this.#pendingDistance = 0;
           }
-          await this.#renderer.submitCompute(this.kernels.update);
+          await this.#submitCompute(this.kernels.update);
           updated = true;
           this.#emitterAge += step;
           this.#simulationTime += step;
@@ -1061,7 +1121,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     // entered drain/completed state. Event consumption above compacts births even for dt=0.
     if (!updated && this.kernels.eventInputs.length > 0 && deltaSeconds > TIME_EPSILON) {
       this.#setFrameUniforms(deltaSeconds, context, this.controller.loopIndex);
-      await this.#renderer.submitCompute(this.kernels.update);
+      await this.#submitCompute(this.kernels.update);
       this.#emitterAge += deltaSeconds;
       this.#simulationTime += deltaSeconds;
       this.#drainRemaining = Math.max(0, this.#drainRemaining - deltaSeconds);
@@ -1169,6 +1229,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         : Math.max(0, logicalCapacity - this.#logicalAliveEstimate);
     const dispatchCount = Math.min(requestedCount, this.definition.capacity, logicalAvailability);
     if (dispatchCount <= 0) return;
+    this.#profileSpawnCount += dispatchCount;
     this.#recordLogicalSpawn(dispatchCount);
     const cpuOverflow = Math.max(0, requestedCount - dispatchCount);
     if (cpuOverflow > 0 && logicalCapacity === this.definition.capacity) {
@@ -1185,18 +1246,15 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       ) {
         throw new Error('WebGPU lifecycle kernels require indirect compute submission.');
       }
-      await this.#renderer.submitCompute(prepareSpawn);
-      await this.#renderer.submitComputeIndirect(
-        this.kernels.spawn,
-        spawnDispatch.indirectResource,
-      );
-      await this.#renderer.submitCompute(finalizeSpawn);
+      await this.#submitCompute(prepareSpawn);
+      await this.#submitComputeIndirect(this.kernels.spawn, spawnDispatch.indirectResource);
+      await this.#submitCompute(finalizeSpawn);
       this.#pendingGpuSpawnRequested += dispatchCount;
       if (this.program.attributeSchema.byName.spawnOrder !== undefined) {
         this.#trackSpawnOrderRequests(dispatchCount);
       }
     } else {
-      await this.#renderer.submitCompute(this.kernels.spawn);
+      await this.#submitCompute(this.kernels.spawn);
     }
   }
 
@@ -1242,16 +1300,16 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       if (!compact || !finalizeIndirect || !resetAliveCount) {
         throw new Error('WebGPU lifecycle compaction kernels are missing.');
       }
-      await this.#renderer.submitCompute(resetAliveCount);
-      await this.#renderer.submitCompute(compact);
-      await this.#renderer.submitCompute(finalizeIndirect);
+      await this.#submitCompute(resetAliveCount);
+      await this.#submitCompute(compact);
+      await this.#submitCompute(finalizeIndirect);
       if (this.kernels.prepareSort) {
-        await this.#renderer.submitCompute(this.kernels.prepareSort);
+        await this.#submitCompute(this.kernels.prepareSort);
         // Each bitonic stage depends on all writes from the preceding stage. Keep stage boundaries
         // as distinct backend submissions: a single Three.js compute group records every dispatch
         // into one compute pass and provides no whole-grid storage barrier between them.
         for (const pass of this.kernels.sortPasses ?? []) {
-          await this.#renderer.submitCompute(pass);
+          await this.#submitCompute(pass);
         }
       }
       if (
@@ -1317,10 +1375,15 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       const aliveStorage =
         this.program.attributeSchema.storageArrays[aliveAttribute.physical.bufferIndex];
       if (!aliveStorage) throw new Error('Compiled physical storage for alive is missing.');
-      const aliveAddress = resolvePackedAttributeAddress(aliveAttribute, aliveStorage);
       let count = 0;
       for (let particle = 0; particle < this.program.attributeSchema.capacity; particle += 1) {
-        if ((flags[packedComponentIndex(particle, aliveAddress, 0)] ?? 0) !== 0) count += 1;
+        if (
+          (flags[
+            attributeStorageComponentIndex(aliveAttribute, aliveStorage, 'webgl2', particle, 0)
+          ] ?? 0) !== 0
+        ) {
+          count += 1;
+        }
       }
       this.#exactAliveCount = count;
       this.#resetLogicalAliveEstimate(count);
@@ -1374,17 +1437,22 @@ type ReleasableEffectInstance = {
   takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels>;
 };
 
+type CaptureScheduler = <Value>(capture: () => Promise<Value> | Value) => Promise<Value>;
+
 export class VfxEffectInstance<
   Definition extends RuntimeEffectDefinition = RuntimeEffectDefinition,
 > implements EffectInstance<Definition> {
   readonly clock: EffectClock;
+  readonly debug: EffectInstanceDebug;
   readonly #diagnostics: VfxDiagnostic[] = [];
   readonly #diagnosticKeys = new Set<string>();
   readonly #emitters = new Map<string, RuntimeEmitter>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
+  readonly #now: () => number;
   readonly #parameterDefinitions: ParameterSchema;
   readonly #priority: number;
+  readonly #scheduleCapture: CaptureScheduler;
   #scalability: EffectScalabilityStatus = {
     action: 'full',
     fade: 1,
@@ -1415,11 +1483,18 @@ export class VfxEffectInstance<
     parameterDefinitions: ParameterSchema,
     onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void,
     priority = 0,
+    now: () => number = () => globalThis.performance?.now() ?? Date.now(),
+    scheduleCapture: CaptureScheduler = (capture) => Promise.resolve().then(capture),
   ) {
     this.clock = new EffectClock(timeScale);
     this.#parameterDefinitions = parameterDefinitions;
     this.#onRelease = onRelease;
     this.#priority = priority;
+    this.#scheduleCapture = scheduleCapture;
+    this.#now = now;
+    this.debug = {
+      captureAttributes: (emitterId, options) => this.#captureAttributes(emitterId, options),
+    };
   }
 
   get diagnostics(): readonly VfxDiagnostic[] {
@@ -1523,6 +1598,45 @@ export class VfxEffectInstance<
   getEmitter(key: string): VfxEmitterRuntimeView | undefined {
     this.#assertNotReleased();
     return this.#emitters.get(key);
+  }
+
+  beginProfileFrame(): void {
+    for (const emitter of this.#emitters.values()) emitter.beginProfileFrame();
+  }
+
+  profileCounters(): readonly EmitterProfileCounters[] {
+    return [...this.#emitters.entries()].map(([emitterId, emitter]) =>
+      emitter.profileCounters(this.id, emitterId),
+    );
+  }
+
+  async #captureAttributes(
+    emitterId: string,
+    options?: CaptureAttributesOptions,
+  ): Promise<AttributeSnapshot> {
+    return this.#scheduleCapture(async () => {
+      this.#assertNotReleased();
+      const emitter = this.#emitters.get(emitterId);
+      if (!emitter) {
+        throw new VfxDiagnosticError([
+          runtimeDiagnostic(
+            'NACHI_DEBUG_EMITTER_UNKNOWN',
+            `Effect instance "${this.id}" has no emitter "${emitterId}".`,
+            'emitterId',
+          ),
+        ]);
+      }
+      return emitter.captureAttributes(emitterId, options);
+    });
+  }
+
+  async #measureEmitter(emitter: RuntimeEmitter, operation: () => Promise<void>): Promise<void> {
+    const start = this.#now();
+    try {
+      await operation();
+    } finally {
+      emitter.recordCpuUpdate(Math.max(0, this.#now() - start));
+    }
   }
 
   applyHitStop(durationMs: number, timeScale = 0): void {
@@ -1661,9 +1775,13 @@ export class VfxEffectInstance<
     };
     // Initialization/prewarm is itself an event-producing frame. Preserve its bank so the first
     // externally advanced frame consumes it instead of clearing it.
-    for (const emitter of this.#emitters.values()) await emitter.prepareEventFrame(0);
+    for (const emitter of this.#emitters.values()) {
+      await this.#measureEmitter(emitter, () => emitter.prepareEventFrame(0));
+    }
     this.#eventFrame = 1;
-    for (const emitter of this.#emitters.values()) await emitter.advance(0, context);
+    for (const emitter of this.#emitters.values()) {
+      await this.#measureEmitter(emitter, () => emitter.advance(0, context));
+    }
     this.#initialized = true;
     this.#completeIfFinished();
   }
@@ -1678,9 +1796,15 @@ export class VfxEffectInstance<
     };
     const writeBank = (this.#eventFrame & 1) as 0 | 1;
     this.#eventFrame += 1;
-    for (const emitter of this.#emitters.values()) await emitter.prepareEventFrame(writeBank);
-    for (const emitter of this.#emitters.values()) await emitter.consumeEvents();
-    for (const emitter of this.#emitters.values()) await emitter.advance(localDelta, context);
+    for (const emitter of this.#emitters.values()) {
+      await this.#measureEmitter(emitter, () => emitter.prepareEventFrame(writeBank));
+    }
+    for (const emitter of this.#emitters.values()) {
+      await this.#measureEmitter(emitter, () => emitter.consumeEvents());
+    }
+    for (const emitter of this.#emitters.values()) {
+      await this.#measureEmitter(emitter, () => emitter.advance(localDelta, context));
+    }
     this.#completeIfFinished();
   }
 
@@ -1730,6 +1854,7 @@ function effectParameters(
 }
 
 export class VFXSystem<Renderer = unknown, Scene = unknown> {
+  readonly debug: VfxSystemDebug;
   readonly #aliveCountReadbackInterval: number | undefined;
   readonly #compiledEffects = new WeakMap<RuntimeEffectDefinition, Map<string, CompiledEffect>>();
   readonly #effectPools = new WeakMap<RuntimeEffectDefinition, Map<string, EffectResourcePool>>();
@@ -1748,6 +1873,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   #instanceSequence = 0;
   #lastTimestamp?: number;
   #qualitySelection: QualityTierSelection;
+  #profileFrame = 0;
   #systemTime = 0;
   #updateQueue: Promise<void> = Promise.resolve();
   #updateInFlight = false;
@@ -1809,6 +1935,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       throw new RangeError('prewarmStepSeconds must be greater than zero.');
     }
     this.#now = options.now ?? (() => globalThis.performance?.now() ?? Date.now());
+    this.debug = {
+      captureProfile: (captureOptions) => this.#captureProfile(captureOptions),
+    };
 
     if (runtimeRenderer?.deviceLost) {
       void runtimeRenderer.deviceLost.then(
@@ -1925,6 +2054,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       parameterDefinitions,
       (releasedInstance, poolable) => this.#releaseInstance(releasedInstance, poolable),
       options.priority ?? 0,
+      undefined,
+      (capture) => this.#scheduleCapture(capture),
     );
     this.#instances.set(id, instance);
 
@@ -2041,6 +2172,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     requireNonNegativeFinite(delta, 'deltaSeconds');
     const run = async () => {
       this.#updateInFlight = true;
+      this.#profileFrame += 1;
+      for (const instance of this.#instances.values()) instance.beginProfileFrame();
       try {
         for (const instance of this.#instances.values()) {
           if (instance.usesSceneDepth && !this.#cameraConfigured) {
@@ -2082,6 +2215,28 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     };
     const scheduled = this.#updateQueue.then(run, run);
     this.#updateQueue = scheduled.catch(() => undefined);
+    return scheduled;
+  }
+
+  #captureProfile(options?: CaptureProfileOptions) {
+    return this.#scheduleCapture(() => {
+      const backend =
+        asRuntimeRenderer(this.renderer)?.kernelAdapter.capabilities.backend ?? 'webgl2';
+      return aggregateProfileFrame(
+        this.#profileFrame,
+        [...this.#instances.values()].flatMap((instance) => instance.profileCounters()),
+        options?.gpuTiming,
+        backend,
+      );
+    });
+  }
+
+  #scheduleCapture<Value>(capture: () => Promise<Value> | Value): Promise<Value> {
+    const scheduled = this.#updateQueue.then(capture, capture);
+    this.#updateQueue = scheduled.then(
+      () => undefined,
+      () => undefined,
+    );
     return scheduled;
   }
 

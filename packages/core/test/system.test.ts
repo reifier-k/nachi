@@ -9,6 +9,7 @@ import {
   VfxDiagnosticError,
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
   attribute,
+  attributeStorageComponentIndex,
   bakeSimulation,
   billboard,
   burst,
@@ -159,11 +160,13 @@ class FakeNode implements KernelUniformNode {
 class FakeStorage implements KernelStorageNode {
   readonly value = {};
   readonly node = new FakeNode();
+  name = '';
 
   element(): KernelNode {
     return this.node;
   }
-  setName(): KernelStorageNode {
+  setName(name: string): KernelStorageNode {
+    this.name = name;
     return this;
   }
   toAtomic(): KernelStorageNode {
@@ -1755,6 +1758,122 @@ describe('VFXSystem runtime scheduler', () => {
   });
 });
 
+describe('M11 debug capture scheduling', () => {
+  it('keeps multi-storage capture and profile on one frame before a concurrent update', async () => {
+    const base = new FakeRuntimeRenderer();
+    const pendingReads = new Map<KernelStorageNode, (buffer: ArrayBuffer) => void>();
+    const renderer: VfxRuntimeRenderer = {
+      kernelAdapter: base.kernelAdapter,
+      readStorage: (storage) =>
+        new Promise<ArrayBuffer>((resolve) => {
+          pendingReads.set(storage, resolve);
+        }),
+      submitCompute: (kernel) => base.submitCompute(kernel),
+      submitComputeIndirect: (kernel) => base.submitCompute(kernel),
+    };
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            init: [
+              positionSphere({ radius: 0 }),
+              tslModule(
+                ({ spawnOrder }) => ({
+                  lifetime: spawnOrder.toFloat().mul(0).add(10),
+                }),
+                { stage: 'init' },
+              ),
+            ],
+            integration: 'none',
+            lifecycle: { duration: 10 },
+            render: billboard({ blending: 'additive' }),
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    await system.update(0);
+
+    const view = instance.getEmitter('particles')!;
+    const schema = view.program.attributeSchema;
+    const storageNodes = schema.storageArrays.map(
+      (storage) => view.kernels.storages[storage.name]!,
+    );
+    const makeStorageBuffer = (storageIndex: number, marker: number): ArrayBuffer => {
+      const storage = schema.storageArrays[storageIndex]!;
+      const length = storage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type];
+      const physical =
+        storage.componentType === 'uint'
+          ? new Uint32Array(length)
+          : storage.componentType === 'int'
+            ? new Int32Array(length)
+            : new Float32Array(length);
+      const logicalValues: Readonly<Record<string, readonly number[]>> = {
+        position: [marker, marker + 1, marker + 2],
+        spawnGeneration: [1],
+        spawnOrder: [marker],
+      };
+      for (const [name, values] of Object.entries(logicalValues)) {
+        const attribute = schema.byName[name];
+        if (!attribute || attribute.physical.bufferIndex !== storageIndex) continue;
+        for (const [component, value] of values.entries()) {
+          physical[attributeStorageComponentIndex(attribute, storage, 'webgpu', 0, component)] =
+            value;
+        }
+      }
+      return physical.slice().buffer as ArrayBuffer;
+    };
+    const resolveRead = (storage: KernelStorageNode, buffer: ArrayBuffer): void => {
+      const resolve = pendingReads.get(storage);
+      if (!resolve) throw new Error('Expected deferred debug readback was not scheduled.');
+      pendingReads.delete(storage);
+      resolve(buffer);
+    };
+
+    const capture = instance.debug.captureAttributes('particles', {
+      attributes: ['position', 'spawnOrder'],
+    });
+    for (let turn = 0; turn < 4 && pendingReads.size < 3; turn += 1) {
+      await Promise.resolve();
+    }
+    expect(pendingReads.size).toBe(3);
+
+    const marker = base.submissions.length;
+    const lifecycle = new Uint32Array(view.program.meta.lifecycleStorage.buffers.state.wordCount);
+    lifecycle[view.kernels.counterOffsets.aliveCount] = 1;
+    lifecycle[view.kernels.aliveIndicesOffset] = 0;
+    resolveRead(view.kernels.aliveCount, lifecycle.buffer);
+    const floatStorageIndex = schema.storageArrays.findIndex(
+      ({ componentType }) => componentType === 'float',
+    );
+    resolveRead(storageNodes[floatStorageIndex]!, makeStorageBuffer(floatStorageIndex, marker));
+
+    const profileBeforeUpdate = system.debug.captureProfile();
+    const concurrentUpdate = system.update(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(base.submissions).toHaveLength(marker);
+
+    for (const [storageIndex, storage] of storageNodes.entries()) {
+      if (pendingReads.has(storage)) {
+        resolveRead(storage, makeStorageBuffer(storageIndex, base.submissions.length));
+      }
+    }
+    const snapshot = await capture;
+    const profile = await profileBeforeUpdate;
+    await concurrentUpdate;
+
+    expect(snapshot.rows[0]).toMatchObject({
+      attributes: { position: [marker, marker + 1, marker + 2], spawnOrder: marker },
+      spawnOrder: marker,
+    });
+    expect(profile.frame).toBe(1);
+    expect((await system.debug.captureProfile()).frame).toBe(2);
+  });
+});
+
 describe('M11 VFXSystem scalability scheduling', () => {
   const camera = {
     projectionMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
@@ -2054,6 +2173,73 @@ describe('M11 VFXSystem scalability scheduling', () => {
         expect([...new Uint32Array(cache.data, cached.offsetBytes, length)]).toEqual([...expected]);
       }
     }
+  });
+
+  it('bakes WebGL2 transform-feedback records against an independent analytic fixture', async () => {
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      ...computeRender,
+      access: {
+        reads: ['Particles.position', 'Particles.lifetime', 'Particles.size'],
+        writes: [],
+      },
+    };
+    const emitter = defineEmitter({
+      capacity: 4,
+      render,
+      spawn: burst({ count: 0 }),
+    });
+    const definition = defineEffect({ elements: { particles: emitter } });
+    const program = compileEmitter(emitter);
+    const schema = program.attributeSchema;
+    const lifetimeAttribute = schema.byName.lifetime!;
+    const lifetimeStorage = schema.storageArrays[lifetimeAttribute.physical.bufferIndex]!;
+    const aliveAttribute = schema.byName.alive!;
+    const aliveStorage = schema.storageArrays[aliveAttribute.physical.bufferIndex]!;
+
+    expect(lifetimeStorage.groupCount).toBe(2);
+    expect(lifetimeAttribute.physical).toMatchObject({ group: 0, offset: 3, packed: true });
+
+    // This fixture is authored directly in Three r185 TF record order: one vec4 per storage and
+    // particle. It deliberately does not call the production address helper used by sim-cache.
+    const lifetimePhysical = new Float32Array(lifetimeStorage.length * 4);
+    const expectedLifetime = [1.5, 4.5, 7.5, 10.5];
+    for (let particle = 0; particle < schema.capacity; particle += 1) {
+      lifetimePhysical[particle * 4 + lifetimeAttribute.physical.offset] =
+        expectedLifetime[particle]!;
+    }
+    const alivePhysical = new Uint32Array(aliveStorage.length * 4);
+    for (let particle = 0; particle < schema.capacity; particle += 1) {
+      alivePhysical[particle * 4 + aliveAttribute.physical.offset] = 1;
+    }
+    const lifecycle = new Uint32Array(program.meta.lifecycleStorage.buffers.state.wordCount);
+    const fields = program.meta.lifecycleStorage.buffers.state.fields;
+    lifecycle[fields.aliveCount.offsetWords] = schema.capacity;
+    for (let particle = 0; particle < schema.capacity; particle += 1) {
+      lifecycle[fields.aliveIndices.offsetWords + particle] = particle;
+    }
+
+    const renderer = new (class extends CacheRuntimeRenderer {
+      override readStorage(storage?: KernelStorageNode): Promise<ArrayBuffer> {
+        if (!storage) throw new Error('Analytic WebGL2 readback requires a storage node.');
+        const name = (storage as FakeStorage).name;
+        if (name.includes('packed_float')) return Promise.resolve(lifetimePhysical.slice().buffer);
+        if (name.includes('packed_uint')) return Promise.resolve(alivePhysical.slice().buffer);
+        if (name.includes('LifecycleState')) return Promise.resolve(lifecycle.slice().buffer);
+        throw new Error(`Unexpected analytic WebGL2 readback storage ${name}.`);
+      }
+    })();
+    Object.assign(renderer.kernelAdapter.capabilities, { backend: 'webgl2' });
+    const cache = await bakeSimulation(new VFXSystem(renderer), definition, {
+      frames: 1,
+    });
+    const cachedLifetime = cache.metadata.emitters[0]!.attributes.find(
+      ({ name }) => name === 'lifetime',
+    )!;
+
+    expect(cache.metadata.sourceBackend).toBe('webgl2');
+    expect([...new Float32Array(cache.data, cachedLifetime.offsetBytes, schema.capacity)]).toEqual(
+      expectedLifetime,
+    );
   });
 
   it('bakes render reads into quantized binary metadata and replays without simulation submits', async () => {

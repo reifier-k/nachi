@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { compactRgba8Readback } from './readback';
+import { compactRgba8Readback, normalizeRgba8Readback } from './readback';
 
 describe('RGBA8 render-target readback compaction', () => {
   it('compacts the 32px golden-slash probe without losing its lower rows', () => {
@@ -67,5 +67,12 @@ describe('RGBA8 render-target readback compaction', () => {
     expect(() => compactRgba8Readback(new Uint8Array(123), 96, 96, false)).toThrow(
       'Unexpected WebGL2 readback length',
     );
+  });
+});
+
+describe('RGBA8 presentation normalization', () => {
+  it('flips dense WebGL2 rows to the WebGPU top-down convention', () => {
+    const bottomUp = new Uint8Array([9, 10, 11, 12, 1, 2, 3, 4]);
+    expect([...normalizeRgba8Readback(bottomUp, 1, 2, false)]).toEqual([1, 2, 3, 4, 9, 10, 11, 12]);
   });
 });

@@ -25,7 +25,7 @@ import type {
 } from '@nachi/core';
 import {
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
-  packedComponentIndex,
+  attributeStorageComponentIndex,
   resolvePackedAttributeAddress,
 } from '@nachi/core';
 import * as THREE from 'three/webgpu';
@@ -1614,18 +1614,18 @@ export async function readLogicalAttribute(
         : Float32Array;
   const physical = new ArrayType(buffer);
   const logical = new ArrayType(program.attributeSchema.capacity * attribute.components);
-  const packedAddress = storage.packed
-    ? resolvePackedAttributeAddress(attribute, storage)
-    : undefined;
+  const backend = (renderer.backend as { readonly isWebGPUBackend?: boolean }).isWebGPUBackend
+    ? 'webgpu'
+    : 'webgl2';
   for (let particle = 0; particle < program.attributeSchema.capacity; particle += 1) {
     for (let component = 0; component < attribute.components; component += 1) {
-      const physicalComponent =
-        attribute.logicalType === 'mat3'
-          ? Math.floor(component / 3) * 4 + (component % 3)
-          : component;
-      const sourceIndex = storage.packed
-        ? packedComponentIndex(particle, packedAddress!, component)
-        : particle * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] + physicalComponent;
+      const sourceIndex = attributeStorageComponentIndex(
+        attribute,
+        storage,
+        backend,
+        particle,
+        component,
+      );
       logical[particle * attribute.components + component] = physical[sourceIndex] ?? 0;
     }
   }

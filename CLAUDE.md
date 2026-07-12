@@ -62,6 +62,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m11-scale/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-scale/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-cache/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-cache/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgl
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
@@ -102,6 +104,14 @@ indirection. `bakeSimulation()` advances a constant frame step and returns metad
 Float interpolation applies only to slots alive in both frames. Loop caches require a continuous
 duplicated endpoint. Keep the v1 per-frame upload path and WebGL2 replay diagnostic aligned with RFC
 §10.5 unless a later RFC explicitly adds all-frame residency or a WebGL2 alive-index renderer path.
+
+M11 runtime debugging is exposed through `instance.debug.captureAttributes()` and
+`system.debug.captureProfile()`. Attribute capture must reuse renderer storage readback and compiled
+logical packing, retain explicit truncation, and report one-frame-late asynchronous semantics.
+Profiler counters reset per top-level system update. Feed it the cached `nachi.perf-baseline` v1 GPU
+record; do not add another timestamp resolver or infer GPU time from CPU duration. Keep long-run
+correctness renderers timestamp-free and use a separate short perf capture when dispatch counts are
+large.
 
 ## Three-layer verification
 

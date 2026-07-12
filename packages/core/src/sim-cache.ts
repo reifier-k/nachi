@@ -1,8 +1,4 @@
-import {
-  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
-  packedComponentIndex,
-  resolvePackedAttributeAddress,
-} from './attributes.js';
+import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS, attributeStorageComponentIndex } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
 import type { VfxRuntimeRenderer } from './system.js';
 import type {
@@ -320,31 +316,6 @@ function selectedAttributes(view: VfxEmitterRuntimeView): readonly ResolvedAttri
   });
 }
 
-function paddedComponent(attribute: ResolvedAttribute, component: number): number {
-  return attribute.logicalType === 'mat3'
-    ? Math.floor(component / 3) * 4 + (component % 3)
-    : component;
-}
-
-function physicalComponentIndex(
-  attribute: ResolvedAttribute,
-  storage: ResolvedAttributeStorage,
-  particle: number,
-  component: number,
-): number {
-  if (storage.packed) {
-    return packedComponentIndex(
-      particle,
-      resolvePackedAttributeAddress(attribute, storage),
-      component,
-    );
-  }
-  return (
-    particle * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] +
-    paddedComponent(attribute, component)
-  );
-}
-
 function typedPhysicalArray(storage: ResolvedAttributeStorage, buffer: ArrayBuffer): LogicalArray {
   if (storage.componentType === 'uint') return new Uint32Array(buffer);
   if (storage.componentType === 'int') return new Int32Array(buffer);
@@ -363,6 +334,7 @@ function extractLogicalAttribute(
   attribute: ResolvedAttribute,
   schema: ResolvedAttributeSchema,
   physical: LogicalArray,
+  backend: 'webgl2' | 'webgpu',
 ): LogicalArray {
   const storage = schema.storageArrays[attribute.physical.bufferIndex];
   if (!storage) throw new Error(`Physical storage for Particles.${attribute.name} is missing.`);
@@ -370,7 +342,9 @@ function extractLogicalAttribute(
   for (let particle = 0; particle < schema.capacity; particle += 1) {
     for (let component = 0; component < attribute.components; component += 1) {
       output[particle * attribute.components + component] =
-        physical[physicalComponentIndex(attribute, storage, particle, component)] ?? 0;
+        physical[
+          attributeStorageComponentIndex(attribute, storage, backend, particle, component)
+        ] ?? 0;
     }
   }
   return output;
@@ -421,7 +395,15 @@ async function recordEmitterFrame(
       selected.map((attribute) => {
         const physical = physicalByIndex.get(attribute.physical.bufferIndex);
         if (!physical) throw new Error(`Readback for Particles.${attribute.name} is missing.`);
-        return [attribute.name, extractLogicalAttribute(attribute, schema, physical)] as const;
+        return [
+          attribute.name,
+          extractLogicalAttribute(
+            attribute,
+            schema,
+            physical,
+            renderer.kernelAdapter.capabilities.backend,
+          ),
+        ] as const;
       }),
     ),
     ...(hasBirthOrder
@@ -894,10 +876,11 @@ function writeLogicalAttribute(
   attribute: ResolvedAttribute,
   storage: ResolvedAttributeStorage,
   capacity: number,
+  backend: 'webgl2' | 'webgpu',
 ): void {
   for (let particle = 0; particle < capacity; particle += 1) {
     for (let component = 0; component < attribute.components; component += 1) {
-      target[physicalComponentIndex(attribute, storage, particle, component)] =
+      target[attributeStorageComponentIndex(attribute, storage, backend, particle, component)] =
         source[particle * attribute.components + component] ?? 0;
     }
   }
@@ -1138,6 +1121,7 @@ export class SimulationCachePlayer<Definition = AnyEffectDefinition> {
           attribute,
           storage,
           schema.capacity,
+          this.#renderer.kernelAdapter.capabilities.backend,
         );
       }
       for (const [storageIndex, values] of physical) {

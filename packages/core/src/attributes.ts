@@ -83,6 +83,33 @@ export function packedComponentIndex(
   return packedElementIndex(particleIndex, address) * 4 + address.offset + component;
 }
 
+export type AttributeStorageBackend = 'webgl2' | 'webgpu';
+
+/**
+ * Resolves a logical attribute component into the backend's readback/upload array.
+ *
+ * WebGPU preserves the compiler's particle-major array of packed vec4 groups. Three r185's
+ * WebGL2 transform-feedback fallback instead emits one varying record per storage and invocation;
+ * indexed storage elements (and therefore the packed group) do not affect the TF destination.
+ */
+export function attributeStorageComponentIndex(
+  attribute: Pick<ResolvedAttribute, 'logicalType' | 'name' | 'physical'>,
+  storage: Pick<ResolvedAttributeStorage, 'groupCount' | 'packed' | 'type'>,
+  backend: AttributeStorageBackend,
+  particleIndex: number,
+  component: number,
+): number {
+  if (storage.packed) {
+    const address = resolvePackedAttributeAddress(attribute, storage);
+    const elementIndex =
+      backend === 'webgl2' ? particleIndex : packedElementIndex(particleIndex, address);
+    return elementIndex * 4 + address.offset + component;
+  }
+  const physicalComponent =
+    attribute.logicalType === 'mat3' ? Math.floor(component / 3) * 4 + (component % 3) : component;
+  return particleIndex * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] + physicalComponent;
+}
+
 type PackDomain = 'float' | 'int' | 'uint';
 
 function packDomain(type: AttributeType): PackDomain | undefined {

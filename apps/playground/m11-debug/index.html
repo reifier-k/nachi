@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M11 debugger</title>
+  </head>
+  <body>
+    <main class="shell" id="debug-visual">
+      <header>
+        <p class="eyebrow">M11 / scalability &amp; debugging</p>
+        <h1>Attribute spreadsheet &amp; profiler</h1>
+        <p>Typed GPU snapshots and frame-local emitter costs without hidden estimates.</p>
+        <dl class="status">
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-value">initializing</dd>
+          </div>
+          <div>
+            <dt>Contract</dt>
+            <dd id="status-value">running</dd>
+          </div>
+        </dl>
+      </header>
+
+      <section class="panel spreadsheet-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Attribute snapshot</p>
+            <h2>particles / alive rows</h2>
+          </div>
+          <div class="table-controls">
+            <label
+              >Sort
+              <select id="sort-select"></select
+            ></label>
+            <button id="sort-direction" type="button">ascending</button>
+          </div>
+        </div>
+        <div id="column-controls" class="column-controls" aria-label="Attribute columns"></div>
+        <p id="truncation-value" class="note"></p>
+        <div class="table-scroll"><table id="attribute-table"></table></div>
+      </section>
+
+      <section class="panel profiler-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Frame profiler</p>
+            <h2>Emitter costs</h2>
+          </div>
+          <p id="gpu-value" class="note">GPU pending</p>
+        </div>
+        <div class="table-scroll"><table id="profile-table"></table></div>
+      </section>
+
+      <section class="panel readback-panel">
+        <p class="eyebrow">Offscreen RT readback</p>
+        <canvas id="readback-canvas" width="190" height="64"></canvas>
+      </section>
+    </main>
+    <script type="module" src="/src/m11-debug.ts"></script>
+  </body>
+</html>

@@ -1,7 +1,7 @@
 import {
-  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
   VFXSystem,
   VfxDiagnosticError,
+  attributeStorageComponentIndex,
   bakeSimulation,
   billboard,
   burst,
@@ -10,13 +10,9 @@ import {
   defineEmitter,
   estimateSimulationCacheMemory,
   lifetime,
-  packedComponentIndex,
   positionSphere,
   replaySimulation,
-  resolvePackedAttributeAddress,
   sizeOverLife,
-  type ResolvedAttribute,
-  type ResolvedAttributeStorage,
   type SimulationCache,
   type VfxEmitterRuntimeView,
   type VfxRuntimeRenderer,
@@ -100,24 +96,6 @@ function view(instance: {
   return value;
 }
 
-function physicalIndex(
-  attribute: ResolvedAttribute,
-  storage: ResolvedAttributeStorage,
-  particle: number,
-  component: number,
-): number {
-  if (storage.packed) {
-    return packedComponentIndex(
-      particle,
-      resolvePackedAttributeAddress(attribute, storage),
-      component,
-    );
-  }
-  const padded =
-    attribute.logicalType === 'mat3' ? Math.floor(component / 3) * 4 + (component % 3) : component;
-  return particle * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] + padded;
-}
-
 async function readRenderAttributes(runtime: VfxRuntimeRenderer, emitter: VfxEmitterRuntimeView) {
   const names = [
     ...new Set(emitter.program.draws.flatMap(({ vertex }) => vertex.attributes)),
@@ -147,7 +125,17 @@ async function readRenderAttributes(runtime: VfxRuntimeRenderer, emitter: VfxEmi
       const logical: number[] = [];
       for (let particle = 0; particle < emitter.program.attributeSchema.capacity; particle += 1) {
         for (let component = 0; component < attribute.components; component += 1) {
-          logical.push(physical[physicalIndex(attribute, storage, particle, component)] ?? 0);
+          logical.push(
+            physical[
+              attributeStorageComponentIndex(
+                attribute,
+                storage,
+                runtime.kernelAdapter.capabilities.backend,
+                particle,
+                component,
+              )
+            ] ?? 0,
+          );
         }
       }
       return [name, logical] as const;

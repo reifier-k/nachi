@@ -44,6 +44,7 @@ export default defineConfig({
         m10Sort: 'm10-sort/index.html',
         m11Scale: 'm11-scale/index.html',
         m11Cache: 'm11-cache/index.html',
+        m11Debug: 'm11-debug/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },
