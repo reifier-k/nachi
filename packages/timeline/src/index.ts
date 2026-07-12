@@ -16,11 +16,16 @@ export {
   type TimelineEntry,
 } from '@nachi/core';
 export {
+  bindMeshFxResources,
   defineEffect,
   fxMaterial,
+  getMeshFxResources,
   lowerCurve,
   meshFxElement,
   type MeshFxElement,
+  type MeshFxAssetResolveContext,
+  type MeshFxAssetResolver,
+  type MeshFxRuntimeResource,
   type TimelineAuthoringElement,
   type TimelineAuthoringElements,
   type TimelineEffectConfig,

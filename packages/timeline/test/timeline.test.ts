@@ -25,9 +25,11 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   VFXSystem,
   at,
+  bindMeshFxResources,
   cameraShake,
   defineEffect,
   fxMaterial,
+  getMeshFxResources,
   hitStop,
   lowerCurve,
   marker,
@@ -134,6 +136,23 @@ describe('@nachi/timeline authoring', () => {
         kind: 'curve',
       }),
     ).toThrow('linear curve keys only');
+  });
+
+  it('rebinds JSON mesh-fx references through an explicit external resource resolver', async () => {
+    const authored = defineEffect({
+      elements: { arc: mesh(0.3) },
+      timeline: [at(0, play('arc'))],
+    });
+    const loaded = JSON.parse(JSON.stringify(authored)) as typeof authored;
+    const resources = getMeshFxResources(authored);
+    bindMeshFxResources(loaded, ({ resource }) => resources.get(resource)?.mesh);
+
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const instance = system.spawn(loaded);
+    await system.update(0);
+    expect(instance.getElementState('arc')).toMatchObject({ playing: true, visible: true });
+    expect(scene.children.some(({ userData }) => Boolean(userData.nachiMeshFx))).toBe(true);
   });
 
   it('copies material configs before retaining them for instance cloning', () => {

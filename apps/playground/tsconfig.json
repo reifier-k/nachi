@@ -6,6 +6,7 @@
     "noEmit": true,
     "paths": {
       "@nachi/core": ["packages/core/src/index.ts"],
+      "@nachi/format": ["packages/format/src/index.ts"],
       "@nachi/mesh-fx": ["packages/mesh-fx/src/index.ts"],
       "@nachi/post": ["packages/post/src/index.ts"],
       "@nachi/timeline": ["packages/timeline/src/index.ts"],

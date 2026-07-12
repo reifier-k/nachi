@@ -6,6 +6,10 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: '@nachi/format',
+        replacement: fileURLToPath(new URL('./packages/format/src/index.ts', import.meta.url)),
+      },
+      {
         find: '@nachi/timeline',
         replacement: fileURLToPath(new URL('./packages/timeline/src/index.ts', import.meta.url)),
       },

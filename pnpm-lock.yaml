@@ -41,6 +41,9 @@ importers:
       '@nachi/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@nachi/format':
+        specifier: workspace:*
+        version: link:../../packages/format
       '@nachi/mesh-fx':
         specifier: workspace:*
         version: link:../../packages/mesh-fx
@@ -74,6 +77,12 @@ importers:
         version: 7.3.1(@types/node@24.10.13)
 
   packages/core: {}
+
+  packages/format:
+    dependencies:
+      '@nachi/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/mesh-fx:
     dependencies:

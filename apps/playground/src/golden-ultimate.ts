@@ -18,14 +18,22 @@ import {
   type TextureRef,
   type VfxEmitterRuntimeView,
 } from '@nachi/core';
+import {
+  EFFECT_ASSET_FORMAT,
+  EFFECT_ASSET_VERSION,
+  loadEffect,
+  serializeEffect,
+} from '@nachi/format';
 import { ring, slashArc } from '@nachi/mesh-fx';
 import { bloomPreset, createPostPipeline, radialBlur, screenDistortion } from '@nachi/post';
 import {
   VFXSystem,
   at,
+  bindMeshFxResources,
   cameraShake,
   defineEffect,
   fxMaterial,
+  getMeshFxResources,
   hitStop,
   marker,
   meshFxElement,
@@ -235,6 +243,16 @@ function createUltimate(normalRef: TextureRef, noise: THREE.Texture, loop = fals
   });
 }
 
+function loadUltimateFromJson(
+  definition: ReturnType<typeof createUltimate>,
+): ReturnType<typeof createUltimate> {
+  const document = serializeEffect(definition);
+  const loaded = loadEffect(JSON.stringify(document));
+  const resources = getMeshFxResources(definition);
+  bindMeshFxResources(loaded, ({ resource }) => resources.get(resource)?.mesh);
+  return loaded as unknown as ReturnType<typeof createUltimate>;
+}
+
 function cameraState(camera: THREE.Camera) {
   camera.updateMatrixWorld(true);
   return {
@@ -395,8 +413,8 @@ async function run(): Promise<void> {
   root.dataset.rendererStatus = 'initializing';
   root.dataset.spikeStatus = 'running';
   root.dataset.goldenScope = JSON.stringify({
-    authoring: 'code-defined',
-    jsonLoader: 'M12',
+    authoring: 'json-loaded',
+    jsonLoader: 'nachi-effect-v1',
     M10: [
       'mesh-fx',
       'lit-billboards',
@@ -436,7 +454,8 @@ async function run(): Promise<void> {
   const normal = normalMap();
   const noise = noiseMap();
   const textureResolver = createThreeTextureResolver(new Map([[normalRef.uri, normal]]));
-  const effect = createUltimate(normalRef, noise);
+  const codeEffect = createUltimate(normalRef, noise);
+  const effect = loadUltimateFromJson(codeEffect);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x02040d);
   const receiver = new THREE.Mesh(
@@ -580,7 +599,7 @@ async function run(): Promise<void> {
   );
   const deterministicSystem = new VFXSystem(runtime, undefined, { registry });
   deterministicSystem.setCamera(cameraState(camera));
-  const first = deterministicSystem.spawn(effect, { seed: 0x7777 });
+  const first = deterministicSystem.spawn(codeEffect, { seed: 0x7777 });
   const second = deterministicSystem.spawn(effect, { seed: 0x7777 });
   const firstActions: string[] = [];
   const secondActions: string[] = [];
@@ -629,7 +648,7 @@ async function run(): Promise<void> {
     secondPositions.byteOffset,
     secondPositions.byteLength,
   );
-  const deterministic =
+  const jsonGpuEquivalent =
     firstActions.join('|') === secondActions.join('|') &&
     firstBytes.length === secondBytes.length &&
     firstBytes.every((value, index) => value === secondBytes[index]);
@@ -638,9 +657,12 @@ async function run(): Promise<void> {
     registry,
   });
   stressSystem.setCamera(cameraState(camera));
-  const stressInstance = stressSystem.spawn(createUltimate(normalRef, noise, true), {
-    seed: 0x600f,
-  });
+  const stressInstance = stressSystem.spawn(
+    loadUltimateFromJson(createUltimate(normalRef, noise, true)),
+    {
+      seed: 0x600f,
+    },
+  );
   for (let frame = 0; frame < 600; frame += 1) await stressSystem.update(STEP);
   const stress = {
     diagnostics: stressInstance.diagnostics.map(({ code }) => code),
@@ -663,7 +685,7 @@ async function run(): Promise<void> {
   const checks = {
     cameraShake: shakeSamples.some(({ decay }) => decay > 0),
     consoleClean: consoleMessages.length === 0,
-    deterministic,
+    jsonGpuEquivalent,
     elementPixels:
       Object.values(elementPixels).every((count) => count > 24) &&
       particlePositions.length > 0 &&
@@ -729,7 +751,11 @@ async function run(): Promise<void> {
     ok: Object.values(checks).every(Boolean),
     post: ['shockwave-distortion', 'radial-blur', 'bloom'],
     schema: 'nachi.golden-ultimate.v1',
-    scope: { jsonLoader: 'M12', currentAuthoring: 'code-defined' },
+    scope: {
+      currentAuthoring: 'json-loaded',
+      envelope: { format: EFFECT_ASSET_FORMAT, version: EFFECT_ASSET_VERSION },
+      equivalence: 'code-definition-vs-json-load GPU attribute bytes and timeline actions',
+    },
   };
   root.dataset.artifactScreenshots = JSON.stringify([
     { filename: 'golden-ultimate.png', selector: '#ultimate-visual' },

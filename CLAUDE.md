@@ -5,6 +5,7 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 ## Repository layout
 
 - `packages/core`: public `@nachi/core` API types, compiler, and particle runtime.
+- `packages/format`: `nachi-effect` JSON schema, strict serializer/loader, migrations, and asset inheritance.
 - `packages/trails`: ribbon/trail definitions and renderer integration.
 - `packages/tsl-kit`: standalone reusable Three Shading Language helpers.
 - `packages/mesh-fx`: procedural effect meshes, materials, and VAT runtime.
@@ -112,6 +113,15 @@ Profiler counters reset per top-level system update. Feed it the cached `nachi.p
 record; do not add another timestamp resolver or infer GPU time from CPU duration. Keep long-run
 correctness renderers timestamp-free and use a separate short perf capture when dispatch counts are
 large.
+
+M12 effect JSON is owned by `@nachi/format`. The v1 envelope is exactly
+`{ format: 'nachi-effect', version: 1, effect }`. Keep format-owned structures strict and
+path-diagnostic, while leaving registered module `config` fields to their module-version validator.
+`loadEffect()` must return an ordinary normalized `EffectDefinition` or throw `NACHI_ASSET_*`; it
+must not pass through partial/unknown data. Inline functions and live engine resources remain
+non-serializable. Asset emitter `extends` resolves before compilation through M9
+`defineEmitter(base, overrides)` semantics. JSON-loaded timeline mesh-fx placeholders require
+explicit `bindMeshFxResources()` resolution outside the document.
 
 ## Three-layer verification
 

@@ -2,10 +2,22 @@
 
 Niagara parity through a code-first, TSL/WebGPU-native VFX library for Three.js.
 
-**Status:** M11 implementation batches complete: quality/culling/significance, deterministic
-simulation caches, typed GPU attribute snapshots, and frame-local system/emitter profiling now
-complement M10 post effects, sorting/WBOIT, and lit billboards. Mobile validation and the separate
-M11 audit remain pre-alpha gates.
+**Status:** M12 asset batch 1 implemented: `@nachi/format` provides the strict `nachi-effect` v1
+JSON envelope, schema, serializer/loader, explicit migrations, and asset-reference emitter
+inheritance. Golden #5 now runs from a JSON-loaded definition and compares its timeline actions and
+GPU particle bytes with the code-authored control. M12 integration review remains a pre-alpha gate.
+
+```ts
+import { loadEffect, serializeEffect } from '@nachi/format';
+
+const document = serializeEffect(effect);
+const loaded = loadEffect(JSON.stringify(document));
+```
+
+Only the declarative subset is accepted. Inline `tslModule()` callbacks, raw Three.js resources,
+class instances, functions, and cyclic graphs fail with path-specific `NACHI_ASSET_*` diagnostics;
+registered function/resource references—including `tslModule(defineTslFunction(...))`—remain JSON
+data.
 
 Simulation caches use `bakeSimulation(system, effect, { frames, frameRate, compression, loop })` and
 `replaySimulation(system, effect, cache)`. Assets stay loader-friendly as metadata JSON plus an

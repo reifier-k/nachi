@@ -1063,9 +1063,8 @@ export interface VfxDiagnostic {
 }
 
 export interface VfxAssetDocument {
-  readonly kind: 'vfx-effect';
-  readonly schema: 'com.nachi.effect';
-  readonly schemaVersion: number;
+  readonly format: 'nachi-effect';
+  readonly version: number;
   readonly effect: JsonValue;
 }
 

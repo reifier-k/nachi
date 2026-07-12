@@ -511,7 +511,9 @@ function defineEmitterImplementation(
             ...withoutUndefined(overrides.attributes),
           },
           events: { ...(base.events ?? {}), ...withoutUndefined(overrides.events) },
-          init: mergeModuleList<InitModule>(base.init, overrides.init, 'init'),
+          ...(base.init === undefined && overrides.init === undefined
+            ? {}
+            : { init: mergeModuleList<InitModule>(base.init, overrides.init, 'init') }),
           lifecycle: { ...(base.lifecycle ?? {}), ...withoutUndefined(overrides.lifecycle) },
           parameters: {
             ...(base.parameters ?? {}),
@@ -519,7 +521,9 @@ function defineEmitterImplementation(
           },
           ...(normalizedQuality === undefined ? {} : { quality: normalizedQuality }),
           render: mergeModuleList<RenderModule>(base.render, overrides.render, 'render'),
-          update: mergeModuleList<UpdateModule>(base.update, overrides.update, 'update'),
+          ...(base.update === undefined && overrides.update === undefined
+            ? {}
+            : { update: mergeModuleList<UpdateModule>(base.update, overrides.update, 'update') }),
         } as EmitterConfig<AttributeSchema, ParameterSchema>);
   const inheritanceDiagnostics =
     overrides === undefined

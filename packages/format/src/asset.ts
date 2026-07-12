@@ -1,0 +1,1248 @@
+import {
+  VfxDiagnosticError,
+  defineEffect,
+  defineEmitter,
+  type AttributeType,
+  type EffectDefinition,
+  type EffectElementDefinition,
+  type EffectElements,
+  type EffectConfig,
+  type EmitterConfig,
+  type EmitterOverrideConfig,
+  type JsonValue,
+  type ParameterSchema,
+  type VfxDiagnostic,
+} from '@nachi/core';
+
+import { defaultEffectAssetMigrations } from './migrations.js';
+import {
+  EFFECT_ASSET_FORMAT,
+  EFFECT_ASSET_VERSION,
+  type EffectAssetDocumentV1,
+  type LoadEffectOptions,
+} from './types.js';
+
+type DiagnosticPhase = 'deserialize' | 'serialize';
+type UnknownRecord = Record<string, unknown>;
+
+const EFFECT_FIELDS = new Set(['elements', 'kind', 'parameters', 'scalability', 'timeline']);
+const EMITTER_FIELDS = new Set([
+  'attributes',
+  'bounds',
+  'capacity',
+  'events',
+  'init',
+  'integration',
+  'kind',
+  'lifecycle',
+  'parameters',
+  'quality',
+  'render',
+  'spawn',
+  'update',
+]);
+const MODULE_FIELDS = new Set(['access', 'config', 'kind', 'label', 'stage', 'type', 'version']);
+const ATTRIBUTE_TYPES = new Set<AttributeType>([
+  'bool',
+  'color',
+  'f32',
+  'i32',
+  'mat3',
+  'mat4',
+  'quat',
+  'u32',
+  'vec2',
+  'vec3',
+  'vec4',
+]);
+const MODULE_STAGES = new Set(['event', 'init', 'render', 'spawn', 'update']);
+const MAX_JSON_DEPTH = 256;
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isPlainRecord(value: unknown): value is UnknownRecord {
+  if (!isRecord(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isEmitterReference(value: string): boolean {
+  const hash = value.indexOf('#');
+  return hash >= 0 && hash < value.length - 1 && value.indexOf('#', hash + 1) < 0;
+}
+
+function jsonClone(value: unknown): JsonValue {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
+  if (typeof value === 'number') return value;
+  if (Array.isArray(value)) return value.map(jsonClone);
+  return Object.fromEntries(
+    Object.entries(value as UnknownRecord).map(([key, item]) => [key, jsonClone(item)]),
+  );
+}
+
+function pushDiagnostic(
+  diagnostics: VfxDiagnostic[],
+  phase: DiagnosticPhase,
+  code: string,
+  message: string,
+  path?: string,
+  hint?: string,
+): void {
+  diagnostics.push({
+    code,
+    message,
+    ...(path === undefined ? {} : { path }),
+    phase,
+    severity: 'error',
+    ...(hint === undefined ? {} : { hint }),
+  });
+}
+
+class AssetValidator {
+  readonly diagnostics: VfxDiagnostic[] = [];
+  readonly #jsonActive = new Set<object>();
+
+  constructor(readonly phase: DiagnosticPhase) {}
+
+  document(value: unknown): value is UnknownRecord {
+    if (!this.record(value, '$')) return false;
+    this.unknownFields(value, new Set(['effect', 'format', 'version']), '$');
+    this.required(value, ['effect', 'format', 'version'], '$');
+    if (value.format !== EFFECT_ASSET_FORMAT) {
+      this.error(
+        'NACHI_ASSET_FORMAT_INVALID',
+        `Asset format must be "${EFFECT_ASSET_FORMAT}".`,
+        '$.format',
+      );
+    }
+    if (!Number.isSafeInteger(value.version) || value.version !== EFFECT_ASSET_VERSION) {
+      this.error(
+        'NACHI_ASSET_VERSION_UNSUPPORTED',
+        `Asset version must be ${EFFECT_ASSET_VERSION} after migration.`,
+        '$.version',
+      );
+    }
+    this.effect(value.effect, '$.effect');
+    return true;
+  }
+
+  effect(value: unknown, path: string): value is UnknownRecord {
+    if (!this.record(value, path)) return false;
+    this.unknownFields(value, EFFECT_FIELDS, path);
+    this.required(value, ['elements', 'kind'], path);
+    if (value.kind !== 'effect') this.literal(value.kind, 'effect', `${path}.kind`);
+    if (this.record(value.elements, `${path}.elements`)) {
+      for (const [key, element] of Object.entries(value.elements)) {
+        if (key.includes('#')) {
+          this.error(
+            'NACHI_ASSET_ELEMENT_KEY_INVALID',
+            'Effect element keys must not contain "#" because it delimits emitter references.',
+            `${path}.elements.${key}`,
+          );
+        }
+        this.element(element, `${path}.elements.${key}`);
+      }
+    }
+    if (value.parameters !== undefined) this.parameters(value.parameters, `${path}.parameters`);
+    if (value.scalability !== undefined) this.scalability(value.scalability, `${path}.scalability`);
+    if (value.timeline !== undefined) this.timeline(value.timeline, `${path}.timeline`);
+    return true;
+  }
+
+  element(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    if (value.kind === 'emitter') this.emitter(value, path);
+    else if (value.kind === 'visual-element') this.visualElement(value, path);
+    else if (value.kind === 'emitter-extends') this.emitterExtension(value, path);
+    else
+      this.error(
+        'NACHI_ASSET_ELEMENT_KIND_UNKNOWN',
+        'Effect elements must be emitter, emitter-extends, or visual-element definitions.',
+        `${path}.kind`,
+      );
+  }
+
+  emitter(value: UnknownRecord, path: string): void {
+    this.unknownFields(value, EMITTER_FIELDS, path);
+    this.required(value, ['capacity', 'kind', 'render', 'spawn'], path);
+    if (value.kind !== 'emitter') this.literal(value.kind, 'emitter', `${path}.kind`);
+    if (!Number.isSafeInteger(value.capacity) || (value.capacity as number) <= 0) {
+      this.error(
+        'NACHI_ASSET_VALUE_INVALID',
+        'Emitter capacity must be a positive safe integer.',
+        `${path}.capacity`,
+      );
+    }
+    if (value.attributes !== undefined) this.attributes(value.attributes, `${path}.attributes`);
+    if (value.bounds !== undefined) this.bounds(value.bounds, `${path}.bounds`);
+    if (value.events !== undefined) this.events(value.events, `${path}.events`);
+    if (value.init !== undefined) this.moduleArray(value.init, 'init', `${path}.init`);
+    if (
+      value.integration !== undefined &&
+      value.integration !== 'euler' &&
+      value.integration !== 'none'
+    ) {
+      this.error(
+        'NACHI_ASSET_VALUE_INVALID',
+        'Emitter integration must be "euler" or "none".',
+        `${path}.integration`,
+      );
+    }
+    if (value.lifecycle !== undefined) this.lifecycle(value.lifecycle, `${path}.lifecycle`);
+    if (value.parameters !== undefined) this.parameters(value.parameters, `${path}.parameters`);
+    if (value.quality !== undefined) this.quality(value.quality, `${path}.quality`);
+    this.moduleOrArray(value.render, 'render', `${path}.render`);
+    this.moduleOrArray(value.spawn, 'spawn', `${path}.spawn`);
+    if (value.update !== undefined) this.moduleArray(value.update, 'update', `${path}.update`);
+  }
+
+  emitterExtension(value: UnknownRecord, path: string): void {
+    this.unknownFields(value, new Set(['extends', 'kind', 'overrides']), path);
+    this.required(value, ['extends', 'kind', 'overrides'], path);
+    if (typeof value.extends !== 'string' || value.extends.length === 0) {
+      this.type('non-empty string', value.extends, `${path}.extends`);
+    } else if (!isEmitterReference(value.extends)) {
+      this.error(
+        'NACHI_ASSET_EXTENDS_REFERENCE_INVALID',
+        'Emitter extends references use exactly one "#" in "#element" or "asset-id#element" syntax.',
+        `${path}.extends`,
+      );
+    }
+    if (!this.record(value.overrides, `${path}.overrides`)) return;
+    this.emitterOverrides(value.overrides, `${path}.overrides`);
+  }
+
+  emitterOverrides(value: UnknownRecord, path: string): void {
+    const fields = new Set([
+      'attributes',
+      'bounds',
+      'capacity',
+      'events',
+      'init',
+      'integration',
+      'lifecycle',
+      'parameters',
+      'quality',
+      'render',
+      'spawn',
+      'update',
+    ]);
+    this.unknownFields(value, fields, path);
+    if (value.attributes !== undefined) this.attributes(value.attributes, `${path}.attributes`);
+    if (value.bounds !== undefined) this.bounds(value.bounds, `${path}.bounds`);
+    if (
+      value.capacity !== undefined &&
+      (!Number.isSafeInteger(value.capacity) || (value.capacity as number) <= 0)
+    ) {
+      this.error(
+        'NACHI_ASSET_VALUE_INVALID',
+        'Capacity must be a positive safe integer.',
+        `${path}.capacity`,
+      );
+    }
+    if (value.events !== undefined) this.events(value.events, `${path}.events`);
+    if (value.init !== undefined) this.moduleOverride(value.init, 'init', `${path}.init`);
+    if (
+      value.integration !== undefined &&
+      value.integration !== 'euler' &&
+      value.integration !== 'none'
+    ) {
+      this.error(
+        'NACHI_ASSET_VALUE_INVALID',
+        'Integration must be "euler" or "none".',
+        `${path}.integration`,
+      );
+    }
+    if (value.lifecycle !== undefined) this.lifecycle(value.lifecycle, `${path}.lifecycle`);
+    if (value.parameters !== undefined) this.parameters(value.parameters, `${path}.parameters`);
+    if (value.quality !== undefined) this.quality(value.quality, `${path}.quality`);
+    if (value.render !== undefined) this.moduleOverride(value.render, 'render', `${path}.render`);
+    if (value.spawn !== undefined) this.moduleOrArray(value.spawn, 'spawn', `${path}.spawn`);
+    if (value.update !== undefined) this.moduleOverride(value.update, 'update', `${path}.update`);
+  }
+
+  moduleOverride(value: unknown, stage: string, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['mode', 'modules', 'order', 'remove']), path);
+    if (
+      value.mode !== undefined &&
+      value.mode !== 'append' &&
+      value.mode !== 'merge' &&
+      value.mode !== 'replace'
+    ) {
+      this.error('NACHI_ASSET_VALUE_INVALID', 'Module override mode is invalid.', `${path}.mode`);
+    }
+    if (value.modules !== undefined) this.moduleArray(value.modules, stage, `${path}.modules`);
+    for (const field of ['order', 'remove'] as const) {
+      const selectors = value[field];
+      if (selectors === undefined) continue;
+      if (!Array.isArray(selectors)) this.type('array', selectors, `${path}.${field}`);
+      else {
+        this.denseArray(selectors, `${path}.${field}`);
+        selectors.forEach((selector, index) => {
+          if (typeof selector !== 'string' && !Number.isSafeInteger(selector)) {
+            this.type('string or integer', selector, `${path}.${field}[${index}]`);
+          }
+        });
+      }
+    }
+  }
+
+  visualElement(value: UnknownRecord, path: string): void {
+    this.unknownFields(value, new Set(['config', 'kind', 'type', 'version']), path);
+    this.required(value, ['config', 'kind', 'type', 'version'], path);
+    if (typeof value.type !== 'string' || value.type.length === 0)
+      this.type('non-empty string', value.type, `${path}.type`);
+    if (!Number.isSafeInteger(value.version) || (value.version as number) < 1) {
+      this.type('positive integer', value.version, `${path}.version`);
+    }
+    if (this.record(value.config, `${path}.config`)) this.json(value.config, `${path}.config`);
+  }
+
+  moduleOrArray(value: unknown, stage: string, path: string): void {
+    if (Array.isArray(value)) this.moduleArray(value, stage, path);
+    else this.module(value, stage, path);
+  }
+
+  moduleArray(value: unknown, stage: string, path: string): void {
+    if (!Array.isArray(value)) {
+      this.type('array', value, path);
+      return;
+    }
+    this.denseArray(value, path);
+    value.forEach((module, index) => this.module(module, stage, `${path}[${index}]`));
+  }
+
+  module(value: unknown, expectedStage: string, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, MODULE_FIELDS, path);
+    this.required(value, ['config', 'kind', 'stage', 'type', 'version'], path);
+    if (value.kind !== 'module') this.literal(value.kind, 'module', `${path}.kind`);
+    if (value.stage !== expectedStage || !MODULE_STAGES.has(String(value.stage))) {
+      this.error(
+        'NACHI_ASSET_MODULE_STAGE_INVALID',
+        `Module stage must be "${expectedStage}" at this location.`,
+        `${path}.stage`,
+      );
+    }
+    if (typeof value.type !== 'string' || value.type.length === 0)
+      this.type('non-empty string', value.type, `${path}.type`);
+    if (!Number.isSafeInteger(value.version) || (value.version as number) < 1)
+      this.type('positive integer', value.version, `${path}.version`);
+    if (value.label !== undefined && typeof value.label !== 'string')
+      this.type('string', value.label, `${path}.label`);
+    if (this.record(value.config, `${path}.config`)) this.json(value.config, `${path}.config`);
+    if (value.access !== undefined) this.access(value.access, `${path}.access`);
+  }
+
+  access(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['optionalReads', 'reads', 'writes']), path);
+    this.required(value, ['reads', 'writes'], path);
+    this.stringArray(value.reads, `${path}.reads`);
+    this.stringArray(value.writes, `${path}.writes`);
+    if (value.optionalReads !== undefined)
+      this.stringArray(value.optionalReads, `${path}.optionalReads`);
+  }
+
+  attributes(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    for (const [key, attribute] of Object.entries(value)) {
+      const itemPath = `${path}.${key}`;
+      if (!this.record(attribute, itemPath)) continue;
+      this.unknownFields(
+        attribute,
+        new Set(['default', 'kind', 'name', 'transient', 'type']),
+        itemPath,
+      );
+      this.required(attribute, ['default', 'kind', 'name', 'type'], itemPath);
+      if (attribute.kind !== 'attribute')
+        this.literal(attribute.kind, 'attribute', `${itemPath}.kind`);
+      if (attribute.name !== key) {
+        this.error(
+          'NACHI_ASSET_VALUE_INVALID',
+          `Attribute name must match record key "${key}".`,
+          `${itemPath}.name`,
+        );
+      }
+      if (!ATTRIBUTE_TYPES.has(attribute.type as AttributeType))
+        this.type('attribute type', attribute.type, `${itemPath}.type`);
+      this.json(attribute.default, `${itemPath}.default`);
+      if (
+        ATTRIBUTE_TYPES.has(attribute.type as AttributeType) &&
+        !(
+          isRecord(attribute.default) &&
+          (attribute.default.kind === 'curve' ||
+            attribute.default.kind === 'parameter' ||
+            attribute.default.kind === 'range')
+        )
+      ) {
+        this.typedValue(attribute.type as AttributeType, attribute.default, `${itemPath}.default`);
+      }
+      if (attribute.transient !== undefined && typeof attribute.transient !== 'boolean')
+        this.type('boolean', attribute.transient, `${itemPath}.transient`);
+    }
+  }
+
+  parameters(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    for (const [key, parameter] of Object.entries(value)) {
+      const itemPath = `${path}.${key}`;
+      if (!this.record(parameter, itemPath)) continue;
+      this.unknownFields(
+        parameter,
+        new Set(['default', 'kind', 'mutable', 'path', 'type']),
+        itemPath,
+      );
+      this.required(parameter, ['default', 'kind', 'path', 'type'], itemPath);
+      if (parameter.kind !== 'parameter-definition')
+        this.literal(parameter.kind, 'parameter-definition', `${itemPath}.kind`);
+      if (parameter.path !== key || !key.startsWith('User.')) {
+        this.error(
+          'NACHI_ASSET_VALUE_INVALID',
+          'Parameter key/path must match and use the User.* namespace.',
+          `${itemPath}.path`,
+        );
+      }
+      if (!ATTRIBUTE_TYPES.has(parameter.type as AttributeType))
+        this.type('attribute type', parameter.type, `${itemPath}.type`);
+      this.json(parameter.default, `${itemPath}.default`);
+      if (ATTRIBUTE_TYPES.has(parameter.type as AttributeType)) {
+        this.typedValue(parameter.type as AttributeType, parameter.default, `${itemPath}.default`);
+      }
+      if (parameter.mutable !== undefined && typeof parameter.mutable !== 'boolean')
+        this.type('boolean', parameter.mutable, `${itemPath}.mutable`);
+    }
+  }
+
+  events(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    for (const [name, handlers] of Object.entries(value))
+      this.moduleOrArray(handlers, 'event', `${path}.${name}`);
+  }
+
+  bounds(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['center', 'radius']), path);
+    this.required(value, ['radius'], path);
+    this.finiteNumber(value.radius, `${path}.radius`);
+    if (value.center !== undefined) this.numberTuple(value.center, 3, `${path}.center`);
+  }
+
+  lifecycle(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['duration', 'loopCount', 'prewarm', 'startDelay']), path);
+    for (const field of ['duration', 'prewarm', 'startDelay'] as const) {
+      if (value[field] !== undefined) this.finiteNumber(value[field], `${path}.${field}`);
+    }
+    if (
+      value.loopCount !== undefined &&
+      value.loopCount !== 'infinite' &&
+      !Number.isSafeInteger(value.loopCount)
+    ) {
+      this.type('integer or "infinite"', value.loopCount, `${path}.loopCount`);
+    }
+  }
+
+  quality(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['epic', 'high', 'low', 'medium']), path);
+    for (const [tier, item] of Object.entries(value)) {
+      const itemPath = `${path}.${tier}`;
+      if (!this.record(item, itemPath)) continue;
+      this.unknownFields(item, new Set(['capacityScale', 'features', 'spawnRateScale']), itemPath);
+      if (item.capacityScale !== undefined)
+        this.finiteNumber(item.capacityScale, `${itemPath}.capacityScale`);
+      if (item.spawnRateScale !== undefined)
+        this.finiteNumber(item.spawnRateScale, `${itemPath}.spawnRateScale`);
+      if (item.features !== undefined) {
+        if (!this.record(item.features, `${itemPath}.features`)) continue;
+        this.unknownFields(
+          item.features,
+          new Set(['lit', 'soft', 'sorted']),
+          `${itemPath}.features`,
+        );
+        for (const [name, enabled] of Object.entries(item.features)) {
+          if (typeof enabled !== 'boolean')
+            this.type('boolean', enabled, `${itemPath}.features.${name}`);
+        }
+      }
+    }
+  }
+
+  scalability(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['culling', 'significance']), path);
+    if (value.culling !== undefined && this.record(value.culling, `${path}.culling`)) {
+      this.unknownFields(value.culling, new Set(['distance', 'frustum']), `${path}.culling`);
+      if (value.culling.frustum !== undefined && typeof value.culling.frustum !== 'boolean')
+        this.type('boolean', value.culling.frustum, `${path}.culling.frustum`);
+      if (
+        value.culling.distance !== undefined &&
+        this.record(value.culling.distance, `${path}.culling.distance`)
+      ) {
+        this.unknownFields(
+          value.culling.distance,
+          new Set(['fadeEnd', 'fadeStart']),
+          `${path}.culling.distance`,
+        );
+        this.required(value.culling.distance, ['fadeEnd'], `${path}.culling.distance`);
+        this.finiteNumber(value.culling.distance.fadeEnd, `${path}.culling.distance.fadeEnd`);
+        if (value.culling.distance.fadeStart !== undefined)
+          this.finiteNumber(value.culling.distance.fadeStart, `${path}.culling.distance.fadeStart`);
+      }
+    }
+    if (
+      value.significance !== undefined &&
+      this.record(value.significance, `${path}.significance`)
+    ) {
+      this.unknownFields(value.significance, new Set(['priority']), `${path}.significance`);
+      if (value.significance.priority !== undefined)
+        this.finiteNumber(value.significance.priority, `${path}.significance.priority`);
+    }
+  }
+
+  timeline(value: unknown, path: string): void {
+    if (Array.isArray(value)) {
+      this.denseArray(value, path);
+      value.forEach((entry, index) => this.timelineEntry(entry, `${path}[${index}]`));
+      return;
+    }
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['duration', 'entries', 'kind', 'loop', 'speed']), path);
+    this.required(value, ['entries', 'kind'], path);
+    if (value.kind !== 'timeline') this.literal(value.kind, 'timeline', `${path}.kind`);
+    if (value.duration !== undefined) this.finiteNumber(value.duration, `${path}.duration`);
+    if (value.speed !== undefined) this.finiteNumber(value.speed, `${path}.speed`);
+    if (
+      value.loop !== undefined &&
+      typeof value.loop !== 'boolean' &&
+      !Number.isSafeInteger(value.loop)
+    ) {
+      this.type('boolean or integer', value.loop, `${path}.loop`);
+    }
+    if (!Array.isArray(value.entries)) this.type('array', value.entries, `${path}.entries`);
+    else {
+      this.denseArray(value.entries, `${path}.entries`);
+      value.entries.forEach((entry, index) =>
+        this.timelineEntry(entry, `${path}.entries[${index}]`),
+      );
+    }
+  }
+
+  timelineEntry(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['actions', 'at']), path);
+    this.required(value, ['actions', 'at'], path);
+    this.finiteNumber(value.at, `${path}.at`);
+    if (!Array.isArray(value.actions)) this.type('array', value.actions, `${path}.actions`);
+    else {
+      this.denseArray(value.actions, `${path}.actions`);
+      value.actions.forEach((action, index) =>
+        this.timelineAction(action, `${path}.actions[${index}]`),
+      );
+    }
+  }
+
+  timelineAction(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    const kind = value.kind;
+    const fields =
+      kind === 'play' || kind === 'stop'
+        ? new Set(['kind', 'target'])
+        : kind === 'camera-shake'
+          ? new Set(['duration', 'frequency', 'kind', 'strength'])
+          : kind === 'hit-stop'
+            ? new Set(['durationMs', 'kind', 'timeScale'])
+            : kind === 'marker'
+              ? new Set(['kind', 'name', 'payload'])
+              : undefined;
+    if (!fields) {
+      this.error(
+        'NACHI_ASSET_TIMELINE_ACTION_UNKNOWN',
+        `Unknown timeline action "${String(kind)}".`,
+        `${path}.kind`,
+      );
+      return;
+    }
+    this.unknownFields(value, fields, path);
+    if (kind === 'play' || kind === 'stop') {
+      this.required(value, ['kind', 'target'], path);
+      if (typeof value.target !== 'string') this.type('string', value.target, `${path}.target`);
+    } else if (kind === 'camera-shake') {
+      this.required(value, ['kind', 'strength'], path);
+      this.finiteNumber(value.strength, `${path}.strength`);
+      if (value.duration !== undefined) this.finiteNumber(value.duration, `${path}.duration`);
+      if (value.frequency !== undefined) this.finiteNumber(value.frequency, `${path}.frequency`);
+    } else if (kind === 'hit-stop') {
+      this.required(value, ['durationMs', 'kind'], path);
+      this.finiteNumber(value.durationMs, `${path}.durationMs`);
+      if (value.timeScale !== undefined) this.finiteNumber(value.timeScale, `${path}.timeScale`);
+    } else {
+      this.required(value, ['kind', 'name'], path);
+      if (typeof value.name !== 'string') this.type('string', value.name, `${path}.name`);
+      if (value.payload !== undefined) this.json(value.payload, `${path}.payload`);
+    }
+  }
+
+  json(value: unknown, path: string, depth = 0): void {
+    if (depth > MAX_JSON_DEPTH) {
+      this.error(
+        'NACHI_ASSET_MAX_DEPTH_EXCEEDED',
+        `JSON asset data must not exceed ${MAX_JSON_DEPTH} nested containers.`,
+        path,
+      );
+      return;
+    }
+    if (value === null || typeof value === 'boolean' || typeof value === 'string') return;
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value))
+        this.error('NACHI_ASSET_NON_FINITE_NUMBER', 'JSON numbers must be finite.', path);
+      return;
+    }
+    if (Array.isArray(value)) {
+      this.denseArray(value, path);
+      value.forEach((item, index) => this.json(item, `${path}[${index}]`, depth + 1));
+      return;
+    }
+    if (!this.record(value, path)) return;
+    if (this.#jsonActive.has(value)) {
+      this.error(
+        'NACHI_ASSET_CYCLIC_VALUE',
+        'Cyclic object graphs are not valid JSON asset data.',
+        path,
+      );
+      return;
+    }
+    this.#jsonActive.add(value);
+    const kind = value.kind;
+    if (kind === 'range') {
+      this.unknownFields(value, new Set(['distribution', 'kind', 'max', 'min']), path);
+      this.required(value, ['distribution', 'kind', 'max', 'min'], path);
+      if (value.distribution !== 'uniform')
+        this.literal(value.distribution, 'uniform', `${path}.distribution`);
+      const minShape = this.generatorNumber(value.min, `${path}.min`);
+      const maxShape = this.generatorNumber(value.max, `${path}.max`);
+      if (minShape !== undefined && maxShape !== undefined && minShape !== maxShape) {
+        this.error(
+          'NACHI_ASSET_TYPE_MISMATCH',
+          'Range min and max must use the same scalar or vector shape.',
+          path,
+        );
+      }
+    } else if (kind === 'curve') {
+      this.unknownFields(value, new Set(['keys', 'kind']), path);
+      this.required(value, ['keys', 'kind'], path);
+      if (!Array.isArray(value.keys)) {
+        this.type('array', value.keys, `${path}.keys`);
+      } else {
+        this.denseArray(value.keys, `${path}.keys`);
+        if (value.keys.length < 2) {
+          this.error(
+            'NACHI_ASSET_VALUE_INVALID',
+            'Curve generators require at least two keys.',
+            `${path}.keys`,
+          );
+        }
+        let expectedShape: string | undefined;
+        value.keys.forEach((key, index) => {
+          const keyPath = `${path}.keys[${index}]`;
+          if (!this.record(key, keyPath)) return;
+          this.unknownFields(key, new Set(['interpolation', 'time', 'value']), keyPath);
+          this.required(key, ['time', 'value'], keyPath);
+          this.finiteNumber(key.time, `${keyPath}.time`);
+          if (
+            key.interpolation !== undefined &&
+            key.interpolation !== 'constant' &&
+            key.interpolation !== 'cubic' &&
+            key.interpolation !== 'linear'
+          ) {
+            this.error(
+              'NACHI_ASSET_VALUE_INVALID',
+              'Curve interpolation must be "constant", "cubic", or "linear".',
+              `${keyPath}.interpolation`,
+            );
+          }
+          const shape = this.generatorNumber(key.value, `${keyPath}.value`);
+          expectedShape ??= shape;
+          if (shape !== undefined && expectedShape !== undefined && shape !== expectedShape) {
+            this.error(
+              'NACHI_ASSET_TYPE_MISMATCH',
+              'Curve key values must use the same scalar or vector shape.',
+              `${keyPath}.value`,
+            );
+          }
+        });
+      }
+    } else if (kind === 'gradient') {
+      this.unknownFields(value, new Set(['kind', 'stops']), path);
+      this.required(value, ['kind', 'stops'], path);
+      if (!Array.isArray(value.stops)) {
+        this.type('array', value.stops, `${path}.stops`);
+      } else {
+        this.denseArray(value.stops, `${path}.stops`);
+        if (value.stops.length < 2) {
+          this.error(
+            'NACHI_ASSET_VALUE_INVALID',
+            'Gradient generators require at least two stops.',
+            `${path}.stops`,
+          );
+        }
+        value.stops.forEach((stop, index) => {
+          const stopPath = `${path}.stops[${index}]`;
+          if (!this.record(stop, stopPath)) return;
+          this.unknownFields(stop, new Set(['color', 'position']), stopPath);
+          this.required(stop, ['color', 'position'], stopPath);
+          this.color(stop.color, `${stopPath}.color`);
+          this.finiteNumber(stop.position, `${stopPath}.position`);
+        });
+      }
+    } else if (kind === 'parameter') {
+      this.unknownFields(value, new Set(['fallback', 'kind', 'path']), path);
+      this.required(value, ['kind', 'path'], path);
+      if (typeof value.path !== 'string') this.type('string', value.path, `${path}.path`);
+    } else if (kind === 'asset-ref') {
+      this.unknownFields(value, new Set(['assetType', 'kind', 'uri']), path);
+      this.required(value, ['assetType', 'kind', 'uri'], path);
+      if (typeof value.assetType !== 'string')
+        this.type('string', value.assetType, `${path}.assetType`);
+      if (typeof value.uri !== 'string') this.type('string', value.uri, `${path}.uri`);
+    } else if (kind === 'function-ref' || kind === 'callback-ref') {
+      this.unknownFields(value, new Set(['id', 'kind', 'version']), path);
+      this.required(value, ['id', 'kind', 'version'], path);
+      if (typeof value.id !== 'string') this.type('string', value.id, `${path}.id`);
+      if (!Number.isSafeInteger(value.version) || (value.version as number) < 1)
+        this.type('positive integer', value.version, `${path}.version`);
+    } else if (kind === 'inline') {
+      this.error(
+        'NACHI_ASSET_INLINE_FUNCTION_UNRESOLVED',
+        'Inline tslModule factories are authoring-only and cannot be stored in JSON.',
+        path,
+        'Register the factory and serialize its function-ref instead.',
+      );
+    }
+    for (const [key, item] of Object.entries(value)) this.json(item, `${path}.${key}`, depth + 1);
+    this.#jsonActive.delete(value);
+  }
+
+  denseArray(value: readonly unknown[], path: string): void {
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) {
+        this.error(
+          'NACHI_ASSET_SPARSE_ARRAY',
+          'Sparse arrays are not valid JSON asset data.',
+          `${path}[${index}]`,
+        );
+      }
+    }
+  }
+
+  generatorNumber(value: unknown, path: string): string | undefined {
+    if (typeof value === 'number') {
+      this.finiteNumber(value, path);
+      return 'scalar';
+    }
+    if (!Array.isArray(value) || value.length < 2 || value.length > 4) {
+      this.type('finite number or 2-4 component number array', value, path);
+      return undefined;
+    }
+    this.denseArray(value, path);
+    value.forEach((item, index) => this.finiteNumber(item, `${path}[${index}]`));
+    return `vec${value.length}`;
+  }
+
+  color(value: unknown, path: string): void {
+    if (typeof value === 'string') {
+      if (!/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/iu.test(value)) {
+        this.error(
+          'NACHI_ASSET_VALUE_INVALID',
+          'Color strings must use #RGB, #RGBA, #RRGGBB, or #RRGGBBAA syntax.',
+          path,
+        );
+      }
+      return;
+    }
+    if (!Array.isArray(value) || (value.length !== 3 && value.length !== 4)) {
+      this.type('color string or 3-4 component number array', value, path);
+      return;
+    }
+    this.denseArray(value, path);
+    value.forEach((item, index) => this.finiteNumber(item, `${path}[${index}]`));
+  }
+
+  record(value: unknown, path: string): value is UnknownRecord {
+    if (!isPlainRecord(value)) {
+      this.type('plain object', value, path);
+      return false;
+    }
+    return true;
+  }
+
+  required(value: UnknownRecord, fields: readonly string[], path: string): void {
+    for (const field of fields) {
+      if (!(field in value)) {
+        this.error(
+          'NACHI_ASSET_REQUIRED_FIELD',
+          `Required field "${field}" is missing.`,
+          `${path}.${field}`,
+        );
+      }
+    }
+  }
+
+  unknownFields(value: UnknownRecord, fields: ReadonlySet<string>, path: string): void {
+    for (const field of Object.keys(value)) {
+      if (!fields.has(field)) {
+        this.error('NACHI_ASSET_UNKNOWN_FIELD', `Unknown field "${field}".`, `${path}.${field}`);
+      }
+    }
+  }
+
+  stringArray(value: unknown, path: string): void {
+    if (!Array.isArray(value)) {
+      this.type('array', value, path);
+      return;
+    }
+    this.denseArray(value, path);
+    value.forEach((item, index) => {
+      if (typeof item !== 'string') this.type('string', item, `${path}[${index}]`);
+    });
+  }
+
+  numberTuple(value: unknown, length: number, path: string): void {
+    if (!Array.isArray(value) || value.length !== length) {
+      this.type(`${length}-component number array`, value, path);
+      return;
+    }
+    this.denseArray(value, path);
+    value.forEach((item, index) => this.finiteNumber(item, `${path}[${index}]`));
+  }
+
+  typedValue(type: AttributeType, value: unknown, path: string): void {
+    const tupleLength =
+      type === 'vec2'
+        ? 2
+        : type === 'vec3'
+          ? 3
+          : type === 'vec4' || type === 'color' || type === 'quat'
+            ? 4
+            : type === 'mat3'
+              ? 9
+              : type === 'mat4'
+                ? 16
+                : undefined;
+    if (tupleLength !== undefined) {
+      this.numberTuple(value, tupleLength, path);
+      return;
+    }
+    if (type === 'bool') {
+      if (typeof value !== 'boolean') this.type('boolean', value, path);
+      return;
+    }
+    if (type === 'f32') {
+      this.finiteNumber(value, path);
+      return;
+    }
+    if (!Number.isSafeInteger(value) || (type === 'u32' && (value as number) < 0)) {
+      this.type(type === 'u32' ? 'non-negative safe integer' : 'safe integer', value, path);
+    }
+  }
+
+  finiteNumber(value: unknown, path: string): void {
+    if (typeof value !== 'number' || !Number.isFinite(value))
+      this.type('finite number', value, path);
+  }
+
+  literal(value: unknown, expected: string, path: string): void {
+    this.error(
+      'NACHI_ASSET_VALUE_INVALID',
+      `Expected literal "${expected}", received ${String(value)}.`,
+      path,
+    );
+  }
+
+  type(expected: string, value: unknown, path: string): void {
+    const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+    this.error('NACHI_ASSET_TYPE_MISMATCH', `Expected ${expected}, received ${actual}.`, path);
+  }
+
+  error(code: string, message: string, path?: string, hint?: string): void {
+    pushDiagnostic(this.diagnostics, this.phase, code, message, path, hint);
+  }
+}
+
+function collectSerializableDiagnostics(value: unknown, phase: DiagnosticPhase): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  const active = new Set<object>();
+  const visit = (item: unknown, path: string, depth = 0): void => {
+    if (depth > MAX_JSON_DEPTH) {
+      pushDiagnostic(
+        diagnostics,
+        phase,
+        'NACHI_ASSET_MAX_DEPTH_EXCEEDED',
+        `JSON asset data must not exceed ${MAX_JSON_DEPTH} nested containers.`,
+        path,
+      );
+      return;
+    }
+    if (item === null || typeof item === 'boolean' || typeof item === 'string') return;
+    if (typeof item === 'number') {
+      if (!Number.isFinite(item))
+        pushDiagnostic(
+          diagnostics,
+          phase,
+          'NACHI_ASSET_NON_FINITE_NUMBER',
+          'JSON numbers must be finite.',
+          path,
+        );
+      return;
+    }
+    if (typeof item === 'function') {
+      pushDiagnostic(
+        diagnostics,
+        phase,
+        'NACHI_ASSET_NON_SERIALIZABLE',
+        'Functions cannot be stored in a nachi effect asset.',
+        path,
+        'Use a registered function-ref or callback-ref.',
+      );
+      return;
+    }
+    if (typeof item === 'undefined' || typeof item === 'symbol' || typeof item === 'bigint') {
+      pushDiagnostic(
+        diagnostics,
+        phase,
+        'NACHI_ASSET_NON_SERIALIZABLE',
+        `${typeof item} is not a JSON value.`,
+        path,
+      );
+      return;
+    }
+    if (active.has(item)) {
+      pushDiagnostic(
+        diagnostics,
+        phase,
+        'NACHI_ASSET_CYCLIC_VALUE',
+        'Cyclic JavaScript object graphs cannot be serialized.',
+        path,
+      );
+      return;
+    }
+    if (!Array.isArray(item) && !isPlainRecord(item)) {
+      pushDiagnostic(
+        diagnostics,
+        phase,
+        'NACHI_ASSET_NON_SERIALIZABLE',
+        'Class instances, Three.js resources, DOM objects, and GPU objects are outside the declarative JSON subset.',
+        path,
+      );
+      return;
+    }
+    active.add(item);
+    if (Array.isArray(item)) {
+      for (let index = 0; index < item.length; index += 1) {
+        if (!(index in item)) {
+          pushDiagnostic(
+            diagnostics,
+            phase,
+            'NACHI_ASSET_SPARSE_ARRAY',
+            'Sparse arrays are not valid JSON asset data.',
+            `${path}[${index}]`,
+          );
+          continue;
+        }
+        visit(item[index], `${path}[${index}]`, depth + 1);
+      }
+    } else {
+      for (const key of Reflect.ownKeys(item)) {
+        if (typeof key === 'symbol') {
+          pushDiagnostic(
+            diagnostics,
+            phase,
+            'NACHI_ASSET_NON_SERIALIZABLE',
+            'Symbol-keyed fields are not JSON.',
+            path,
+          );
+          continue;
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(item, key);
+        if (
+          key === 'factory' &&
+          item.kind === 'module' &&
+          item.type === 'core/tsl-module' &&
+          descriptor?.enumerable === false &&
+          'value' in descriptor &&
+          typeof descriptor.value === 'function'
+        ) {
+          continue;
+        }
+        if (!descriptor?.enumerable || !('value' in descriptor)) {
+          pushDiagnostic(
+            diagnostics,
+            phase,
+            'NACHI_ASSET_NON_SERIALIZABLE',
+            'Non-enumerable fields and property accessors are not part of the declarative JSON subset.',
+            `${path}.${key}`,
+          );
+          continue;
+        }
+        visit(descriptor.value, `${path}.${key}`, depth + 1);
+      }
+    }
+    active.delete(item);
+  };
+  visit(value, 'effect');
+  return diagnostics;
+}
+
+function parseInput(input: unknown): unknown {
+  if (typeof input !== 'string') return input;
+  try {
+    return JSON.parse(input) as unknown;
+  } catch (error) {
+    throw new VfxDiagnosticError([
+      {
+        code: 'NACHI_ASSET_JSON_INVALID',
+        message: `Effect asset is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+        path: '$',
+        phase: 'deserialize',
+        severity: 'error',
+      },
+    ]);
+  }
+}
+
+export function validateEffectAsset(input: unknown): readonly VfxDiagnostic[] {
+  const validator = new AssetValidator('deserialize');
+  validator.document(input);
+  return validator.diagnostics;
+}
+
+export function serializeEffect<
+  Elements extends EffectElements,
+  Parameters extends ParameterSchema,
+>(definition: EffectDefinition<Elements, Parameters>): EffectAssetDocumentV1 {
+  const diagnostics = collectSerializableDiagnostics(definition, 'serialize');
+  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
+  const document = {
+    format: EFFECT_ASSET_FORMAT,
+    version: EFFECT_ASSET_VERSION,
+    effect: jsonClone(definition),
+  } satisfies EffectAssetDocumentV1;
+  const validator = new AssetValidator('serialize');
+  validator.document(document);
+  if (validator.diagnostics.length > 0) throw new VfxDiagnosticError(validator.diagnostics);
+  return document;
+}
+
+function migratedDocument(input: unknown, options: LoadEffectOptions): UnknownRecord {
+  const parsed = parseInput(input);
+  const migrated = (options.migrations ?? defaultEffectAssetMigrations).migrate(
+    parsed,
+    EFFECT_ASSET_VERSION,
+  );
+  const validator = new AssetValidator('deserialize');
+  validator.document(migrated);
+  if (validator.diagnostics.length > 0) throw new VfxDiagnosticError(validator.diagnostics);
+  return jsonClone(migrated) as UnknownRecord;
+}
+
+function definitionDiagnostics(error: VfxDiagnosticError, path: string): readonly VfxDiagnostic[] {
+  return error.diagnostics.map((item) => ({
+    code: 'NACHI_ASSET_DEFINITION_INVALID',
+    message: item.message,
+    path: item.path === undefined ? path : `${path}.${item.path}`,
+    phase: 'deserialize' as const,
+    severity: 'error' as const,
+    hint: `Underlying definition diagnostic: ${item.code}`,
+  }));
+}
+
+class EffectLoader {
+  readonly #documents = new Map<string, UnknownRecord>();
+  readonly #resolvedElements = new Map<string, EffectElementDefinition>();
+  readonly #resolving = new Set<string>();
+
+  constructor(readonly options: LoadEffectOptions) {}
+
+  load(
+    document: UnknownRecord,
+    assetId: string,
+  ): EffectDefinition<EffectElements, ParameterSchema> {
+    this.#documents.set(assetId, document.effect as UnknownRecord);
+    const effect = document.effect as UnknownRecord;
+    const rawElements = effect.elements as UnknownRecord;
+    const elements = Object.fromEntries(
+      Object.keys(rawElements).map((key) => [
+        key,
+        this.resolveElement(assetId, key, `$.effect.elements.${key}`),
+      ]),
+    ) as EffectElements;
+    try {
+      const config = {
+        elements,
+        ...(effect.parameters === undefined
+          ? {}
+          : { parameters: effect.parameters as ParameterSchema }),
+        ...(effect.scalability === undefined
+          ? {}
+          : { scalability: effect.scalability as EffectDefinition['scalability'] }),
+        ...(effect.timeline === undefined
+          ? {}
+          : { timeline: effect.timeline as EffectDefinition['timeline'] }),
+      } as EffectConfig<EffectElements, ParameterSchema>;
+      return defineEffect(config) as EffectDefinition<EffectElements, ParameterSchema>;
+    } catch (error) {
+      if (!(error instanceof VfxDiagnosticError)) throw error;
+      throw new VfxDiagnosticError(definitionDiagnostics(error, '$.effect'));
+    }
+  }
+
+  resolveElement(assetId: string, key: string, path: string): EffectElementDefinition {
+    const identity = `${assetId}#${key}`;
+    const cached = this.#resolvedElements.get(identity);
+    if (cached) return cached;
+    if (this.#resolving.has(identity)) {
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_ASSET_EXTENDS_CYCLE',
+          message: `Asset emitter inheritance contains a cycle at ${identity}.`,
+          path,
+          phase: 'deserialize',
+          severity: 'error',
+        },
+      ]);
+    }
+    const effect = this.#documentEffect(assetId, path);
+    const elements = effect.elements as UnknownRecord;
+    const raw = elements[key];
+    if (!isRecord(raw)) {
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_ASSET_EXTENDS_TARGET_UNKNOWN',
+          message: `Asset element "${key}" does not exist in ${assetId}.`,
+          path,
+          phase: 'deserialize',
+          severity: 'error',
+        },
+      ]);
+    }
+    this.#resolving.add(identity);
+    try {
+      let resolved: EffectElementDefinition;
+      if (raw.kind === 'emitter-extends') {
+        const reference = raw.extends as string;
+        const { referencedAssetId, referencedKey } = this.#parseReference(
+          reference,
+          assetId,
+          `${path}.extends`,
+        );
+        const base = this.resolveElement(referencedAssetId, referencedKey, `${path}.extends`);
+        if (base.kind !== 'emitter') {
+          throw new VfxDiagnosticError([
+            {
+              code: 'NACHI_ASSET_EXTENDS_BASE_TYPE_MISMATCH',
+              message: `Asset inheritance target ${reference} is not an emitter.`,
+              path: `${path}.extends`,
+              phase: 'deserialize',
+              severity: 'error',
+            },
+          ]);
+        }
+        try {
+          resolved = defineEmitter(base, raw.overrides as EmitterOverrideConfig);
+        } catch (error) {
+          if (!(error instanceof VfxDiagnosticError)) throw error;
+          throw new VfxDiagnosticError(definitionDiagnostics(error, `${path}.overrides`));
+        }
+      } else if (raw.kind === 'emitter') {
+        const { kind: _kind, ...config } = raw;
+        void _kind;
+        try {
+          resolved = defineEmitter(config as unknown as EmitterConfig);
+        } catch (error) {
+          if (!(error instanceof VfxDiagnosticError)) throw error;
+          throw new VfxDiagnosticError(definitionDiagnostics(error, path));
+        }
+      } else {
+        resolved = jsonClone(raw) as unknown as EffectElementDefinition;
+      }
+      this.#resolvedElements.set(identity, resolved);
+      return resolved;
+    } finally {
+      this.#resolving.delete(identity);
+    }
+  }
+
+  #parseReference(
+    reference: string,
+    currentAssetId: string,
+    path: string,
+  ): { readonly referencedAssetId: string; readonly referencedKey: string } {
+    const hash = reference.indexOf('#');
+    if (!isEmitterReference(reference)) {
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_ASSET_EXTENDS_REFERENCE_INVALID',
+          message: 'Emitter extends references use "#element" or "asset-id#element" syntax.',
+          path,
+          phase: 'deserialize',
+          severity: 'error',
+        },
+      ]);
+    }
+    const assetPart = reference.slice(0, hash);
+    const referencedAssetId = assetPart.length === 0 ? currentAssetId : assetPart;
+    const referencedKey = reference.slice(hash + 1);
+    if (!this.#documents.has(referencedAssetId))
+      this.#loadExternalDocument(referencedAssetId, path);
+    return { referencedAssetId, referencedKey };
+  }
+
+  #loadExternalDocument(assetId: string, path: string): void {
+    if (!this.options.resolveAsset) {
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_ASSET_RESOLVER_REQUIRED',
+          message: `Resolving external emitter asset "${assetId}" requires LoadEffectOptions.resolveAsset.`,
+          path,
+          phase: 'deserialize',
+          severity: 'error',
+        },
+      ]);
+    }
+    let input: unknown;
+    try {
+      input = this.options.resolveAsset(assetId);
+    } catch (error) {
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_ASSET_REFERENCE_LOAD_FAILED',
+          message: `Failed to load referenced asset "${assetId}": ${error instanceof Error ? error.message : String(error)}`,
+          path,
+          phase: 'deserialize',
+          severity: 'error',
+        },
+      ]);
+    }
+    const document = migratedDocument(input, this.options);
+    this.#documents.set(assetId, document.effect as UnknownRecord);
+  }
+
+  #documentEffect(assetId: string, path: string): UnknownRecord {
+    const effect = this.#documents.get(assetId);
+    if (effect) return effect;
+    this.#loadExternalDocument(assetId, path);
+    return this.#documents.get(assetId)!;
+  }
+}
+
+export function loadEffect(
+  input: unknown,
+  options: LoadEffectOptions = {},
+): EffectDefinition<EffectElements, ParameterSchema> {
+  const document = migratedDocument(input, options);
+  return new EffectLoader(options).load(document, options.assetId ?? '$root');
+}

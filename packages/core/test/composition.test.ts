@@ -349,6 +349,18 @@ describe('M9 emitter inheritance', () => {
       }),
     );
   });
+
+  it('omits absent optional stage keys from inherited emitters', () => {
+    const base = defineEmitter({
+      capacity: 2,
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const inherited = defineEmitter(base, { capacity: 4 });
+
+    expect('init' in inherited).toBe(false);
+    expect('update' in inherited).toBe(false);
+  });
 });
 
 describe('M9 composed parameters and pooling', () => {

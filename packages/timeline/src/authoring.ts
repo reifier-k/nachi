@@ -5,6 +5,7 @@ import {
   type CurveGenerator,
   type EffectDefinition,
   type EffectElementDefinition,
+  type EffectElements,
   type EmptyParameterSchema,
   type ParameterSchema,
   type TimelineAction,
@@ -68,6 +69,14 @@ export interface MeshFxRuntimeResource {
   readonly mesh: MeshFxMesh;
 }
 
+export interface MeshFxAssetResolveContext {
+  readonly duration: number;
+  readonly elementKey: string;
+  readonly resource: string;
+}
+
+export type MeshFxAssetResolver = (context: MeshFxAssetResolveContext) => MeshFxMesh | undefined;
+
 const effectMeshResources = new WeakMap<object, ReadonlyMap<string, MeshFxRuntimeResource>>();
 const materialConfigs = new WeakMap<FxNodeMaterial, TimelineFxMaterialConfig>();
 
@@ -119,6 +128,55 @@ export function defineEffect<
 
 export function getMeshFxResources(definition: object): ReadonlyMap<string, MeshFxRuntimeResource> {
   return effectMeshResources.get(definition) ?? new Map();
+}
+
+/**
+ * Resolves declarative `timeline/mesh-fx` placeholders after JSON loading. Live Three.js resources
+ * stay outside the document and are attached non-enumerably through the same runtime WeakMap used
+ * by code-authored effects.
+ */
+export function bindMeshFxResources<
+  Elements extends EffectElements,
+  Parameters extends ParameterSchema,
+>(definition: EffectDefinition<Elements, Parameters>, resolve: MeshFxAssetResolver): void {
+  const resources = new Map<string, MeshFxRuntimeResource>();
+  const diagnostics = [];
+  for (const [key, element] of Object.entries(definition.elements)) {
+    if (element.kind !== 'visual-element' || element.type !== 'timeline/mesh-fx') continue;
+    const config = element.config as { readonly duration?: unknown; readonly resource?: unknown };
+    if (
+      typeof config.duration !== 'number' ||
+      !Number.isFinite(config.duration) ||
+      config.duration <= 0 ||
+      typeof config.resource !== 'string' ||
+      config.resource.length === 0
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_TIMELINE_MESH_FX_REFERENCE_INVALID',
+          'Loaded mesh-fx placeholders require a positive duration and non-empty resource ID.',
+          `elements.${key}.config`,
+        ),
+      );
+      continue;
+    }
+    const mesh = resolve({ duration: config.duration, elementKey: key, resource: config.resource });
+    if (!mesh) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_TIMELINE_MESH_FX_RESOURCE_UNRESOLVED',
+          `Mesh-fx resource "${config.resource}" could not be resolved.`,
+          `elements.${key}.config.resource`,
+        ),
+      );
+      continue;
+    }
+    const resource = { duration: config.duration, mesh };
+    validateTimelineMeshFxResource(resource, key);
+    resources.set(key, resource);
+  }
+  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
+  effectMeshResources.set(definition, resources);
 }
 
 export type TimelineOverLifeInput = OverLifeInput | CurveGenerator<number>;

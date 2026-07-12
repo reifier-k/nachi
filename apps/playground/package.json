@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@nachi/core": "workspace:*",
+    "@nachi/format": "workspace:*",
     "@nachi/mesh-fx": "workspace:*",
     "@nachi/post": "workspace:*",
     "@nachi/timeline": "workspace:*",
