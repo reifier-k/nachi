@@ -399,23 +399,111 @@ type StorageArrayConstructor = new (length: number) => StorageArray;
 
 const THREE_STORAGE_ATTRIBUTE_TYPE = 3;
 const THREE_INDIRECT_ATTRIBUTE_TYPE = 4;
+const THREE_DRAW_REGISTRY = Symbol.for('@nachi/three/materialized-draw-registry');
+const THREE_RENDER_ORDER = Symbol.for('@nachi/three/render-order');
+const THREE_VISIBILITY = Symbol.for('@nachi/three/visibility');
 const indirectAttributesByAdapter = new WeakMap<
   KernelTslAdapter,
   Set<THREE.IndirectStorageBufferAttribute>
 >();
-const drawObjectsByKernels = new WeakMap<BuiltEmitterKernels, Set<THREE.Object3D>>();
-const renderOrderByKernels = new WeakMap<BuiltEmitterKernels, number>();
-const visibilityByKernels = new WeakMap<BuiltEmitterKernels, boolean>();
 
-function registerDrawObject(kernels: BuiltEmitterKernels, object: THREE.Object3D): void {
-  let objects = drawObjectsByKernels.get(kernels);
-  if (!objects) {
-    objects = new Set();
-    drawObjectsByKernels.set(kernels, objects);
+type ThreeDrawRegistration = {
+  readonly attributes: readonly THREE.BufferAttribute[];
+  readonly dispose: () => void;
+  readonly object: THREE.Object3D;
+};
+
+type ThreeAttributeManager = {
+  delete(attribute: THREE.BufferAttribute): unknown;
+};
+
+function drawRegistry(
+  kernels: BuiltEmitterKernels,
+  create = false,
+): Set<ThreeDrawRegistration> | undefined {
+  const owner = kernels as BuiltEmitterKernels & {
+    [THREE_DRAW_REGISTRY]?: Set<ThreeDrawRegistration>;
+  };
+  if (!owner[THREE_DRAW_REGISTRY] && create) owner[THREE_DRAW_REGISTRY] = new Set();
+  return owner[THREE_DRAW_REGISTRY];
+}
+
+function disposeObjectResources(object: THREE.Object3D): void {
+  object.removeFromParent();
+  object.traverse((child) => {
+    const renderable = child as THREE.Object3D & {
+      readonly geometry?: THREE.BufferGeometry;
+      readonly material?: THREE.Material | readonly THREE.Material[];
+    };
+    renderable.geometry?.dispose();
+    const materials = Array.isArray(renderable.material)
+      ? renderable.material
+      : renderable.material
+        ? [renderable.material]
+        : [];
+    for (const material of materials) material.dispose();
+  });
+}
+
+function registerDrawObject(
+  kernels: BuiltEmitterKernels,
+  object: THREE.Object3D,
+  attributes: readonly THREE.BufferAttribute[] = [],
+  dispose: () => void = () => disposeObjectResources(object),
+): void {
+  const instanceMatrix = object instanceof THREE.InstancedMesh ? [object.instanceMatrix] : [];
+  drawRegistry(kernels, true)!.add({
+    attributes: [...instanceMatrix, ...attributes],
+    dispose,
+    object,
+  });
+  const state = kernels as BuiltEmitterKernels & {
+    [THREE_RENDER_ORDER]?: number;
+    [THREE_VISIBILITY]?: boolean;
+  };
+  object.renderOrder = state[THREE_RENDER_ORDER] ?? object.renderOrder;
+  object.visible = state[THREE_VISIBILITY] ?? true;
+}
+
+function rendererAttributeManager(
+  renderer?: THREE.WebGPURenderer,
+): ThreeAttributeManager | undefined {
+  return (
+    renderer as unknown as {
+      readonly _attributes?: ThreeAttributeManager;
+    }
+  )?._attributes;
+}
+
+/** Removes one materialized draw from runtime accounting and disposes its owned Three resources. */
+export function disposeThreeDraw(
+  kernels: BuiltEmitterKernels,
+  object: THREE.Object3D,
+  renderer?: THREE.WebGPURenderer,
+): void {
+  const registry = drawRegistry(kernels);
+  if (!registry) return;
+  const attributes = rendererAttributeManager(renderer);
+  for (const registration of registry) {
+    if (registration.object !== object) continue;
+    registration.dispose();
+    for (const attribute of registration.attributes) attributes?.delete(attribute);
+    registry.delete(registration);
   }
-  objects.add(object);
-  object.renderOrder = renderOrderByKernels.get(kernels) ?? object.renderOrder;
-  object.visible = visibilityByKernels.get(kernels) ?? true;
+  if (registry.size === 0) {
+    delete (kernels as BuiltEmitterKernels & { [THREE_DRAW_REGISTRY]?: unknown })[
+      THREE_DRAW_REGISTRY
+    ];
+  }
+}
+
+/** Alias emphasizing that disposal also unregisters the draw from its kernel owner. */
+export const unmaterializeThreeDraw = disposeThreeDraw;
+
+function disposeKernelDraws(kernels: BuiltEmitterKernels, renderer?: THREE.WebGPURenderer): void {
+  for (const registration of [...(drawRegistry(kernels) ?? [])]) {
+    disposeThreeDraw(kernels, registration.object, renderer);
+  }
 }
 
 function materializeInstancedArray(length: number, type: TslStorageType): KernelStorageNode {
@@ -697,12 +785,68 @@ export function setThreeUniformValue(
   }
 }
 
+function emitterStorageNodes(kernels: BuiltEmitterKernels): Set<KernelStorageNode> {
+  const storages = new Set<KernelStorageNode>([
+    kernels.aliveCount,
+    kernels.aliveIndices,
+    kernels.birthIndices,
+    kernels.spawnOverflow,
+    ...Object.values(kernels.storages),
+  ]);
+  for (const storage of [
+    kernels.drawIndirect,
+    kernels.freeCount,
+    kernels.sortedDepths,
+    kernels.sortedIndices,
+    kernels.spawnDispatch,
+  ]) {
+    if (storage) storages.add(storage);
+  }
+  for (const output of Object.values(kernels.eventOutputs)) {
+    storages.add(output.indirect);
+    storages.add(output.payload);
+    storages.add(output.state);
+  }
+  for (const input of kernels.eventInputs) {
+    storages.add(input.binding.resources.indirect);
+    storages.add(input.binding.resources.payload);
+    storages.add(input.binding.resources.state);
+  }
+  for (const grid of Object.values(kernels.neighborGrids)) {
+    storages.add(grid.counts);
+    storages.add(grid.slots);
+    storages.add(grid.stats);
+  }
+  return storages;
+}
+
+function assertRendererBackend(
+  renderer: THREE.WebGPURenderer,
+  kernelAdapter: KernelTslAdapter,
+): void {
+  const backend = renderer.backend as {
+    readonly compatibilityMode?: boolean;
+    readonly isWebGLBackend?: boolean;
+    readonly isWebGPUBackend?: boolean;
+  };
+  const rendererUsesWebgl = backend?.isWebGLBackend === true || backend?.compatibilityMode === true;
+  const rendererUsesWebgpu = backend?.isWebGPUBackend === true && !rendererUsesWebgl;
+  const adapterUsesWebgl = kernelAdapter.capabilities.backend === 'webgl2';
+  if ((rendererUsesWebgl && !adapterUsesWebgl) || (rendererUsesWebgpu && adapterUsesWebgl)) {
+    const rendererBackend = rendererUsesWebgl ? 'webgl2' : 'webgpu';
+    throw new Error(
+      `NACHI_THREE_BACKEND_MISMATCH: Three renderer uses ${rendererBackend}, but the kernel adapter uses ${kernelAdapter.capabilities.backend}. Create both for the same backend.`,
+    );
+  }
+}
+
 export function createThreeRuntimeRenderer(
   renderer: THREE.WebGPURenderer,
   kernelAdapter: KernelTslAdapter,
   deviceLost?: Promise<VfxDeviceLossInfo>,
   setInstanceCount?: VfxRuntimeRenderer['setInstanceCount'],
 ): VfxRuntimeRenderer {
+  assertRendererBackend(renderer, kernelAdapter);
   const initializedIndirectAttributes = new WeakSet<THREE.IndirectStorageBufferAttribute>();
   const replayReadyKernels = new WeakSet<BuiltEmitterKernels>();
   const pendingStorageWrites = new Set<THREE.StorageBufferAttribute>();
@@ -729,13 +873,39 @@ export function createThreeRuntimeRenderer(
     }
   };
   const prepareKernelsForPooling = (kernels: BuiltEmitterKernels): void => {
-    if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) return;
-    const indirect = kernels.drawIndirect.indirectResource as THREE.IndirectStorageBufferAttribute;
-    const instanceCountOffset = kernels.drawIndirectOffsetBytes / Uint32Array.BYTES_PER_ELEMENT + 1;
-    const words = indirect.array as Uint32Array;
-    words[instanceCountOffset] = 0;
-    indirect.addUpdateRange(instanceCountOffset, 1);
-    indirect.needsUpdate = true;
+    disposeKernelDraws(kernels, renderer);
+    if (kernels.drawIndirect && kernels.drawIndirectOffsetBytes !== undefined) {
+      const indirect = kernels.drawIndirect
+        .indirectResource as THREE.IndirectStorageBufferAttribute;
+      const instanceCountOffset =
+        kernels.drawIndirectOffsetBytes / Uint32Array.BYTES_PER_ELEMENT + 1;
+      const words = indirect.array as Uint32Array;
+      words[instanceCountOffset] = 0;
+      indirect.addUpdateRange(instanceCountOffset, 1);
+      indirect.needsUpdate = true;
+    }
+  };
+  const releaseStorage: NonNullable<VfxRuntimeRenderer['releaseStorage']> = (storageNode) => {
+    const attribute = storageNode.value as THREE.StorageBufferAttribute;
+    rendererAttributeManager(renderer)?.delete(attribute);
+    pendingStorageWrites.delete(attribute);
+    if (attribute instanceof THREE.IndirectStorageBufferAttribute) {
+      indirectAttributesByAdapter.get(kernelAdapter)?.delete(attribute);
+    }
+  };
+  const releaseKernels: NonNullable<VfxRuntimeRenderer['releaseKernels']> = (kernels) => {
+    disposeKernelDraws(kernels, renderer);
+    for (const storage of emitterStorageNodes(kernels)) releaseStorage(storage);
+    for (const lut of Object.values(kernels.luts)) {
+      (lut as { dispose?: () => void }).dispose?.();
+    }
+    replayReadyKernels.delete(kernels);
+    const state = kernels as BuiltEmitterKernels & {
+      [THREE_RENDER_ORDER]?: number;
+      [THREE_VISIBILITY]?: boolean;
+    };
+    delete state[THREE_RENDER_ORDER];
+    delete state[THREE_VISIBILITY];
   };
   const writeStorage: NonNullable<VfxRuntimeRenderer['writeStorage']> = (
     storageNode,
@@ -817,24 +987,28 @@ export function createThreeRuntimeRenderer(
   const base = {
     clearStorageReplayReady: (kernels: BuiltEmitterKernels) => replayReadyKernels.delete(kernels),
     getRenderableIndirectDrawCount: (kernels: BuiltEmitterKernels) =>
-      drawObjectsByKernels.get(kernels)?.size ?? 0,
+      drawRegistry(kernels)?.size ?? 0,
     isStorageReplayReady: (kernels: BuiltEmitterKernels) => replayReadyKernels.has(kernels),
     kernelAdapter,
     flushStorageWrites,
     markStorageReplayReady: (kernels: BuiltEmitterKernels) => replayReadyKernels.add(kernels),
     prepareKernelsForPooling,
+    releaseKernels,
+    releaseStorage,
     readStorage: (storageNode: KernelStorageNode) => {
       prepareStorageReadback(storageNode);
       return renderer.getArrayBufferAsync(storageNode.value as never);
     },
     setUniformValue: setThreeUniformValue,
     setRenderOrder: (kernels: BuiltEmitterKernels, order: number) => {
-      renderOrderByKernels.set(kernels, order);
-      for (const object of drawObjectsByKernels.get(kernels) ?? []) object.renderOrder = order;
+      (kernels as BuiltEmitterKernels & { [THREE_RENDER_ORDER]?: number })[THREE_RENDER_ORDER] =
+        order;
+      for (const { object } of drawRegistry(kernels) ?? []) object.renderOrder = order;
     },
     setVisibility: (kernels: BuiltEmitterKernels, visible: boolean) => {
-      visibilityByKernels.set(kernels, visible);
-      for (const object of drawObjectsByKernels.get(kernels) ?? []) object.visible = visible;
+      (kernels as BuiltEmitterKernels & { [THREE_VISIBILITY]?: boolean })[THREE_VISIBILITY] =
+        visible;
+      for (const { object } of drawRegistry(kernels) ?? []) object.visible = visible;
     },
     ...(setInstanceCount === undefined ? {} : { setInstanceCount }),
     submitCompute: (kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0]) => {
@@ -1354,7 +1528,7 @@ export interface ThreeLightSelectionStats {
 }
 
 export interface ThreeLightPoolDraw {
-  dispose(): void;
+  dispose(renderer?: THREE.WebGPURenderer): void;
   readonly group: THREE.Group;
   readonly lights: readonly THREE.PointLight[];
   readonly selectionBuffers: readonly KernelStorageNode[];
@@ -1472,7 +1646,6 @@ export function materializeThreeLightDraw(
   );
   const group = new THREE.Group();
   group.name = 'NachiPointLightPool';
-  registerDrawObject(kernels, group);
   const lights = Array.from({ length: draw.maxLights }, (_, index) => {
     const light = new THREE.PointLight(0xffffff, 0, 0, 2);
     light.name = `NachiPointLight${index}`;
@@ -1486,6 +1659,19 @@ export function materializeThreeLightDraw(
   let pending: Promise<ArrayBuffer> | undefined;
   let warned = false;
   let disposed = false;
+  let lastRenderer: THREE.WebGPURenderer | undefined;
+  const disposeLightResources = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const light of lights) light.intensity = 0;
+    group.removeFromParent();
+  };
+  registerDrawObject(
+    kernels,
+    group,
+    selectionBuffers.map(({ value }) => value as THREE.StorageBufferAttribute),
+    disposeLightResources,
+  );
   let stats: ThreeLightSelectionStats = { candidateCount: 0, selected: [], selectedCount: 0 };
   const apply = (buffer: ArrayBuffer): ThreeLightSelectionStats => {
     const values = new Float32Array(buffer);
@@ -1531,11 +1717,9 @@ export function materializeThreeLightDraw(
     return stats;
   };
   const result: ThreeLightPoolDraw = {
-    dispose() {
+    dispose(renderer = lastRenderer) {
       if (disposed) return;
-      disposed = true;
-      for (const light of lights) light.intensity = 0;
-      group.removeFromParent();
+      disposeThreeDraw(kernels, group, renderer);
     },
     group,
     lights,
@@ -1545,8 +1729,9 @@ export function materializeThreeLightDraw(
       return stats;
     },
     async update(renderer, effectState = 'active') {
+      lastRenderer = renderer;
       if (effectState !== 'active') {
-        result.dispose();
+        result.dispose(renderer);
         return stats;
       }
       if (disposed) return stats;
@@ -1562,6 +1747,8 @@ export function materializeThreeLightDraw(
 }
 
 export interface ThreeDecalMaterializationOptions {
+  /** Scene order for the decal volume. Defaults to 10. */
+  readonly renderOrder?: number;
   readonly resolveTexture?: ThreeTextureResolver;
   /** M6 linear, non-sRGB, previous-frame normalized depth copy. */
   readonly sceneDepthTexture: THREE.Texture;
@@ -1669,6 +1856,7 @@ export function materializeThreeDecalDraw(
     mesh.setMatrixAt(index, identity);
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
-  mesh.renderOrder = 10;
+  mesh.renderOrder = options.renderOrder ?? 10;
+  registerDrawObject(kernels, mesh);
   return mesh;
 }

@@ -140,6 +140,10 @@ declarative model; inline custom grid/neighbor TSL remains code-only.
 Simulation caches use `bakeSimulation()` and `replaySimulation()`. Runtime debugging uses
 `instance.debug.captureAttributes()` and `system.debug.captureProfile()`.
 
+Three draw objects are lifetime-bound to their emitter kernels. Reuse an existing materialized mesh
+or dispose/unmaterialize it before replacement; releasing an instance cleans registered draws before
+its kernels enter the pool, and a respawn must attach the newly materialized draw.
+
 ## Development and release checks
 
 ```sh

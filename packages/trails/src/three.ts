@@ -35,6 +35,57 @@ import {
 
 import type { CompiledRibbonDrawDescription } from './index.js';
 
+const THREE_DRAW_REGISTRY = Symbol.for('@nachi/three/materialized-draw-registry');
+const THREE_RENDER_ORDER = Symbol.for('@nachi/three/render-order');
+const THREE_VISIBILITY = Symbol.for('@nachi/three/visibility');
+
+type ThreeDrawRegistration = {
+  readonly attributes: readonly THREE.BufferAttribute[];
+  readonly dispose: () => void;
+  readonly object: THREE.Object3D;
+};
+
+function registerRibbonDraw(
+  kernels: BuiltEmitterKernels,
+  object: THREE.Object3D,
+  attributes: readonly THREE.BufferAttribute[],
+  dispose: () => void,
+): void {
+  const owner = kernels as BuiltEmitterKernels & {
+    [THREE_DRAW_REGISTRY]?: Set<ThreeDrawRegistration>;
+    [THREE_RENDER_ORDER]?: number;
+    [THREE_VISIBILITY]?: boolean;
+  };
+  owner[THREE_DRAW_REGISTRY] ??= new Set();
+  owner[THREE_DRAW_REGISTRY].add({ attributes, dispose, object });
+  object.renderOrder = owner[THREE_RENDER_ORDER] ?? object.renderOrder;
+  object.visible = owner[THREE_VISIBILITY] ?? true;
+}
+
+function disposeRibbonDraw(
+  kernels: BuiltEmitterKernels,
+  object: THREE.Object3D,
+  renderer?: THREE.WebGPURenderer,
+): void {
+  const owner = kernels as BuiltEmitterKernels & {
+    [THREE_DRAW_REGISTRY]?: Set<ThreeDrawRegistration>;
+  };
+  const registry = owner[THREE_DRAW_REGISTRY];
+  if (!registry) return;
+  const attributes = (
+    renderer as unknown as {
+      readonly _attributes?: { delete(attribute: THREE.BufferAttribute): unknown };
+    }
+  )?._attributes;
+  for (const registration of registry) {
+    if (registration.object !== object) continue;
+    registration.dispose();
+    for (const attribute of registration.attributes) attributes?.delete(attribute);
+    registry.delete(registration);
+  }
+  if (registry.size === 0) delete owner[THREE_DRAW_REGISTRY];
+}
+
 type NodeLike = {
   readonly a: NodeLike;
   readonly w: NodeLike;
@@ -122,10 +173,12 @@ function blendState(blending: CompiledRibbonDrawDescription['fragment']['blendin
 }
 
 export interface ThreeRibbonMaterializationOptions {
+  readonly renderOrder?: number;
   readonly resolveTexture?: (reference: TextureRef) => THREE.Texture | undefined;
 }
 
 export interface ThreeRibbonDraw {
+  dispose(renderer?: THREE.WebGPURenderer): void;
   readonly indirect: THREE.IndirectStorageBufferAttribute;
   readonly mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial>;
   readonly prepareKernel: unknown;
@@ -343,11 +396,37 @@ export function materializeThreeRibbonDraw(
   material.opacityNode = fragmentColor.a.mul(node(kernels.uniforms['System.visibility']!)) as never;
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
+  mesh.renderOrder = options.renderOrder ?? mesh.renderOrder;
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    mesh.removeFromParent();
+    geometry.dispose();
+    material.dispose();
+  };
+  registerRibbonDraw(
+    kernels,
+    mesh,
+    [
+      segmentIndices.value as THREE.StorageBufferAttribute,
+      segmentValues.value as THREE.StorageBufferAttribute,
+      segmentWidths.value as THREE.StorageBufferAttribute,
+      indirect,
+    ],
+    dispose,
+  );
 
   return {
+    dispose: (renderer) => disposeRibbonDraw(kernels, mesh, renderer),
     indirect,
     mesh,
-    prepare: async (renderer) => renderer.computeAsync(prepareKernel as never),
+    prepare: async (renderer) => {
+      // Pooling disposes the draw and its four preparation buffers. Hosts may still hold the draw
+      // wrapper until their next render tick; never submit its stale compute graph in that window.
+      if (disposed) return;
+      await renderer.computeAsync(prepareKernel as never);
+    },
     prepareKernel,
     segmentIndices,
     segmentValues,

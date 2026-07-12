@@ -100,7 +100,10 @@ export interface VfxRuntimeRenderer {
   /** Synchronously makes retained kernels non-drawable before ownership moves into the pool. */
   prepareKernelsForPooling?(kernels: BuiltEmitterKernels): void;
   readStorage?(storage: BuiltEmitterKernels['aliveCount']): Promise<ArrayBuffer>;
+  /** Called only after every submission in the current update cycle has settled. */
   releaseKernels?(kernels: BuiltEmitterKernels): void;
+  /** Releases an unowned storage allocation after current-update submissions have settled. */
+  releaseStorage?(storage: KernelStorageNode): void;
   setUniformValue?(uniform: KernelUniformNode, path: ParameterPath, value: unknown): void;
   setInstanceCount?(kernels: BuiltEmitterKernels, count: number): void;
   /** Hides materialized draw objects when a fully culled instance skips rendering. */
@@ -1567,9 +1570,9 @@ type ReleasableEffectInstance = {
   readonly id: string;
   readonly poolKey: string;
   detachEmitterKernels(): ReadonlyMap<string, BuiltEmitterKernels>;
+  emitterKernels(): Iterable<BuiltEmitterKernels>;
   recordDiagnostic(diagnostic: VfxDiagnostic): void;
   recordReleaseDiagnostic(diagnostic: VfxDiagnostic): void;
-  releaseEmitterKernels(): void;
   takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels>;
   releaseGrid2D(): void;
 };
@@ -1672,7 +1675,11 @@ export class VfxEffectInstance<
     this.#grids.set(key, grid);
     const schedule = this.#scheduleCapture;
     this.#gridViews.set(key, {
-      capture: () => schedule(() => grid.capture()),
+      capture: () =>
+        schedule(() => {
+          this.#assertNotReleased();
+          return grid.capture();
+        }),
       get definition() {
         return grid.definition;
       },
@@ -1680,8 +1687,15 @@ export class VfxEffectInstance<
         return grid.initialized;
       },
       rasterizeParticles: (points, channel, value) =>
-        schedule(() => grid.rasterizeParticles(points, channel, value)),
-      sampleParticles: (points, channel) => schedule(() => grid.sampleParticles(points, channel)),
+        schedule(() => {
+          this.#assertNotReleased();
+          return grid.rasterizeParticles(points, channel, value);
+        }),
+      sampleParticles: (points, channel) =>
+        schedule(() => {
+          this.#assertNotReleased();
+          return grid.sampleParticles(points, channel);
+        }),
       get submissionCount() {
         return grid.submissionCount;
       },
@@ -1692,7 +1706,11 @@ export class VfxEffectInstance<
     this.#grids3D.set(key, grid);
     const schedule = this.#scheduleCapture;
     this.#grid3DViews.set(key, {
-      capture: () => schedule(() => grid.capture()),
+      capture: () =>
+        schedule(() => {
+          this.#assertNotReleased();
+          return grid.capture();
+        }),
       get definition() {
         return grid.definition;
       },
@@ -1703,8 +1721,15 @@ export class VfxEffectInstance<
         return grid.memoryEstimate;
       },
       rasterizeParticles: (points, channel, value) =>
-        schedule(() => grid.rasterizeParticles(points, channel, value)),
-      sampleParticles: (points, channel) => schedule(() => grid.sampleParticles(points, channel)),
+        schedule(() => {
+          this.#assertNotReleased();
+          return grid.rasterizeParticles(points, channel, value);
+        }),
+      sampleParticles: (points, channel) =>
+        schedule(() => {
+          this.#assertNotReleased();
+          return grid.sampleParticles(points, channel);
+        }),
       get submissionCount() {
         return grid.submissionCount;
       },
@@ -1715,7 +1740,11 @@ export class VfxEffectInstance<
     this.#neighborGrids.set(key, grid);
     const schedule = this.#scheduleCapture;
     this.#neighborGridViews.set(key, {
-      capture: () => schedule(() => grid.capture()),
+      capture: () =>
+        schedule(() => {
+          this.#assertNotReleased();
+          return grid.capture();
+        }),
       get definition() {
         return grid.definition;
       },
@@ -1876,7 +1905,11 @@ export class VfxEffectInstance<
 
   syncAttachment(): void {
     const transform = this.#attachment?.getWorldTransform();
-    if (transform) this.setTransform(transform.position, transform.rotation);
+    // A transform source is user code and may release its own instance. In that case the returned
+    // transform no longer has an owner to update, so quietly discard it.
+    if (transform && this.#state !== 'released') {
+      this.setTransform(transform.position, transform.rotation);
+    }
   }
 
   on(event: string, callback: EffectEventCallback): () => void {
@@ -1892,15 +1925,29 @@ export class VfxEffectInstance<
 
   emitEventSummary(summary: EffectEventSummary): void {
     if (this.#state === 'released') return;
-    for (const callback of this.#eventListeners.get(summary.event) ?? []) callback(summary);
+    for (const callback of this.#eventListeners.get(summary.event) ?? []) {
+      try {
+        callback(summary);
+      } catch (error) {
+        this.recordDiagnostic({
+          code: 'NACHI_EVENT_LISTENER_FAILED',
+          message: `Event listener for "${summary.event}" failed: ${error instanceof Error ? error.message : String(error)}`,
+          path: `events.${summary.event}`,
+          phase: 'runtime',
+          severity: 'warning',
+        });
+      }
+    }
   }
 
   release(): void {
     if (this.#state === 'released') return;
     const poolable = this.#state !== 'error';
+    // Commit the terminal transition before invoking renderer-owned cleanup. Cleanup may throw,
+    // but a failed release must never make the instance releasable a second time.
+    this.#state = 'released';
     this.#eventListeners.clear();
     this.#onRelease(this, poolable);
-    this.#state = 'released';
   }
 
   /** @internal Transfers materialized resources to VFXSystem's pool without exposing them publicly. */
@@ -1914,17 +1961,15 @@ export class VfxEffectInstance<
     return kernels;
   }
 
+  /** @internal Exposes kernel identities so VFXSystem can maintain exclusive ownership. */
+  emitterKernels(): Iterable<BuiltEmitterKernels> {
+    return [...this.#emitters.values()].map(({ kernels }) => kernels);
+  }
+
   /** @internal Retires renderer-visible draw state before transferring kernels into the pool. */
   takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels> {
     for (const emitter of this.#emitters.values()) emitter.prepareForPooling();
     return this.detachEmitterKernels();
-  }
-
-  /** @internal Releases materialized resources when this instance cannot enter the pool. */
-  releaseEmitterKernels(): void {
-    for (const emitter of this.#emitters.values()) emitter.release();
-    this.#emitters.clear();
-    this.releaseGrid2D();
   }
 
   releaseGrid2D(): void {
@@ -2029,6 +2074,11 @@ export class VfxEffectInstance<
 
   async advance(worldDelta: number, systemTime: number, prewarmStepSeconds: number): Promise<void> {
     if (this.#state !== 'active') return;
+    // Map iteration may observe instances spawned by callbacks during this same update, and
+    // scalability can admit a previously culled instance between initialization and stepping.
+    // Both paths must establish a fresh event/lifecycle epoch before advancing time.
+    if (!this.#initialized) await this.initialize(systemTime, prewarmStepSeconds);
+    if (this.#state !== 'active') return;
     const localDelta = this.clock.advance(worldDelta);
     const context = {
       prewarmStepSeconds,
@@ -2122,6 +2172,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #grid3DStageRegistry: Grid3DStageRegistry | undefined;
   readonly #significanceBudget: Required<VfxSignificanceBudget>;
   readonly #budgetAdmittedInstances = new Set<string>();
+  readonly #activeKernels = new WeakSet<BuiltEmitterKernels>();
+  readonly #deferredReleases: Array<() => void> = [];
+  readonly #deferredKernelReleases = new Map<BuiltEmitterKernels, VfxRuntimeRenderer>();
   #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
   #cameraConfigured = false;
   #compilationCount = 0;
@@ -2324,6 +2377,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
     let pooled: PooledEffectResources | undefined;
     let runtimeRenderer: VfxRuntimeRenderer | undefined;
+    const allocatedEventStorages = new Set<KernelStorageNode>();
     try {
       const parameterDiagnostics = validateSpawnParameterOverrides(
         parameterDefinitions,
@@ -2376,19 +2430,20 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       const eventResources = new Map<string, Readonly<Record<string, EventQueueResources>>>();
       if (!pooled) {
         for (const entry of compiled.emitters) {
-          eventResources.set(
-            entry.key,
-            Object.fromEntries(
-              entry.program.events.map((queue) => [
-                queue.eventName,
-                allocateEventQueueResources(
-                  materializationRenderer.kernelAdapter,
-                  queue,
-                  entry.key,
-                ),
-              ]),
-            ),
+          const resources = Object.fromEntries(
+            entry.program.events.map((queue) => {
+              const allocated = allocateEventQueueResources(
+                materializationRenderer.kernelAdapter,
+                queue,
+                entry.key,
+              );
+              allocatedEventStorages.add(allocated.indirect);
+              allocatedEventStorages.add(allocated.payload);
+              allocatedEventStorages.add(allocated.state);
+              return [queue.eventName, allocated];
+            }),
           );
+          eventResources.set(entry.key, resources);
         }
       }
       for (const [index, entry] of compiled.emitters.entries()) {
@@ -2427,6 +2482,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           instance.addNeighborGrid(gridKey, grid);
         }
       }
+      // Every successful build transferred these standalone allocations into emitter kernels.
+      allocatedEventStorages.clear();
+      for (const kernels of instance.emitterKernels()) this.#activateKernels(kernels);
     } catch (error) {
       const kernelsToRelease = new Set<BuiltEmitterKernels>();
       for (const kernels of pooled?.kernelsByEmitter.values() ?? []) {
@@ -2436,7 +2494,35 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         kernelsToRelease.add(kernels);
       }
       instance.releaseGrid2D();
-      for (const kernels of kernelsToRelease) runtimeRenderer?.releaseKernels?.(kernels);
+      const rendererToRelease = runtimeRenderer;
+      if (rendererToRelease) {
+        for (const kernels of kernelsToRelease) {
+          this.#deactivateKernels(kernels);
+          this.#releaseKernelsAfterCurrentUpdate(kernels, rendererToRelease);
+        }
+      }
+      this.#afterCurrentUpdate(() => {
+        // Event queues are allocated before emitter construction so cross-emitter links can share
+        // them. If construction aborts, release any queue that never acquired a kernel owner.
+        if (rendererToRelease?.releaseStorage) {
+          const ownedEventStorages = new Set<KernelStorageNode>();
+          for (const kernels of kernelsToRelease) {
+            for (const output of Object.values(kernels.eventOutputs)) {
+              ownedEventStorages.add(output.indirect);
+              ownedEventStorages.add(output.payload);
+              ownedEventStorages.add(output.state);
+            }
+            for (const input of kernels.eventInputs) {
+              ownedEventStorages.add(input.binding.resources.indirect);
+              ownedEventStorages.add(input.binding.resources.payload);
+              ownedEventStorages.add(input.binding.resources.state);
+            }
+          }
+          for (const storage of allocatedEventStorages) {
+            if (!ownedEventStorages.has(storage)) rendererToRelease.releaseStorage(storage);
+          }
+        }
+      });
       const diagnostics =
         error instanceof VfxDiagnosticError
           ? error.diagnostics
@@ -2471,7 +2557,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
               ),
             );
           }
-          instance.syncAttachment();
+          this.#syncAttachment(instance);
         }
         this.#updateScalability();
         this.#updateTransparencyOrder();
@@ -2484,7 +2570,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
         for (const step of steps) {
           this.#systemTime += step;
-          for (const instance of this.#instances.values()) instance.syncAttachment();
+          for (const instance of this.#instances.values()) this.#syncAttachment(instance);
           this.#updateScalability();
           this.#updateTransparencyOrder();
           for (const instance of this.#instances.values()) {
@@ -2495,7 +2581,12 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           }
         }
       } finally {
-        this.#updateInFlight = false;
+        try {
+          this.#flushDeferredReleases();
+          this.#flushDeferredKernelReleases();
+        } finally {
+          this.#updateInFlight = false;
+        }
       }
     };
     const scheduled = this.#updateQueue.then(run, run);
@@ -2847,7 +2938,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     poolKey: string,
   ): PooledEffectResources | undefined {
     const pool = this.#effectPools.get(definition)?.get(poolKey);
-    return pool?.resources.pop();
+    const resources = pool?.resources.pop();
+    if (resources) {
+      for (const kernels of resources.kernelsByEmitter.values()) this.#activateKernels(kernels);
+    }
+    return resources;
   }
 
   #qualityPoolKey(definition: RuntimeEffectDefinition, tier: QualityTier): string {
@@ -2859,14 +2954,53 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   #releaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
     this.#instances.delete(instance.id);
+    for (const kernels of instance.emitterKernels()) this.#deactivateKernels(kernels);
+    this.#afterCurrentUpdate(() => this.#retainOrReleaseInstance(instance, poolable));
+  }
+
+  #afterCurrentUpdate(release: () => void): void {
     if (this.#updateInFlight) {
-      void this.#updateQueue.then(
-        () => this.#retainOrReleaseInstance(instance, poolable),
-        () => this.#retainOrReleaseInstance(instance, poolable),
-      );
+      // Renderer release hooks may synchronously destroy GPU buffers. Keep them inside the update
+      // promise's completion boundary, after all compute/event/sort submissions from this cycle.
+      this.#deferredReleases.push(release);
+    } else {
+      release();
+    }
+  }
+
+  #flushDeferredReleases(): void {
+    for (const release of this.#deferredReleases.splice(0)) release();
+  }
+
+  #activateKernels(kernels: BuiltEmitterKernels): void {
+    // A pool checkout supersedes any stale retirement decision for this exact resource bundle.
+    this.#deferredKernelReleases.delete(kernels);
+    this.#activeKernels.add(kernels);
+  }
+
+  #deactivateKernels(kernels: BuiltEmitterKernels): void {
+    this.#activeKernels.delete(kernels);
+  }
+
+  #releaseKernelsAfterCurrentUpdate(
+    kernels: BuiltEmitterKernels,
+    renderer: VfxRuntimeRenderer,
+  ): void {
+    this.#deactivateKernels(kernels);
+    if (this.#updateInFlight) {
+      this.#deferredKernelReleases.set(kernels, renderer);
       return;
     }
-    this.#retainOrReleaseInstance(instance, poolable);
+    if (!this.#activeKernels.has(kernels)) renderer.releaseKernels?.(kernels);
+  }
+
+  #flushDeferredKernelReleases(): void {
+    for (const [kernels, renderer] of this.#deferredKernelReleases) {
+      this.#deferredKernelReleases.delete(kernels);
+      // Kernels may have returned through the pool after retirement was queued. Active ownership
+      // always wins; a later release will enqueue a fresh retirement if the bundle overflows.
+      if (!this.#activeKernels.has(kernels)) renderer.releaseKernels?.(kernels);
+    }
   }
 
   #retainOrReleaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
@@ -2884,7 +3018,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           severity: 'warning',
         });
       }
-      instance.releaseEmitterKernels();
+      const renderer = asRuntimeRenderer(this.renderer);
+      for (const kernels of instance.detachEmitterKernels().values()) {
+        if (renderer) this.#releaseKernelsAfterCurrentUpdate(kernels, renderer);
+      }
       return;
     }
     const kernelsByEmitter = instance.takeEmitterKernelsForPooling();
@@ -2917,6 +3054,21 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         runtimeDiagnostic(
           'NACHI_GPU_SUBMISSION_FAILED',
           error instanceof Error ? error.message : String(error),
+        ),
+      );
+    }
+  }
+
+  #syncAttachment(instance: VfxEffectInstance): void {
+    if (instance.state !== 'active') return;
+    try {
+      instance.syncAttachment();
+    } catch (error) {
+      instance.markError(
+        runtimeDiagnostic(
+          'NACHI_ATTACHMENT_SOURCE_FAILED',
+          error instanceof Error ? error.message : String(error),
+          'EffectTransformSource.getWorldTransform',
         ),
       );
     }

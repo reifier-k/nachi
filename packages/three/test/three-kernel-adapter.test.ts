@@ -49,6 +49,7 @@ import {
   createThreeVectorFieldResolver,
   createThreeVectorFieldResource,
   directionEulerAngles,
+  disposeThreeDraw,
   materializeThreeMeshDraw,
   materializeThreeLightDraw,
   materializeThreeDecalDraw,
@@ -166,9 +167,20 @@ describe('three kernel adapter', () => {
     const lightScene = new THREE.Scene();
     lightScene.add(lightDraw.group);
     const completeState: EffectInstanceState = 'complete';
-    await lightDraw.update({} as THREE.WebGPURenderer, completeState);
+    const releasedSelections: THREE.BufferAttribute[] = [];
+    await lightDraw.update(
+      {
+        _attributes: {
+          delete(attribute: THREE.BufferAttribute) {
+            releasedSelections.push(attribute);
+          },
+        },
+      } as unknown as THREE.WebGPURenderer,
+      completeState,
+    );
     expect(lightDraw.group.parent).toBeNull();
     expect(lightDraw.lights.every(({ intensity }) => intensity === 0)).toBe(true);
+    expect(releasedSelections).toHaveLength(2);
 
     const depth = new THREE.DataTexture(
       new Float32Array([1]),
@@ -187,16 +199,29 @@ describe('three kernel adapter', () => {
         spawn: burst({ count: 1 }),
       }),
     );
-    const decalKernels = decalProgram.buildKernels(
-      createThreeKernelAdapter({ sceneDepthTexture: depth }),
+    const decalAdapter = createThreeKernelAdapter({ sceneDepthTexture: depth });
+    const decalKernels = decalProgram.buildKernels(decalAdapter);
+    const decalRuntime = createThreeRuntimeRenderer(
+      {
+        async computeAsync() {},
+        async getArrayBufferAsync() {
+          return new ArrayBuffer(0);
+        },
+      } as unknown as THREE.WebGPURenderer,
+      decalAdapter,
     );
+    decalRuntime.setVisibility?.(decalKernels, false);
     const decal = materializeThreeDecalDraw(decalProgram, decalKernels, 0, {
+      renderOrder: 23,
       sceneDepthTexture: depth,
     });
     const decalIndirect = decalKernels.drawIndirect!
       .indirectResource as THREE.IndirectStorageBufferAttribute;
     expect(decal.geometry).toBeInstanceOf(THREE.BoxGeometry);
     expect(decal.geometry.getIndirect()).toBeDefined();
+    expect(decal.renderOrder).toBe(23);
+    expect(decal.visible).toBe(false);
+    expect(decalRuntime.getRenderableIndirectDrawCount?.(decalKernels)).toBe(1);
     expect(decalIndirect.updateRanges).toEqual([
       { count: 1, start: decalKernels.drawIndirectOffsetBytes! / 4 },
     ]);
@@ -210,7 +235,7 @@ describe('three kernel adapter', () => {
     ).toThrowError('NACHI_DECAL_WEBGL2_UNSUPPORTED');
   });
 
-  it('materializes an external @nachi/trails GPU birth-ring draw', () => {
+  it('materializes an external @nachi/trails GPU birth-ring draw', async () => {
     const registry = registerTrails(createCoreKernelModuleRegistry());
     const program = compileEmitter(
       defineEmitter({
@@ -223,13 +248,39 @@ describe('three kernel adapter', () => {
       }),
       { registry },
     );
-    const kernels = program.buildKernels(createThreeKernelAdapter());
-    const draw = materializeThreeRibbonDraw(program, kernels);
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const released: THREE.BufferAttribute[] = [];
+    let prepareCount = 0;
+    const renderer = {
+      _attributes: {
+        delete(attribute: THREE.BufferAttribute) {
+          released.push(attribute);
+        },
+      },
+      async computeAsync() {
+        prepareCount += 1;
+      },
+      async getArrayBufferAsync() {
+        return new ArrayBuffer(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    runtime.setVisibility?.(kernels, false);
+    const draw = materializeThreeRibbonDraw(program, kernels, 0, { renderOrder: 17 });
 
     expect(program.draws[0]).toMatchObject({ kind: 'ribbon', requiresBackend: 'webgpu' });
     expect(draw.prepareKernel).toBeDefined();
     expect(draw.mesh.geometry.getIndirect()).toBe(draw.indirect);
     expect(draw.mesh.material.opacityNode).not.toBeNull();
+    expect(draw.mesh.renderOrder).toBe(17);
+    expect(draw.mesh.visible).toBe(false);
+    expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(1);
+    runtime.prepareKernelsForPooling?.(kernels);
+    expect(released).toHaveLength(4);
+    expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(0);
+    await draw.prepare(renderer);
+    expect(prepareCount).toBe(0);
     expect(() =>
       materializeThreeRibbonDraw(program, {
         ...kernels,
@@ -712,6 +763,86 @@ describe('three kernel adapter', () => {
 
     expect((indirect.array as Uint32Array)[instanceCountOffset]).toBe(0);
     expect(indirect.updateRanges).toContainEqual({ count: 1, start: instanceCountOffset });
+  });
+
+  it('keeps one registered draw across repeated disposal and rematerialization', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 4 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const renderer = {
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return new ArrayBuffer(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    let mesh = materializeThreeSpriteDraw(program, kernels);
+    for (let index = 0; index < 50; index += 1) {
+      disposeThreeDraw(kernels, mesh, renderer);
+      mesh = materializeThreeSpriteDraw(program, kernels);
+    }
+
+    expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(1);
+    runtime.prepareKernelsForPooling?.(kernels);
+    expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(0);
+    expect(mesh.parent).toBeNull();
+  });
+
+  it('releases kernel attributes and rejects renderer-adapter backend mismatches', async () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 2,
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const updated = new Set<THREE.BufferAttribute>();
+    const deleted = new Set<THREE.BufferAttribute>();
+    const renderer = {
+      backend: { isWebGPUBackend: true },
+      _attributes: {
+        delete(attribute: THREE.BufferAttribute) {
+          deleted.add(attribute);
+        },
+        update(attribute: THREE.BufferAttribute) {
+          updated.add(attribute);
+        },
+      },
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return new ArrayBuffer(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const runtime = createThreeRuntimeRenderer(renderer, adapter);
+    for (let index = 0; index < 20; index += 1) {
+      const kernels = program.buildKernels(adapter);
+      runtime.releaseKernels?.(kernels);
+    }
+    const activeKernels = program.buildKernels(adapter);
+    await runtime.submitCompute(activeKernels.initialize);
+    expect(updated.size).toBeGreaterThan(0);
+    expect([...updated].some((attribute) => deleted.has(attribute))).toBe(false);
+    runtime.releaseKernels?.(activeKernels);
+    expect([...updated].every((attribute) => deleted.has(attribute))).toBe(true);
+
+    expect(() =>
+      createThreeRuntimeRenderer(renderer, createThreeKernelAdapter({ backend: 'webgl2' })),
+    ).toThrowError('NACHI_THREE_BACKEND_MISMATCH');
+    expect(() =>
+      createThreeRuntimeRenderer(
+        {
+          backend: { isWebGLBackend: true },
+        } as unknown as THREE.WebGPURenderer,
+        createThreeKernelAdapter(),
+      ),
+    ).toThrowError('NACHI_THREE_BACKEND_MISMATCH');
   });
 
   it('uploads replay data into particle and partial indirect storage ranges', () => {

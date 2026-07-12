@@ -8,3 +8,8 @@ Three.js is an exact `three@0.185.1` peer for the `@nachi/trails/three` material
 
 The renderer requires WebGPU storage buffers and indirect draw; WebGL2 reports
 `NACHI_RIBBON_WEBGL2_UNSUPPORTED` instead of silently selecting a different trail algorithm.
+
+`materializeThreeRibbonDraw()` returns a draw with `dispose(renderer?)`. Reuse that mesh while its
+emitter is alive, or call `dispose()` before replacing it. Ribbon draws participate in the official
+Three runtime's visibility, render-order, profiling, pooling, and kernel-release lifecycle; a draw
+must not be rendered after its effect instance is released.

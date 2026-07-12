@@ -586,9 +586,74 @@ describe('M12 data-interface capture FIFO', () => {
     instance.release();
     expect(grid.initialized).toBe(false);
   });
+
+  it('rejects queued Grid and NeighborGrid operations after their instance is released', async () => {
+    const gridRenderer = new DeferredSubmissionRenderer();
+    const gridSystem = new VFXSystem(gridRenderer);
+    const gridInstance = gridSystem.spawn(
+      defineEffect({
+        elements: {
+          grid: defineGrid2D({
+            channels: { density: { type: 'f32' } },
+            resolution: [2, 2],
+          }),
+          grid3d: defineGrid3D({
+            channels: { density: { type: 'f32' } },
+            resolution: [2, 2, 2],
+          }),
+        },
+      }),
+    );
+    const grid = gridInstance.getGrid2D('grid')!;
+    const grid3d = gridInstance.getGrid3D('grid3d')!;
+    const queuedGridOperations = [
+      grid.capture(),
+      grid.rasterizeParticles([[0.5, 0.5]], 'density'),
+      grid.sampleParticles([[0.5, 0.5]], 'density'),
+      grid3d.capture(),
+      grid3d.rasterizeParticles([[0.5, 0.5, 0.5]], 'density'),
+      grid3d.sampleParticles([[0.5, 0.5, 0.5]], 'density'),
+    ];
+    gridInstance.release();
+    for (const operation of queuedGridOperations) {
+      await expect(operation).rejects.toThrowError(
+        expect.objectContaining({
+          diagnostics: [expect.objectContaining({ code: 'NACHI_INSTANCE_RELEASED' })],
+        }),
+      );
+    }
+    expect(gridRenderer.readCount).toBe(0);
+    expect(gridRenderer.writeCount).toBe(0);
+
+    const neighborRenderer = new DeferredSubmissionRenderer();
+    const neighborSystem = new VFXSystem(neighborRenderer);
+    const neighborInstance = neighborSystem.spawn(
+      defineEffect({
+        elements: {
+          neighbors: defineNeighborGrid({ cellCapacity: 2, resolution: [2, 2, 2] }),
+          particles: defineEmitter({
+            capacity: 1,
+            integration: 'none',
+            render: computeRender,
+            spawn: burst({ count: 0 }),
+            update: [boids({ grid: 'neighbors', radius: 0 })],
+          }),
+        },
+      }),
+    );
+    const neighborCapture = neighborInstance.getNeighborGrid('neighbors')!.capture();
+    neighborInstance.release();
+    await expect(neighborCapture).rejects.toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_INSTANCE_RELEASED' })],
+      }),
+    );
+    expect(neighborRenderer.readCount).toBe(0);
+  });
 });
 
 import type {
+  BuiltEmitterKernels,
   Grid2DRuntimeView,
   Grid3DRuntimeView,
   KernelComputeBuilder,
@@ -776,7 +841,8 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
   failNextSubmission = false;
   releaseCount = 0;
 
-  releaseKernels(): void {
+  releaseKernels(_kernels: BuiltEmitterKernels): void {
+    void _kernels;
     this.releaseCount += 1;
   }
 
@@ -790,6 +856,54 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
 
   submitComputeIndirect(kernel: KernelComputeNode): void {
     this.submitCompute(kernel);
+  }
+}
+
+class ReleaseOrderingRenderer extends FakeRuntimeRenderer {
+  readonly lifecycle: string[] = [];
+  readonly releasedKernels = new Set<BuiltEmitterKernels>();
+  readonly #releasedComputes = new WeakSet<object>();
+
+  override releaseKernels(kernels: BuiltEmitterKernels): void {
+    super.releaseKernels(kernels);
+    this.releasedKernels.add(kernels);
+    for (const compute of [
+      kernels.compact,
+      kernels.finalizeIndirect,
+      kernels.finalizeSpawn,
+      kernels.init,
+      kernels.initialize,
+      kernels.prepareSort,
+      kernels.prepareSpawn,
+      kernels.resetAliveCount,
+      kernels.spawn,
+      kernels.update,
+      ...(kernels.sortPasses ?? []),
+    ]) {
+      if (compute) this.#releasedComputes.add(compute as object);
+    }
+    this.lifecycle.push('release');
+  }
+
+  override submitCompute(kernel: KernelComputeNode): void {
+    if (this.#releasedComputes.has(kernel as object)) {
+      throw new Error('submitted compute that references released kernels');
+    }
+    this.lifecycle.push(`submit:${(kernel as FakeCompute).name}`);
+    super.submitCompute(kernel);
+  }
+}
+
+class FailFirstEmitterUpdateRenderer extends FakeRuntimeRenderer {
+  failed = false;
+
+  override submitCompute(kernel: KernelComputeNode): void {
+    const name = (kernel as FakeCompute).name;
+    super.submitCompute(kernel);
+    if (!this.failed && name === 'NachiEmitterUpdate') {
+      this.failed = true;
+      throw new Error('synthetic step failure');
+    }
   }
 }
 
@@ -1509,6 +1623,118 @@ describe('VFXSystem runtime scheduler', () => {
     expect(system.getPooledInstanceCount(stopped.definition)).toBe(1);
   });
 
+  it('retires overflow kernels only after a timeline-style stop/release update and safely reuses the pool', async () => {
+    const renderer = new ReleaseOrderingRenderer();
+    const definition = runtimeEffect({ duration: 1 });
+    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 1 });
+    const first = system.spawn(definition);
+    const second = system.spawn(definition);
+    const pooledKernels = first.getEmitter('particles')!.kernels;
+    system.spawn(runtimeEffect({ duration: 1 }));
+    let releaseOnAttachmentRead = false;
+    for (const instance of [first, second]) {
+      instance.attachTo({
+        getWorldTransform: () => {
+          if (releaseOnAttachmentRead) {
+            instance.stop();
+            instance.release();
+          }
+          return { position: [0, 0, 0] };
+        },
+      });
+    }
+
+    releaseOnAttachmentRead = true;
+    await system.update(0);
+
+    expect(renderer.releaseCount).toBe(1);
+    expect(renderer.lifecycle.at(-1)).toBe('release');
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
+
+    const recycled = system.spawn(definition);
+    expect(recycled.getEmitter('particles')!.kernels).toBe(pooledKernels);
+    await expect(system.update(0)).resolves.toBeUndefined();
+    expect(recycled.state).toBe('active');
+  });
+
+  it('re-evaluates a release against pool checkout before flush and only retires inactive overflow kernels', async () => {
+    const renderer = new ReleaseOrderingRenderer();
+    const definition = runtimeEffect({ duration: 1 });
+    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 1 });
+    const releasedDuringUpdate = system.spawn(definition);
+    const releasedKernels = releasedDuringUpdate.getEmitter('particles')!.kernels;
+    const driver = system.spawn(runtimeEffect({ duration: 1 }));
+    const initiallyPooled = system.spawn(definition);
+    const pooledKernels = initiallyPooled.getEmitter('particles')!.kernels;
+    initiallyPooled.release();
+    let runBoundary = false;
+    let reacquired: typeof releasedDuringUpdate | undefined;
+    releasedDuringUpdate.attachTo({
+      getWorldTransform: () => {
+        if (runBoundary) releasedDuringUpdate.release();
+        return { position: [0, 0, 0] };
+      },
+    });
+    driver.attachTo({
+      getWorldTransform: () => {
+        if (runBoundary) {
+          runBoundary = false;
+          reacquired = system.spawn(definition);
+        }
+        return { position: [0, 0, 0] };
+      },
+    });
+
+    runBoundary = true;
+    await system.update(0);
+
+    expect(reacquired?.getEmitter('particles')!.kernels).toBe(pooledKernels);
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
+    expect(renderer.releasedKernels.has(pooledKernels)).toBe(false);
+    expect(renderer.releasedKernels.has(releasedKernels)).toBe(false);
+
+    reacquired!.release();
+    expect(renderer.releasedKernels.has(pooledKernels)).toBe(true);
+    expect(renderer.releaseCount).toBe(1);
+  });
+
+  it('keeps destroyed and active kernels disjoint through timeline-loop pool pressure', async () => {
+    const renderer = new ReleaseOrderingRenderer();
+    const definition = runtimeEffect({ duration: 1 });
+    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 1 });
+    system.spawn(definition).release();
+    let active = [system.spawn(definition), system.spawn(definition)];
+    const driver = system.spawn(runtimeEffect({ duration: 1 }));
+    let crossLoopBoundary: (() => void) | undefined;
+    driver.attachTo({
+      getWorldTransform: () => {
+        const boundary = crossLoopBoundary;
+        crossLoopBoundary = undefined;
+        boundary?.();
+        return { position: [0, 0, 0] };
+      },
+    });
+
+    for (let cycle = 0; cycle < 64; cycle += 1) {
+      let replacements: typeof active = [];
+      crossLoopBoundary = () => {
+        for (const instance of active) {
+          instance.stop();
+          instance.release();
+        }
+        replacements = [system.spawn(definition), system.spawn(definition)];
+      };
+
+      await expect(system.update(0)).resolves.toBeUndefined();
+      active = replacements;
+      const activeKernels = active.map((instance) => instance.getEmitter('particles')!.kernels);
+      expect(activeKernels.some((kernels) => renderer.releasedKernels.has(kernels))).toBe(false);
+    }
+
+    expect(renderer.releaseCount).toBe(64);
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
+  });
+
   it('turns submission failures into runtime diagnostics', async () => {
     const renderer = new FakeRuntimeRenderer();
     renderer.failNextSubmission = true;
@@ -1522,6 +1748,180 @@ describe('VFXSystem runtime scheduler', () => {
     instance.release();
     expect(system.getPooledInstanceCount(instance.definition)).toBe(0);
     expect(renderer.releaseCount).toBe(1);
+  });
+
+  it('initializes effects spawned by an event callback before same-update event consumption', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const source = system.spawn(eventEffect());
+    let spawned: { readonly state: string } | undefined;
+    let callbackSubmission = -1;
+    source.on('death', () => {
+      callbackSubmission = renderer.submissions.length;
+      spawned = system.spawn(
+        defineEffect({
+          elements: {
+            freshSource: defineEmitter({
+              capacity: 1,
+              events: { onDeath: emitTo('freshTarget') },
+              init: [lifetime(0.1)],
+              integration: 'none',
+              render: computeRender,
+              spawn: burst({ count: 1 }),
+            }),
+            freshTarget: defineEmitter({
+              capacity: 1,
+              integration: 'none',
+              render: computeRender,
+              spawn: burst({ count: 0 }),
+            }),
+          },
+        }),
+      );
+    });
+    await system.update(0);
+    const state = source.getEmitter('sparks')!.kernels.eventOutputs.onDeath!.state;
+    renderer.storageValues.set(state, new Uint32Array([0, 0, 0, 1]));
+
+    await system.update(0.1);
+
+    expect(spawned?.state).not.toBe('error');
+    const sameUpdate = renderer.submissions.slice(callbackSubmission);
+    expect(sameUpdate.indexOf('NachiEmitterInitialize')).toBeGreaterThanOrEqual(0);
+    expect(sameUpdate.indexOf('NachiEmitterInitialize')).toBeLessThan(
+      sameUpdate.indexOf('NachiEventPrepare_freshSource_onDeath_0'),
+    );
+  });
+
+  it('initializes a budget-admitted effect before stepping it later in the same update', async () => {
+    const renderer = new FailFirstEmitterUpdateRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { stepSeconds: 0.1 },
+      significanceBudget: { maxActiveInstances: 1, maxParticles: 100 },
+    });
+    system.spawn(runtimeEffect({ duration: 1 }), { priority: 10 });
+    const admittedLater = system.spawn(
+      defineEffect({
+        elements: {
+          freshSource: defineEmitter({
+            capacity: 1,
+            events: { onDeath: emitTo('freshTarget') },
+            init: [lifetime(0.1)],
+            integration: 'none',
+            render: computeRender,
+            spawn: burst({ count: 1 }),
+          }),
+          freshTarget: defineEmitter({
+            capacity: 1,
+            integration: 'none',
+            render: computeRender,
+            spawn: burst({ count: 0 }),
+          }),
+        },
+      }),
+      { priority: 0 },
+    );
+    expect(admittedLater.scalability.action).toBe('culled');
+
+    await system.update(0.2);
+
+    expect(renderer.failed).toBe(true);
+    expect(admittedLater.scalability.action).not.toBe('culled');
+    const afterFailure = renderer.submissions.slice(
+      renderer.submissions.indexOf('NachiEmitterUpdate') + 1,
+    );
+    expect(afterFailure.indexOf('NachiEmitterInitialize')).toBeGreaterThanOrEqual(0);
+    expect(afterFailure.indexOf('NachiEmitterInitialize')).toBeLessThan(
+      afterFailure.indexOf('NachiEventPrepare_freshSource_onDeath_0'),
+    );
+  });
+
+  it('contains attachment-source failures per instance and tolerates self-release callbacks', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const broken = system.spawn(runtimeEffect({ duration: 1 }));
+    const healthy = system.spawn(runtimeEffect({ duration: 1 }));
+    let calls = 0;
+    broken.attachTo({
+      getWorldTransform: () => {
+        calls += 1;
+        if (calls > 1) throw new Error('synthetic attachment failure');
+        return { position: [0, 0, 0] };
+      },
+    });
+
+    await expect(system.update(0.1)).resolves.toBeUndefined();
+    expect(broken.state).toBe('error');
+    expect(broken.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ATTACHMENT_SOURCE_FAILED' }),
+    );
+    expect(healthy.localTime).toBeCloseTo(0.1);
+
+    const selfReleasing = system.spawn(runtimeEffect({ duration: 1 }));
+    let releaseOnRead = false;
+    selfReleasing.attachTo({
+      getWorldTransform: () => {
+        if (releaseOnRead) selfReleasing.release();
+        return { position: [1, 2, 3] };
+      },
+    });
+    releaseOnRead = true;
+    await expect(system.update(0.1)).resolves.toBeUndefined();
+    expect(selfReleasing.state).toBe('released');
+  });
+
+  it('keeps listener failures as warnings without killing or misdiagnosing the instance', async () => {
+    const renderer = new MappedReadbackRenderer();
+    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const instance = system.spawn(eventEffect());
+    instance.on('death', () => {
+      throw new Error('synthetic listener failure');
+    });
+    await system.update(0);
+    const state = instance.getEmitter('sparks')!.kernels.eventOutputs.onDeath!.state;
+    renderer.storageValues.set(state, new Uint32Array([0, 0, 0, 1]));
+
+    await system.update(0.1);
+
+    expect(instance.state).toBe('active');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EVENT_LISTENER_FAILED', severity: 'warning' }),
+    );
+    expect(instance.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_GPU_SUBMISSION_FAILED' }),
+    );
+  });
+
+  it('commits release before cleanup and frees unowned event queues after spawn failure', () => {
+    const throwingReleaseRenderer = new (class extends FakeRuntimeRenderer {
+      override releaseKernels(): void {
+        this.releaseCount += 1;
+        throw new Error('synthetic release failure');
+      }
+    })();
+    const released = new VFXSystem(throwingReleaseRenderer, undefined, {
+      maxPoolSize: 0,
+    }).spawn(runtimeEffect({ duration: 1 }));
+    expect(() => released.release()).toThrowError('synthetic release failure');
+    expect(released.state).toBe('released');
+    expect(() => released.release()).not.toThrow();
+    expect(throwingReleaseRenderer.releaseCount).toBe(1);
+
+    const failedMaterializationRenderer = new (class extends FakeRuntimeRenderer {
+      override readonly kernelAdapter: KernelTslAdapter = {
+        ...fakeAdapter(),
+        uniform: () => {
+          throw new Error('synthetic uniform materialization failure');
+        },
+      };
+      releasedStorages = 0;
+
+      releaseStorage(): void {
+        this.releasedStorages += 1;
+      }
+    })();
+    const failed = new VFXSystem(failedMaterializationRenderer).spawn(eventEffect());
+    expect(failed.state).toBe('error');
+    expect(failedMaterializationRenderer.releasedStorages).toBe(3);
   });
 
   it('rejects unregistered spawn modules through the unified registry', () => {
