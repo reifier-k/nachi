@@ -14,8 +14,8 @@ pnpm add -D @types/three@0.185.0
 `@nachi/core` deliberately does not import Three.js. Use `createThreeKernelAdapter()` and
 `createThreeRuntimeRenderer()` from `@nachi/three`, then materialize each spawned emitter's draw and
 add it to your Three scene. See the repository
-[Quick start](https://github.com/nachi-vfx/nachi#quick-start) and the
-[`@nachi/three` README](https://github.com/nachi-vfx/nachi/tree/main/packages/three#readme) for a
+[Quick start](https://github.com/reifier-k/nachi#quick-start) and the
+[`@nachi/three` README](https://github.com/reifier-k/nachi/tree/main/packages/three#readme) for a
 complete rendering example.
 
 The public authoring surface includes emitter/effect definitions, built-in Init/Update/Render

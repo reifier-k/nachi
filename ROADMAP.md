@@ -220,8 +220,8 @@
 - [x] API安定性レビュー — 2026-07-12: RFC 001-003整合、契約12/12実装一致、診断コード262種重複なし+命名統一(NACHI_MESH_FX_*)、実験的API現状なし、semver方針=RFC 003
 - [x] ドキュメント完全性 — 2026-07-12: `@nachi/three`公開でQuick Start実行可能化(全import明示)、docsサイト+ギャラリー7枚、パリティレポート=Niagara対応表、パッケージ別README 9/9
 - [x] バンドルサイズ計測と予算判定 — 2026-07-12: パッケージ別表+consumerバンドル計測+予算ゲート(非0 exit)、tree-shaking 98.6%削減PASS
-- [x] npm publish dry-run、README/CHANGELOG最終化 — 2026-07-12: release:dry(pnpm packベース、workspace:残存ゼロ検証、1.0 release plan検証)+changeset全9パッケージmajor(1.0.0)+VERSION同期テスト。**公開前のユーザー判断事項: org/リポジトリ名確定+`nachi-vfx/nachi`全URL差し替え+実publish**
-- [x] **1.0リリース判定 — 統括裁定(2026-07-12): 条件付き可**。コード・ゲート・文書はすべて出荷水準(FA両監査のBLOCKER 4件を全解消: @nachi/three公開化/1.0リリースゲート整備/依存監査再現化+dev脆弱性0化)。残る条件は全てユーザー判断・ユーザー起動事項: (1)GitHub org確定+URL差し替え (2)`/code-review ultra`起動と指摘処理 (3)Windows実GPU目視+実機30fps確認(非ブロッキングリスト) (4)実publish(`changeset version`→publish)
+- [x] npm publish dry-run、README/CHANGELOG最終化 — 2026-07-12: release:dry(pnpm packベース、workspace:残存ゼロ検証、1.0 release plan検証)+changeset全9パッケージmajor(1.0.0)+VERSION同期テスト。**リポジトリ名は確定済み(`reifier-k/nachi`)。全URL差し替え済み。残作業は実publish**
+- [x] **1.0リリース判定 — 統括裁定(2026-07-12): 条件付き可**。コード・ゲート・文書はすべて出荷水準(FA両監査のBLOCKER 4件を全解消: @nachi/three公開化/1.0リリースゲート整備/依存監査再現化+dev脆弱性0化)。GitHubリポジトリ名は確定済み(`reifier-k/nachi`)でURL差し替えも完了。残る条件は全てユーザー判断・ユーザー起動事項: (1)`/code-review ultra`起動と指摘処理 (2)Windows実GPU目視+実機30fps確認(非ブロッキングリスト) (3)実publish(`changeset version`→publish)
 
 ## セッションログ
 

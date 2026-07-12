@@ -14,7 +14,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nachi-vfx/nachi.git",
+    "url": "git+https://github.com/reifier-k/nachi.git",
     "directory": "packages/three"
   },
   "types": "./dist/index.d.ts",
