@@ -51,6 +51,7 @@ export default defineConfig({
         showcaseBarrier: 'showcase-barrier/index.html',
         showcaseHeal: 'showcase-heal/index.html',
         showcaseIce: 'showcase-ice/index.html',
+        showcaseMachina: 'showcase-machina/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
         wuwaSlash: 'wuwa-slash/index.html',
