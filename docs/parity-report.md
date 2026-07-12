@@ -84,8 +84,9 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 - **Implementation:** `@nachi/core` `meshRenderer()` supplies instanced geometry with orientation,
   particle color, and scale; playground Three adapters resolve geometry references.
-- **Verification:** `/m3-sprites/`, `/golden-explosion/`, compiler tests, and GPU six-direction
-  orientation probes verify transforms and instance data.
+- **Verification:** `/golden-explosion/`, `/golden-ambient/`, and
+  `packages/three/test/three-kernel-adapter.test.ts` verify transforms, instance data, geometry
+  resolution, and GPU orientation behavior.
 - **Residual:** Mesh arrays, renderer material slots, per-particle mesh selection, and a lit mesh
   particle path are absent.
 
@@ -156,8 +157,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 - **Implementation:** `positionMeshSurface()` and `velocityMeshNormal()` consume area-CDF triangle
   textures; playground resource adapters can CPU-skin and re-upload a mesh.
-- **Verification:** `/m6-collision/`, `/golden-character/`, compiler tests, and adapter readback cover
-  area uniformity, normals, skin updates, and texture limits.
+- **Verification:** `/golden-character/` (`surfaceSpawn` and `meshNormalVelocity`), compiler tests,
+  and adapter readback cover area uniformity, normals, skin updates, and texture limits.
 - **Residual:** Vertex/bone sampling, material filters, surface-velocity inheritance, GPU skinning,
   and multi-row/very-large triangle textures are absent.
 
@@ -184,8 +185,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 - **Implementation:** `@nachi/core` `lightRenderer()` selects GPU top-N particles and the Three
   adapter updates a bounded `PointLight` pool one frame later.
-- **Verification:** `/m7-ribbons/`, `/golden-charge/`, `/golden-slash/`, and compiler/adapter tests
-  cover selection, limits, pool reuse, and offscreen lighting.
+- **Verification:** `/golden-slash/`, `/golden-charge/`, `/m10-lit/`, and compiler/adapter tests cover
+  selection, limits, pool reuse, and offscreen lighting.
 - **Residual:** No inverse-square mode switch, translucency/volumetric flags, arbitrary attribute
   binding, or stable logical-ID tie-break; the bounded CPU light pool differs from Niagara's
   renderer integration.
@@ -194,8 +195,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 - **Implementation:** `decalRenderer()` reconstructs scene position from depth and projects a
   bounded box through the Three adapter.
-- **Verification:** `/m7-ribbons/`, `/golden-slash/`, compiler tests, and offscreen pixel-region
-  checks verify projection and explicit backend diagnostics.
+- **Verification:** `/golden-slash/`, compiler tests, and offscreen pixel-region checks verify
+  projection and explicit backend diagnostics.
 - **Residual:** No deferred/GBuffer material integration, receiver-normal rejection, screen-size
   fade, or anisotropic particle size; it is WebGPU-only, one frame late, and single-camera.
 

@@ -25,6 +25,7 @@
     "version-packages": "changeset version",
     "esm:check": "node tools/check-all-package-esm.mjs",
     "esm-all": "node tools/check-all-package-esm.mjs",
+    "golden:regress": "node tools/golden-runner.mjs",
     "release:dry": "pnpm build && pnpm esm:check && node tools/release-dry.mjs"
   },
   "devDependencies": {
@@ -37,6 +38,15 @@
     "prettier": "3.8.2",
     "typescript": "5.9.3",
     "typescript-eslint": "8.55.0",
-    "vitest": "4.0.18"
+    "esbuild": "0.28.1",
+    "vitest": "4.1.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
+    "overrides": {
+      "esbuild": "0.28.1"
+    }
   }
 }

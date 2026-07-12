@@ -434,7 +434,7 @@ async function run(): Promise<void> {
     consoleClean: consoleMessages.length === 0,
     diagnostics:
       diagnostics.frameRange === 'NACHI_VAT_FRAME_RANGE' &&
-      diagnostics.missingTexture === 'NACHI_MESHFX_TEXTURE_REQUIRED' &&
+      diagnostics.missingTexture === 'NACHI_MESH_FX_TEXTURE_REQUIRED' &&
       diagnostics.vertexCount === 'NACHI_VAT_VERTEX_COUNT_MISMATCH',
     floatTexture:
       positionTexture.type === THREE.FloatType && positionTexture.colorSpace === THREE.NoColorSpace,

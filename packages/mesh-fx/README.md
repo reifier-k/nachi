@@ -46,8 +46,8 @@ nodes through `time` and `normalizedLife` for standalone externally owned bindin
 `@nachi/timeline` adapter drives its effect-local clock through the writable controls, so timeline
 materials must omit `time`; no wall clock is read implicitly.
 
-Three.js is a peer dependency pinned to the r185 compatibility line. The package is ESM-only and
-declares `sideEffects: false`.
+Three.js is an exact `three@0.185.1` peer. The package is ESM-only and declares
+`sideEffects: false`.
 
 ## Blender VAT runtime
 

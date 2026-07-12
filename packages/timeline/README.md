@@ -4,6 +4,9 @@ Deterministic effect-local sequencing for `@nachi/core`, including `play`/`stop`
 decaying PCG camera shake, gameplay markers, timeline loop/speed, and automatic lifecycle binding
 for `@nachi/mesh-fx` meshes.
 
+Three.js is an exact `three@0.185.1` peer because timeline mesh-fx lifecycle integration shares
+live Three resources with the application.
+
 ```ts
 import { curve, defineEmitter } from '@nachi/core';
 import { slashArc } from '@nachi/mesh-fx';

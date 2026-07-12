@@ -4,13 +4,13 @@ Standalone Three.js TSL shader building blocks. This package does not depend on 
 the nachi runtime; it works directly with ordinary Three.js `NodeMaterial` classes.
 
 ```sh
-pnpm add @nachi/tsl-kit three
+pnpm add @nachi/tsl-kit three@0.185.1
 # TypeScript projects also need Three's separately published declarations:
-pnpm add -D @types/three@0.185
+pnpm add -D @types/three@0.185.0
 ```
 
-The current compatibility range is Three.js r185 (`>=0.185.0 <0.186.0`). TSL is not yet a stable
-cross-release API, so upgrade `three` and `@nachi/tsl-kit` together. The emitted declarations refer
+The supported peer is exactly `three@0.185.1`. TSL is not yet a stable cross-release API, so upgrade
+`three` and `@nachi/tsl-kit` together. The emitted declarations refer
 to `three` node types; `@types/three` is therefore an optional peer for JavaScript consumers but a
 required development dependency for TypeScript consumers.
 

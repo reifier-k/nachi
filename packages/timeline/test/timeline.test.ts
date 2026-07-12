@@ -182,7 +182,7 @@ describe('@nachi/timeline authoring', () => {
       expect.objectContaining({
         diagnostics: [
           expect.objectContaining({
-            code: 'NACHI_TIMELINE_MESH_FX_TIME_BINDING_UNSUPPORTED',
+            code: 'NACHI_MESH_FX_TIME_BINDING_UNSUPPORTED',
             path: 'elements.arc.material.time',
           }),
         ],

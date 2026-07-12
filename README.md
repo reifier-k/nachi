@@ -151,6 +151,7 @@ pnpm build
 pnpm docs:build
 pnpm esm-all
 pnpm release:dry  # build + every package ESM import gate + publish-shaped pnpm pack checks
+pnpm golden:regress  # with the playground dev server running; headless SwiftShader golden suite
 node tools/bundle-size.mjs
 node tools/license-report.mjs
 ```

@@ -12,6 +12,5 @@ describe('core package version contract', () => {
 
     expect(match, `${VERSION} must be a semantic version`).not.toBeNull();
     expect(VERSION).toBe(manifest.version);
-    expect(match?.slice(1, 4).map(Number)).toEqual([0, 0, 0]);
   });
 });

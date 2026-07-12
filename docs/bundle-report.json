@@ -1,5 +1,24 @@
 {
-  "methodologyVersion": 1,
+  "consumerBundles": {
+    "bundler": "rollup@4.62.2",
+    "consumer": {
+      "gzipBytes": 85625,
+      "rawBytes": 454629,
+      "warnings": [],
+      "budgetGzipBytes": 107520,
+      "passed": true,
+      "threeExternal": true
+    },
+    "core": {
+      "gzipBytes": 98771,
+      "rawBytes": 515084,
+      "warnings": [],
+      "budgetGzipBytes": 123904,
+      "passed": true
+    },
+    "passed": true
+  },
+  "methodologyVersion": 2,
   "packages": [
     {
       "files": 34,
@@ -19,10 +38,10 @@
     },
     {
       "files": 10,
-      "gzipBytes": 11826,
+      "gzipBytes": 11830,
       "name": "@nachi/mesh-fx",
-      "rawBytes": 43132,
-      "runtimeJsRawBytes": 33052,
+      "rawBytes": 43137,
+      "runtimeJsRawBytes": 33055,
       "version": "0.0.0"
     },
     {
@@ -51,10 +70,10 @@
     },
     {
       "files": 6,
-      "gzipBytes": 12514,
+      "gzipBytes": 12513,
       "name": "@nachi/timeline",
-      "rawBytes": 49662,
-      "runtimeJsRawBytes": 40402,
+      "rawBytes": 49626,
+      "runtimeJsRawBytes": 40366,
       "version": "0.0.0"
     },
     {
@@ -76,8 +95,8 @@
   ],
   "totals": {
     "files": 102,
-    "gzipBytes": 224144,
-    "rawBytes": 1017145
+    "gzipBytes": 224147,
+    "rawBytes": 1017114
   },
   "treeShaking": {
     "bundler": "rollup@4.62.2",

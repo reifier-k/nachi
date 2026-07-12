@@ -40,3 +40,44 @@ jobs:
 
       - name: Check formatting
         run: pnpm exec prettier --check .
+
+  golden-regress:
+    if: ${{ vars.NACHI_SKIP_GOLDEN_REGRESS != '1' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Install headless Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Start playground and run golden regression suite with SwiftShader
+        run: |
+          pnpm dev > /tmp/nachi-playground.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:5173/ > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/nachi-playground.log
+            exit 1
+          fi
+          pnpm golden:regress

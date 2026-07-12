@@ -434,7 +434,7 @@ function requiredNodeMaterial(material: THREE.Material | THREE.Material[]): Node
 function requiredTexture(texture: THREE.Texture, path: string): THREE.Texture {
   if (texture?.isTexture !== true) {
     throw new MeshFxDiagnosticError({
-      code: 'NACHI_MESHFX_TEXTURE_REQUIRED',
+      code: 'NACHI_MESH_FX_TEXTURE_REQUIRED',
       message: 'must be a Three.js Texture',
       path,
     });

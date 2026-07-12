@@ -271,7 +271,7 @@ function requiredTexture<TextureType extends TextureInput>(
 ): TextureType {
   if (input?.isTexture !== true) {
     throw new MeshFxDiagnosticError({
-      code: 'NACHI_MESHFX_TEXTURE_REQUIRED',
+      code: 'NACHI_MESH_FX_TEXTURE_REQUIRED',
       message: 'must be a Three.js Texture',
       path,
     });

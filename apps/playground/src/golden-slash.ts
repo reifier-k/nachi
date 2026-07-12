@@ -88,9 +88,13 @@ function emitter(instance: RuntimeInstance, key: string): VfxEmitterRuntimeView 
   return value;
 }
 
-function paint(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): number {
+function paint(
+  canvas: HTMLCanvasElement,
+  pixels: ArrayLike<number>,
+): { foregroundRatio: number; saturatedRatio: number } {
   const rgba = new Uint8ClampedArray(WIDTH * HEIGHT * 4);
   let foreground = 0;
+  let saturated = 0;
   for (let y = 0; y < HEIGHT; y += 1) {
     for (let x = 0; x < WIDTH; x += 1) {
       const source = (y * WIDTH + x) * 4;
@@ -100,10 +104,14 @@ function paint(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): number {
       const b = Number(pixels[source + 2] ?? 0);
       rgba.set([r, g, b, 255], target);
       if (r + g + b > 42) foreground += 1;
+      if (r + g + b > 744) saturated += 1;
     }
   }
   canvas.getContext('2d')?.putImageData(new ImageData(rgba, WIDTH, HEIGHT), 0, 0);
-  return foreground / (WIDTH * HEIGHT);
+  return {
+    foregroundRatio: foreground / (WIDTH * HEIGHT),
+    saturatedRatio: saturated / (WIDTH * HEIGHT),
+  };
 }
 
 async function probePointLights(
@@ -524,7 +532,7 @@ async function run(): Promise<void> {
   sparksMesh.visible = true;
   const visualPixels = await renderVisual();
   renderer.setRenderTarget(null);
-  const foregroundRatio = paint(required<HTMLCanvasElement>('#golden-slash'), visualPixels);
+  const visual = paint(required<HTMLCanvasElement>('#golden-slash'), visualPixels);
   const pointLightProbe = await measureGpuPerformance();
   for (let frame = 0; frame < 60 && lightInstance.state === 'active'; frame += 1) {
     await lightSystem.update(STEP);
@@ -546,7 +554,9 @@ async function run(): Promise<void> {
     pointLightR185Probe: pointLightProbe.nonBlack.every((count) => count > 0),
     ribbonFollow: ribbonFollowError < 0.0001,
     saturationLongRun: stressSegments.segmentCount === 31,
-    visualReadback: foregroundRatio > 0.015,
+    saturationUpperBound: stressSegments.segmentCount <= 31,
+    visualReadback: visual.foregroundRatio > 0.015,
+    visualSaturationUpperBound: visual.saturatedRatio < 0.1,
     weaponTrail: trailSegments.segmentCount >= 35,
   };
   const result = {
@@ -571,9 +581,18 @@ async function run(): Promise<void> {
     ribbon: { followError: ribbonFollowError, segmentCount: trailSegments.segmentCount },
     scope: { M7: true, M8: 'arc mesh', M9: 'hit stop/shake', M10: 'post distortion' },
     sparks: { foregroundPixels: sparkForegroundPixels, isolatedReadback: true },
-    stress: { frames: 600, saturatedSegments: stressSegments.segmentCount },
+    stress: {
+      frames: 600,
+      saturatedSegmentLimit: 31,
+      saturatedSegments: stressSegments.segmentCount,
+    },
     validation,
-    visual: { foregroundRatio, source: 'offscreen-render-target-readback-to-2d-canvas' },
+    visual: {
+      ...visual,
+      foregroundMinimum: 0.015,
+      saturatedRatioMaximum: 0.1,
+      source: 'offscreen-render-target-readback-to-2d-canvas',
+    },
   };
   root.dataset.artifactScreenshots = JSON.stringify([
     { filename: 'golden-slash.png', selector: '#golden-slash' },

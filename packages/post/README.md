@@ -5,13 +5,13 @@ shockwave and heat-haze distortion, radial blur, bloom presets, and native-WebGP
 OIT without depending on `@nachi/core`.
 
 ```sh
-pnpm add @nachi/post three
+pnpm add @nachi/post three@0.185.1
 # TypeScript projects also need Three's separately published declarations:
-pnpm add -D @types/three@0.185
+pnpm add -D @types/three@0.185.0
 ```
 
-The supported peer range is `three >=0.185.0 <0.186.0`. Post nodes are sensitive to Three's TSL
-API, so upgrade Three and this package together.
+The supported peer is exactly `three@0.185.1`. Post nodes are sensitive to Three's TSL API, so
+upgrade Three and this package together.
 
 ## RenderPipeline integration
 

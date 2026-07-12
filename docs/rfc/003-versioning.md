@@ -17,9 +17,9 @@ documented code-first surface, structured diagnostics, and version-1 asset docum
 on according to the rules below. Unsupported RFC 001 §16 capabilities do not become implied by the
 version number.
 
-The initial changeset deliberately requests `minor` for all packages while they are still `0.0.0`.
-The release owner chooses the coordinated 1.0 versioning pass after FA; this RFC does not perform a
-version bump.
+The initial changeset requests `major` for all packages while they are still `0.0.0`, producing the
+coordinated `1.0.0` release plan. The release owner applies that plan after FA; this RFC does not
+perform a version bump.
 
 ## 2. Package SemVer policy
 

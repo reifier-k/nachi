@@ -1,7 +1,7 @@
 export type MeshFxDiagnostic = Readonly<{
   code:
-    | 'NACHI_MESHFX_INVALID_PARAMETER'
-    | 'NACHI_MESHFX_TEXTURE_REQUIRED'
+    | 'NACHI_MESH_FX_INVALID_PARAMETER'
+    | 'NACHI_MESH_FX_TEXTURE_REQUIRED'
     | 'NACHI_VAT_FLOAT_TEXTURE_REQUIRED'
     | 'NACHI_VAT_FRAME_RANGE'
     | 'NACHI_VAT_LAYOUT_MISMATCH'
@@ -22,7 +22,7 @@ export class MeshFxDiagnosticError extends Error {
 }
 
 export function invalid(path: string, message: string): never {
-  throw new MeshFxDiagnosticError({ code: 'NACHI_MESHFX_INVALID_PARAMETER', message, path });
+  throw new MeshFxDiagnosticError({ code: 'NACHI_MESH_FX_INVALID_PARAMETER', message, path });
 }
 
 export function finite(value: number, path: string): number {

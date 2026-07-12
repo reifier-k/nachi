@@ -2,12 +2,14 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const root = path.resolve(import.meta.dirname, '..');
 const packageDirectories = (await readdir(path.join(root, 'packages'), { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
   .map((entry) => path.join(root, 'packages', entry.name))
   .sort();
+const versionExportPackages = new Set(['@nachi/core', '@nachi/format', '@nachi/trails']);
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -33,11 +35,82 @@ function run(command, args, options = {}) {
   });
 }
 
-const packRoot = await mkdtemp(path.join(os.tmpdir(), 'nachi-release-dry-'));
-try {
+async function publicPackages() {
+  const packages = [];
   for (const packageRoot of packageDirectories) {
     const manifest = JSON.parse(await readFile(path.join(packageRoot, 'package.json'), 'utf8'));
-    if (manifest.private) continue;
+    if (!manifest.private) packages.push({ manifest, packageRoot });
+  }
+  return packages;
+}
+
+async function verifyReleasePlan(packages) {
+  const output = `.changeset-status-release-dry-${process.pid}.json`;
+  try {
+    await run('pnpm', ['changeset', 'status', '--output', output]);
+    const status = JSON.parse(await readFile(path.join(root, output), 'utf8'));
+    const expectedNames = packages.map(({ manifest }) => manifest.name).sort();
+    const releases = status.releases
+      .filter(({ name }) => expectedNames.includes(name))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const releaseNames = releases.map(({ name }) => name);
+    if (JSON.stringify(releaseNames) !== JSON.stringify(expectedNames)) {
+      throw new Error(
+        `Changeset release plan package set differs from public packages: expected ${expectedNames.join(', ')}; received ${releaseNames.join(', ')}.`,
+      );
+    }
+    const invalid = releases.filter(
+      ({ newVersion, oldVersion, type }) =>
+        type !== 'major' || oldVersion !== '0.0.0' || newVersion !== '1.0.0',
+    );
+    if (invalid.length > 0) {
+      throw new Error(
+        `Every public package must have a major 0.0.0 -> 1.0.0 release plan: ${invalid
+          .map(
+            ({ name, newVersion, oldVersion, type }) =>
+              `${name} (${type} ${oldVersion} -> ${newVersion})`,
+          )
+          .join(', ')}.`,
+      );
+    }
+    console.log(
+      `Changeset release plan verified: ${releases.length} public packages, all major 0.0.0 -> 1.0.0.`,
+    );
+  } finally {
+    await rm(path.join(root, output), { force: true });
+  }
+}
+
+async function verifyVersionExports(packages) {
+  for (const { manifest, packageRoot } of packages) {
+    const entry = path.join(packageRoot, manifest.exports['.'].import);
+    const module = await import(pathToFileURL(entry).href);
+    if (versionExportPackages.has(manifest.name)) {
+      if (typeof module.VERSION !== 'string') {
+        throw new Error(`${manifest.name} must export its public VERSION constant.`);
+      }
+      if (module.VERSION !== manifest.version) {
+        throw new Error(
+          `${manifest.name} VERSION (${module.VERSION}) differs from package.json (${manifest.version}).`,
+        );
+      }
+    } else if (module.VERSION !== undefined && module.VERSION !== manifest.version) {
+      throw new Error(
+        `${manifest.name} VERSION (${module.VERSION}) differs from package.json (${manifest.version}).`,
+      );
+    }
+  }
+  console.log(
+    `Public VERSION exports verified against package.json: ${[...versionExportPackages].sort().join(', ')}.`,
+  );
+}
+
+const packRoot = await mkdtemp(path.join(os.tmpdir(), 'nachi-release-dry-'));
+try {
+  const packages = await publicPackages();
+  await verifyReleasePlan(packages);
+  await verifyVersionExports(packages);
+  for (const { manifest, packageRoot } of packages) {
     const destination = path.join(packRoot, path.basename(packageRoot));
     console.log(`\nPacking ${manifest.name}@${manifest.version} with pnpm`);
     await run('pnpm', ['pack', '--pack-destination', destination], { cwd: packageRoot });

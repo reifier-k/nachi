@@ -153,7 +153,7 @@ export function bindMeshFxResources<
     ) {
       diagnostics.push(
         diagnostic(
-          'NACHI_TIMELINE_MESH_FX_REFERENCE_INVALID',
+          'NACHI_MESH_FX_REFERENCE_INVALID',
           'Loaded mesh-fx placeholders require a positive duration and non-empty resource ID.',
           `elements.${key}.config`,
         ),
@@ -164,7 +164,7 @@ export function bindMeshFxResources<
     if (!mesh) {
       diagnostics.push(
         diagnostic(
-          'NACHI_TIMELINE_MESH_FX_RESOURCE_UNRESOLVED',
+          'NACHI_MESH_FX_RESOURCE_UNRESOLVED',
           `Mesh-fx resource "${config.resource}" could not be resolved.`,
           `elements.${key}.config.resource`,
         ),
@@ -281,7 +281,7 @@ export function cloneTimelineFxMaterial(
   if (config) return fxMaterial(config);
   throw new VfxDiagnosticError([
     diagnostic(
-      'NACHI_TIMELINE_MESH_FX_MATERIAL_CLONE_UNSUPPORTED',
+      'NACHI_MESH_FX_MATERIAL_CLONE_UNSUPPORTED',
       'mesh-fx materials used in timeline elements must be created with @nachi/timeline fxMaterial() so instance controls can be regenerated safely.',
       path,
     ),
@@ -294,7 +294,7 @@ function validateTimelineMeshFxResource(resource: MeshFxRuntimeResource, key: st
   if (config?.time === undefined) return;
   throw new VfxDiagnosticError([
     diagnostic(
-      'NACHI_TIMELINE_MESH_FX_TIME_BINDING_UNSUPPORTED',
+      'NACHI_MESH_FX_TIME_BINDING_UNSUPPORTED',
       'Timeline mesh-fx materials must omit time so the timeline can own the writable effect-local clock.',
       `elements.${key}.material.time`,
     ),

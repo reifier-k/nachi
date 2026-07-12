@@ -189,6 +189,28 @@ function paintReadback(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): vo
   context.putImageData(image, 0, 0);
 }
 
+function visualReadbackStats(
+  pixels: ArrayLike<number>,
+  background: ArrayLike<number>,
+): { foregroundRatio: number; saturatedRatio: number } {
+  let foreground = 0;
+  let saturated = 0;
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    const difference =
+      Math.abs(Number(pixels[offset] ?? 0) - Number(background[offset] ?? 0)) +
+      Math.abs(Number(pixels[offset + 1] ?? 0) - Number(background[offset + 1] ?? 0)) +
+      Math.abs(Number(pixels[offset + 2] ?? 0) - Number(background[offset + 2] ?? 0));
+    const energy =
+      Number(pixels[offset] ?? 0) +
+      Number(pixels[offset + 1] ?? 0) +
+      Number(pixels[offset + 2] ?? 0);
+    if (difference > 8) foreground += 1;
+    if (energy > 744) saturated += 1;
+  }
+  const count = pixels.length / 4;
+  return { foregroundRatio: foreground / count, saturatedRatio: saturated / count };
+}
+
 function byteEqual(left: ArrayBufferView, right: ArrayBufferView): boolean {
   if (left.byteLength !== right.byteLength) return false;
   const a = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
@@ -454,8 +476,13 @@ async function run(): Promise<void> {
     byteEqual(deterministicReference.leafPosition, duplicateState.leafPosition) &&
     byteEqual(deterministicReference.leafRotation, duplicateState.leafRotation);
 
+  const backgroundPixels = await render([]);
   const fireflyPixels = await render([primary.fireflies]);
   const leafPixels = await render([primary.leaves]);
+  const visual = {
+    fireflies: visualReadbackStats(fireflyPixels, backgroundPixels),
+    leaves: visualReadbackStats(leafPixels, backgroundPixels),
+  };
   paintReadback(requireElement<HTMLCanvasElement>('#ambient-fireflies'), fireflyPixels);
   paintReadback(requireElement<HTMLCanvasElement>('#ambient-leaves'), leafPixels);
 
@@ -514,6 +541,13 @@ async function run(): Promise<void> {
       liveFireflyPositions.length > 0 && positionVariance > 0.001 && maximumFireflyRadius < 6,
     leavesFallAndRotate,
     scaleSignificanceStress,
+    visualReadbackBounds:
+      visual.fireflies.foregroundRatio > 0.0005 &&
+      visual.fireflies.foregroundRatio < 0.12 &&
+      visual.leaves.foregroundRatio > 0.001 &&
+      visual.leaves.foregroundRatio < 0.25,
+    visualReadbackNotSaturated:
+      visual.fireflies.saturatedRatio < 0.01 && visual.leaves.saturatedRatio < 0.01,
     // Churn bands scale with capacity: 28 / 128 ~= 22% for fireflies and
     // 22 / 160 ~= 14% for leaves, covering each emitter's expected spawn/retire cadence.
     steadyState:
@@ -546,9 +580,13 @@ async function run(): Promise<void> {
       leafAliveBand: 22,
       leafMinimumRotationDelta: 0.01,
       simulatedSeconds: 12,
+      visualFireflyForegroundRatio: { maximum: 0.12, minimum: 0.0005 },
+      visualLeafForegroundRatio: { maximum: 0.25, minimum: 0.001 },
+      visualSaturatedRatioMaximum: 0.01,
     },
     stress: { instanceCount: stressInstances.length, ...stressCounts },
     validation,
+    visual,
   };
   root.dataset.artifactScreenshots = JSON.stringify([
     { filename: 'golden-ambient-fireflies.png', selector: '#ambient-fireflies' },

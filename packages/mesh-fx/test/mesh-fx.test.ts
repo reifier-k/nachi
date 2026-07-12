@@ -226,7 +226,7 @@ describe('@nachi/mesh-fx Blender VAT runtime', () => {
       });
     } catch (error) {
       expect((error as MeshFxDiagnosticError).diagnostic).toMatchObject({
-        code: 'NACHI_MESHFX_INVALID_PARAMETER',
+        code: 'NACHI_MESH_FX_INVALID_PARAMETER',
         path: 'resolveVatFrames.interpolation',
       });
     }
