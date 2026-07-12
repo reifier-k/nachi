@@ -4,19 +4,24 @@
   "license": "MIT",
   "private": true,
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachi-vfx/nachi.git",
+    "directory": "apps/playground"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:*",
-    "@nachi/format": "workspace:*",
-    "@nachi/mesh-fx": "workspace:*",
-    "@nachi/post": "workspace:*",
-    "@nachi/timeline": "workspace:*",
-    "@nachi/trails": "workspace:*",
-    "@nachi/tsl-kit": "workspace:*",
+    "@nachi/core": "workspace:^",
+    "@nachi/format": "workspace:^",
+    "@nachi/mesh-fx": "workspace:^",
+    "@nachi/post": "workspace:^",
+    "@nachi/timeline": "workspace:^",
+    "@nachi/trails": "workspace:^",
+    "@nachi/tsl-kit": "workspace:^",
     "three": "0.185.1",
     "tweakpane": "4.0.5"
   },

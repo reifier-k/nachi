@@ -1,8 +1,23 @@
 {
   "name": "@nachi/core",
   "version": "0.0.0",
+  "description": "GPU-first deterministic particle simulation and VFX runtime for Three.js",
+  "keywords": [
+    "three.js",
+    "webgpu",
+    "vfx",
+    "particles",
+    "simulation"
+  ],
   "license": "MIT",
+  "sideEffects": false,
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachi-vfx/nachi.git",
+    "directory": "packages/core"
+  },
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -10,10 +25,15 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node ../../tools/check-package-esm.mjs .",
+    "prepublishOnly": "pnpm build",
     "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

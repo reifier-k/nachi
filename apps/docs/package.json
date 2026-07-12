@@ -1,0 +1,19 @@
+{
+  "name": "@nachi/docs",
+  "version": "0.0.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachi-vfx/nachi.git",
+    "directory": "apps/docs"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite --host 0.0.0.0"
+  },
+  "devDependencies": {
+    "vite": "7.3.1"
+  }
+}

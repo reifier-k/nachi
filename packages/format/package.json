@@ -17,6 +17,7 @@
     "url": "git+https://github.com/nachi-vfx/nachi.git",
     "directory": "packages/format"
   },
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -24,7 +25,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node ../../tools/check-package-esm.mjs .",
@@ -32,7 +34,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:*"
+    "@nachi/core": "workspace:^"
   },
   "publishConfig": {
     "access": "public"

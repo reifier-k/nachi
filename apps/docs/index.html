@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="nachi code-first WebGPU VFX documentation and demos" />
+    <title>nachi — code-first WebGPU VFX</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <nav>
+        <a class="brand" href="#top">nachi</a><a href="#start">Start</a><a href="#guides">Guides</a
+        ><a href="#gallery">Gallery</a><a href="#api">API</a>
+      </nav>
+      <div id="top" class="hero-copy">
+        <p class="eyebrow">TSL · WebGPU · Three.js</p>
+        <h1>VFX authored as code,<br />scheduled like Niagara.</h1>
+        <p>
+          Composable particle modules, timelines, fluid grids, neighbor simulation, and debugging —
+          without an editor runtime.
+        </p>
+        <div class="actions">
+          <a class="button" href="#start">Build your first effect</a
+          ><a class="text-link" href="../playground/">Open playground →</a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section id="start">
+        <p class="eyebrow">Getting started</p>
+        <h2>From install to first burst</h2>
+        <div class="steps">
+          <article>
+            <span>01</span>
+            <h3>Install</h3>
+            <pre><code>pnpm add @nachi/core three@0.185.1</code></pre>
+          </article>
+          <article>
+            <span>02</span>
+            <h3>Define</h3>
+            <pre><code>const sparks = defineEmitter({
+  capacity: 512,
+  spawn: burst({ count: 120 }),
+  init: [positionSphere({ radius: .2 }), lifetime(.8)],
+  update: [gravity(-9.8), drag(.35)],
+  render: billboard({ blending: 'additive' }),
+})
+
+const effect = defineEffect({ elements: { sparks } })</code></pre>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>Play</h3>
+            <pre><code>const system = new VFXSystem(runtimeRenderer)
+const instance = system.spawn(effect, { position: hitPoint })
+
+// game loop
+await system.update(deltaSeconds)
+
+// teardown
+instance.release()</code></pre>
+          </article>
+        </div>
+        <aside class="react-note">
+          <strong>Using R3F?</strong> Install <code>@nachi/react</code>, wrap effects in
+          <code>&lt;VFXSystemProvider renderer={runtimeRenderer}&gt;</code>, then mount
+          <code>&lt;VFXEffect definition={effect} /&gt;</code>. The provider drives updates and the
+          component releases automatically.
+        </aside>
+      </section>
+
+      <section id="guides">
+        <p class="eyebrow">Core guides</p>
+        <h2>The complete authoring path</h2>
+        <div class="guide-grid">
+          <article>
+            <h3>Emitters</h3>
+            <p>
+              Choose capacity and deterministic burst, rate, or distance spawning. Lifecycle,
+              prewarm, looping, bounds, and quality stay declarative.
+            </p>
+          </article>
+          <article>
+            <h3>Modules</h3>
+            <p>
+              Compose Init and Update behavior in author order. Access manifests make dynamic
+              attributes and custom TSL scratch modules inspectable.
+            </p>
+          </article>
+          <article>
+            <h3>Timeline</h3>
+            <p>
+              Sequence play, stop, markers, camera shake, and hit stop on an effect-local clock with
+              deterministic loop boundaries.
+            </p>
+          </article>
+          <article>
+            <h3>Scalability</h3>
+            <p>
+              Use four quality tiers, distance/frustum culling, significance scores, particle
+              budgets, and bounded resource pools.
+            </p>
+          </article>
+          <article>
+            <h3>Simulation cache</h3>
+            <p>
+              Bake renderer-read attributes to Float32 or quantized binary snapshots and replay
+              without scheduling simulation kernels.
+            </p>
+          </article>
+          <article>
+            <h3>Debugger</h3>
+            <p>
+              Capture logical particle rows and frame-local profiles through the serialized system
+              queue; unavailable GPU timing remains explicit.
+            </p>
+          </article>
+          <article>
+            <h3>Grid fluids</h3>
+            <p>
+              Run packed Grid2D/3D stages for injection, advection, buoyancy, Jacobi pressure,
+              projection, and particle transfer.
+            </p>
+          </article>
+          <article>
+            <h3>Neighbors</h3>
+            <p>
+              Build a bounded GPU neighbor grid for flocking, custom neighbor TSL, and iterative
+              Jacobi PBD distance constraints.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="gallery">
+        <p class="eyebrow">Golden gallery</p>
+        <h2>Seven effects, one runtime model</h2>
+        <div class="gallery">
+          <a href="../playground/golden-slash/"
+            ><img src="/gallery/golden-slash.png" alt="Golden slash effect" /><span
+              >01 · Slash</span
+            ></a
+          >
+          <a href="../playground/golden-explosion/"
+            ><img src="/gallery/golden-explosion.png" alt="Golden explosion effect" /><span
+              >02 · Explosion</span
+            ></a
+          >
+          <a href="../playground/golden-charge/"
+            ><img src="/gallery/golden-charge.png" alt="Golden charge magic circle" /><span
+              >03 · Charge circle</span
+            ></a
+          >
+          <a href="../playground/golden-ambient/"
+            ><img src="/gallery/golden-ambient.png" alt="Golden ambient leaves" /><span
+              >04 · Ambient loop</span
+            ></a
+          >
+          <a href="../playground/golden-ultimate/"
+            ><img src="/gallery/golden-ultimate.png" alt="Golden ultimate cut-in" /><span
+              >05 · Ultimate</span
+            ></a
+          >
+          <a href="../playground/golden-character/"
+            ><img src="/gallery/golden-character.png" alt="Golden character attachment" /><span
+              >06 · Character attach</span
+            ></a
+          >
+          <a href="../playground/golden-fluid/"
+            ><img src="/gallery/golden-fluid.png" alt="Golden fluid smoke" /><span
+              >07 · Fluid smoke</span
+            ></a
+          >
+        </div>
+      </section>
+
+      <section id="api" class="api-panel">
+        <div>
+          <p class="eyebrow">API reference</p>
+          <h2>Contracts before convenience.</h2>
+          <p>
+            The normative RFC documents stage semantics, runtime ownership, diagnostics,
+            serialization, and package boundaries. Package READMEs provide focused entry points.
+          </p>
+        </div>
+        <div class="api-links">
+          <a href="https://github.com/nachi-vfx/nachi/blob/main/docs/rfc/001-api.md"
+            >RFC 001 · Public API →</a
+          ><a href="https://github.com/nachi-vfx/nachi#readme">Monorepo package index →</a
+          ><a
+            href="https://github.com/nachi-vfx/nachi/blob/main/docs/rfc/002-effekseer-compatibility.md"
+            >Effekseer compatibility study →</a
+          >
+        </div>
+      </section>
+    </main>
+    <footer>
+      <span>nachi · pre-1.0 documentation build</span><a href="#top">Back to top ↑</a>
+    </footer>
+  </body>
+</html>

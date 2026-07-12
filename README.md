@@ -1,14 +1,87 @@
 # nachi
 
-Niagara parity through a code-first, TSL/WebGPU-native VFX library for Three.js.
+Code-first, TSL/WebGPU-native VFX for Three.js, designed around Niagara's staged simulation model.
+Nachi is pre-1.0; M12 now includes JSON assets, advanced simulation, React Three Fiber bindings,
+release automation, and a buildable documentation gallery.
 
-**Status:** M12 batches 1–4 implemented. `@nachi/format` provides the strict `nachi-effect` v1
-JSON envelope, schema, serializer/loader, explicit migrations, and asset-reference emitter
-inheritance. Golden #5 now runs from a JSON-loaded definition and compares its timeline actions and
-GPU particle bytes with the code-authored control. Core now also provides effect-element
-`defineGrid2D()`/`defineGrid3D()` data interfaces and repeated `defineSimStage()` compute stages,
-including `/m12-grid/`, `/m12-neighbors/`, and Golden #7 `/golden-fluid/`. M12 integration review remains a pre-alpha
-gate.
+## Packages
+
+| Package           | Purpose                                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `@nachi/core`     | Definitions, particle modules, compiler, GPU scheduler, scalability, sim cache, debugger, Grid2D/3D, and neighbor grids |
+| `@nachi/format`   | Strict `nachi-effect` v1 JSON schema, serializer/loader, migrations, and asset inheritance                              |
+| `@nachi/react`    | Thin R3F provider, hook, component lifecycle, and `Object3D` attachment                                                 |
+| `@nachi/timeline` | Effect-local sequencing, camera shake, hit stop, markers, and mesh-fx lifecycle                                         |
+| `@nachi/trails`   | GPU ribbons and trails                                                                                                  |
+| `@nachi/mesh-fx`  | Procedural effect geometry, `fxMaterial`, and Blender VAT playback                                                      |
+| `@nachi/post`     | RenderPipeline distortion, radial blur, bloom presets, and WebGPU WBOIT                                                 |
+| `@nachi/tsl-kit`  | Standalone Three.js TSL shader building blocks                                                                          |
+
+The repository also contains the Vite [playground](./apps/playground) and static
+[documentation site](./apps/docs).
+
+## Install
+
+Core Three.js usage:
+
+```sh
+pnpm add @nachi/core three@0.185.1
+```
+
+React Three Fiber usage keeps React, R3F, and Three as peers:
+
+```sh
+pnpm add @nachi/core @nachi/react react @react-three/fiber three@0.185.1
+```
+
+## Quick start
+
+```ts
+import {
+  VFXSystem,
+  billboard,
+  burst,
+  defineEffect,
+  defineEmitter,
+  drag,
+  gravity,
+  lifetime,
+  positionSphere,
+} from '@nachi/core';
+
+const sparks = defineEmitter({
+  capacity: 512,
+  spawn: burst({ count: 120 }),
+  init: [positionSphere({ radius: 0.2 }), lifetime(0.8)],
+  update: [gravity(-9.8), drag(0.35)],
+  render: billboard({ blending: 'additive' }),
+});
+
+const effect = defineEffect({ elements: { sparks } });
+const system = new VFXSystem(runtimeRenderer);
+const instance = system.spawn(effect, { position: [0, 1, 0], seed: 42 });
+
+await system.update(deltaSeconds);
+instance.release();
+```
+
+In R3F, mount the runtime adapter once and let the binding own instance cleanup:
+
+```tsx
+<Canvas>
+  <VFXSystemProvider renderer={runtimeRenderer}>
+    <VFXEffect definition={effect} attachTo={weaponSocket} />
+  </VFXSystemProvider>
+</Canvas>
+```
+
+`useEffectInstance()` is the hook form. Live `parameters`, transform, time scale, and attachment are
+forwarded to core; changing seed or priority creates a fresh instance. Keep `definition` at module
+scope (or otherwise referentially stable), because changing its reference respawns the instance.
+`attachTo` owns the complete live transform and overwrites spawn/prop position and rotation on each
+scheduled step.
+
+## Assets and advanced simulation
 
 ```ts
 import { loadEffect, serializeEffect } from '@nachi/format';
@@ -17,74 +90,29 @@ const document = serializeEffect(effect);
 const loaded = loadEffect(JSON.stringify(document));
 ```
 
-Only the declarative subset is accepted. Inline `tslModule()` callbacks, raw Three.js resources,
-class instances, functions, and cyclic graphs fail with path-specific `NACHI_ASSET_*` diagnostics;
-registered function/resource references—including `tslModule(defineTslFunction(...))`—remain JSON
-data.
+Only the declarative subset is serializable. Inline callbacks, functions, live Three.js resources,
+class instances, and cycles fail with path-specific `NACHI_ASSET_*` diagnostics. Grid2D/3D stages,
+neighbor-grid declarations, built-in fluid stages, boids, and PBD constraints are part of the v1
+declarative model; inline custom grid/neighbor TSL remains code-only.
 
-```ts
-const fluid = defineGrid2D({
-  resolution: [64, 64],
-  channels: {
-    density: { type: 'f32' },
-    temperature: { type: 'f32' },
-    velocity: { type: 'vec2' },
-    pressure: { type: 'f32' },
-  },
-});
+Simulation caches use `bakeSimulation()` and `replaySimulation()`. Runtime debugging uses
+`instance.debug.captureAttributes()` and `system.debug.captureProfile()`.
 
-const pressure = defineSimStage({
-  target: 'fluid',
-  iterations: 8,
-  update: gridPressureJacobi(),
-});
-```
-
-Grid stages run before or after the ordinary particle schedule and use separate backend submissions
-for every update/commit iteration. WebGL2 reports `NACHI_GRID2D_WEBGL2_UNSUPPORTED`; it does not
-pretend transform feedback supplies arbitrary grid addressing or atomics.
-
-```ts
-const smoke = defineGrid3D({
-  resolution: [32, 32, 32],
-  channels: {
-    density: { type: 'f32' },
-    velocity: { type: 'vec3', default: [0, 0, 0] },
-    temperature: { type: 'f32' },
-    pressure: { type: 'f32' },
-  },
-});
-
-const advect = defineSimStage({ target: 'smoke', update: grid3DAdvect() });
-const memory = estimateGrid3DMemory(smoke);
-```
-
-Grid3D uses the same packed current/scratch buffers and submit-separated ping-pong contract,
-with trilinear sampling and explicit cubic memory estimates. Grid-to-particle density sampling feeds
-the minimal slice/billboard volume path. WebGL2 reports `NACHI_GRID3D_WEBGL2_UNSUPPORTED`.
-
-Neighbor search uses `defineNeighborGrid({ resolution, cellSize, cellCapacity, origin })` plus
-`boids()`, `pbdDistanceConstraint()`, or the code-only `neighborGridTslModule()` iterator. Buckets
-are rebuilt before particle update with fixed atomic slots; overflow is dropped and exposed by
-`instance.getNeighborGrid(key).capture()`. Search radius is measured in cells. WebGL2 reports
-`NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED`.
+## Development and release checks
 
 ```sh
-node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgpu
-node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgl
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm prettier
+pnpm build
+pnpm docs:build
+pnpm release:dry  # build + every package ESM import gate + npm publish --dry-run
 ```
 
-Simulation caches use `bakeSimulation(system, effect, { frames, frameRate, compression, loop })` and
-`replaySimulation(system, effect, cache)`. Assets stay loader-friendly as metadata JSON plus an
-`ArrayBuffer`; only render-read attributes are recorded. Float32 and component-wise u16 quantization,
-nearest/linear playback, endpoint-validated loops, time scale, play/stop, and memory estimates are
-available. WebGL2 supports compatible burst baking but reports replay unsupported until its renderer
-can bind restored alive indirection.
+Changesets are independently versioned: run `pnpm changeset`, then `pnpm version-packages` when a
+release versioning pass is intended. `release:dry` never publishes.
 
-Runtime debugging uses
-`await instance.debug.captureAttributes(emitterId, { attributes, offset, limit })` and
-`system.debug.captureProfile({ gpuTiming })`. Attribute rows preserve alive/physical-slot and
-spawn-generation/order lineage with explicit truncation metadata. Profiler GPU values reuse the
-cached `nachi.perf-baseline` v1 pass timing; unavailable timestamps remain null with diagnostics.
-
-Project references: [PLAN.md](./PLAN.md), [ROADMAP.md](./ROADMAP.md), and [CLAUDE.md](./CLAUDE.md).
+Design and status: [PLAN.md](./PLAN.md), [ROADMAP.md](./ROADMAP.md), normative
+[API RFC](./docs/rfc/001-api.md), and the
+[Effekseer compatibility study](./docs/rfc/002-effekseer-compatibility.md).

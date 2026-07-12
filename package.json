@@ -1,21 +1,33 @@
 {
   "name": "nachi-workspace",
   "version": "0.0.0",
+  "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachi-vfx/nachi.git"
+  },
   "engines": {
     "node": ">=24"
   },
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "dev": "pnpm --filter @nachi/playground dev",
+    "docs:dev": "pnpm --filter @nachi/docs dev",
+    "docs:build": "pnpm --filter @nachi/docs build",
     "build": "pnpm -r --if-present build",
     "test": "vitest run",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint .",
     "prettier": "prettier --check .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "esm:check": "node tools/check-all-package-esm.mjs",
+    "release:dry": "pnpm build && pnpm esm:check && node tools/release-dry.mjs"
   },
   "devDependencies": {
+    "@changesets/cli": "2.29.7",
     "@eslint/js": "9.39.2",
     "@types/node": "24.10.13",
     "eslint": "9.39.2",

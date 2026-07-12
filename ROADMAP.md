@@ -35,6 +35,7 @@
 
 | Niagara機能 | 対応マイルストーン | 状態 |
 |---|---|---|
+| 2026-07-12 | **M12バッチ5 検収・レビュー・裁定: 受入(コミット)。M12実装項目完了(残は監査のみ)**。エコシステム4項目: `@nachi/react`(Provider/useVFXSystem/useEffectInstance/VFXEffect、useFrame駆動、Object3D追従、StrictModeダブルマウント実測で釣り合い確認、store-before-forward禁止準拠)+changesetsリリース準備(release:dry=`--dry-run --offline --ignore-scripts`ハードコードで実publish経路なし、check-all-package-esm一括ゲート)+`apps/docs`静的サイト(入門+8ガイド+ゴールデン7枚ギャラリー、Getting Startedコードは現行API全一致をレビュー確認)+RFC 002 Effekseer調査(一次ソースURL疎通・実装見積り8-12週subset/20-30週広域、**裁定: 実装は1.0以降へ延期**) ①Claudeレビュー: **FAIL(BLOCKER 1)** — [B1]spawn失敗(error状態インスタンス)×immutableパラメータでparameter effectが全既定値を再転送し`NACHI_PARAMETER_IMMUTABLE`throw=**Reactツリー全体クラッシュ**(device loss後の新規マウントやpathタイポで発生、再現テスト付き)→error状態では転送スキップへ修正 [S2]@nachi/coreだけ公開メタデータ/changeset漏れ [S3]`workspace:*`はnpm packで書き換えられず検証tarballが実公開産物と乖離→`workspace:^`統一 [S4]LICENSE本文5パッケージ欠落 [S5]repository URL 404=公開前確定事項としてFA項目へ明記 [S6]README R3F例のposition×attachTo併用(attachToは毎ステップtransform丸上書き)→修正+挙動明記 [N7-N12]types/three peer・onInstance再発火・安定参照注意等消化 ②最終: 全ゲート緑(typecheck/lint/test 518本/build/release:dry/docs:build/esm-all)、スモーク回帰緑。**確定知見: R3F系ラッパーは「error状態インスタンス」への操作転送を全経路でゲートする**(coreの穏やかな縮退設計をラッパーが例外へ昇格させない) |
 | 2026-07-12 | **M12バッチ4 検収・レビュー・裁定: 受入(コミット)**。neighbor grid(空間ハッシュ、atomic count+cell-major固定slot、溢れドロップ+計数readback、position/velocity snapshot)+boids(separation/alignment/cohesion)+PBD距離拘束(Jacobi半分補正、反復submit分割)+`/m12-neighbors/`6検証+format往復+WebGL2/上限/未消費の診断群。①検収差し戻し4件: (a)timestamp計測が正しさ検証rendererに混在=M11監査B5パターンの再発(`THREE.Error resolving queries`でデバイスロスト)→m11-cacheパターンで分離 (b)**走査の全展開codegen**: forEachNeighborがJS時に(2r+1)³×cellCapacityを全unroll、radius 1=432 branchブロックの巨大WGSLでSwiftShader GPUプロセス死亡(統括の二分探索: radius 0=16ブロック生存/radius 1即死で規模起因を確定)→**動的TSL Loop化**(z→y→x→slotランタイムループ、signed intオフセット、radius非依存のシェーダ規模。adapterへloopプリミティブ追加) (c)クラッシュ状態で記録された汚染基準の削除・再記録 (d)boids凝集ゲート校正(30f=8.5%減で閾値10%未達→100f=21%減) ②Claudeレビュー: **PASS(BLOCKER 0/SHOULD 1/NIT 4)** — 独立GPUプローブで非立方5×4×3格子×120粒子のradius 1/2近傍集合(コーナー・エッジのクランプ込み)がCPUレプリカと完全一致、bucket slot集合60セル一致、overflow計数厳密(13/5/1)、boids cohesionのΔvが古典式とf32一致、PBD対称性・反復submit検算 ③[S1]boidsが自粒子velocityをsnapshotから再基底化し同フレーム先行モジュール書込を破棄(gravity→boids順で重力消失をプローブ実証、近傍有無で粒子毎非一貫)→**自状態live読み/近傍snapshot読みの基底規定**へ修正+RFC明記+回帰テスト。[N1]statsクリア漏れ [N2]デッド定数 [N3]radius切り詰めwarning診断2種 [N4]PBD一致座標の方式限界明記も消化 ④最終: 両バックエンド全緑、テスト515本、回帰13ページ緑、基準m12-neighbors.png目視済み。**確定知見: 近傍走査などO(定数^3×容量)の合成カーネルはJS unrollでなくGPU動的ループで生成する**(シェーダ規模がバックエンドコンパイラを殺す)/**合成モジュールの自状態はlive属性・他者状態はsnapshotが基底規定**(snapshot再基底化は先行モジュールの書込を破棄する) |
 | 2026-07-12 | **M12バッチ3 検収・レビュー・裁定: 受入(コミット)。🎯ゴールデン#7「流体風の煙」達成=ゴールデンエフェクト7/7全達成**。Grid3D流体(x-fast添字、8-tapトライリニア、3D移流/浮力/散逸/注入/6近傍Jacobi/射影、estimateGrid3DMemory+`NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED`、defineSimStageのGrid2D/3D両対応+kind mismatch診断)+`/golden-fluid/`(32³煙108フレーム、渦形成対向速度注入)。①検収差し戻し2件(統括プローブで真因確定): (a)longRun600Stable=検証オブジェクト構築が`renderer.dispose()`の後にあり、device lostラッチが積む`NACHI_DEVICE_LOST`を読んでいた順序バグ(dispose前=診断0・安定を実測)→dispose前スナップショット化 (b)drawn閾値35が実測31で未達=実GPU無し校正 ②品質差し戻し1件: 視覚がパフ止まり→108フレーム+浮力/注入強化+渦注入で「立ち上る煙柱+頭部の膨らみ」へ(重心0.094→0.493、drawn 465、スパン0.94=CPUレプリカ校正とGPU実測一致、基準再記録+統括目視合格) ③Claudeレビュー: **PASS(BLOCKER 0/SHOULD 2/NIT 3)** — 3D添字の5経路一貫(CPU/デコード/エンコード/raster/snapshot)を非対称格子GPU実測で確認、トライリニア手計算一致、Jacobi係数正、上限診断の境界条件(ちょうど上限=非発火)実測、バッチ2指摘(範囲ガード/戻り値検証/単位系/export面)の踏襲確認、弁別性(移流なし→drawn13で棄却等)確認 ④SHOULD 2件消化: rasterizeGrid3DPoints CPUミラー+GPU rasterize検証(第2グループ)追加、上限診断の境界フィクスチャ追加、診断集約順序修正 ⑤最終: golden-fluid両バックエンド+m12-grid+ゴールデン回帰全緑、テスト499本、全静的ゲート緑。**確定知見: 検証オブジェクトの構築はGPUリソースdispose前に値を確定する**(device lostラッチが遅延で診断を汚染する)/**閾値校正はCPUレプリカ+GPU実測の突合で行う** |
 | 2026-07-12 | **M12バッチ2 検収・レビュー・裁定: 受入(コミット)**。Grid2D流体+sim stages基盤: `defineGrid2D()`(packed vec4 storage、current+scratch 2バッファ)+effect要素`defineSimStage()`(before/after-particles、iterations毎submit分割)+半ラグランジュ移流・浮力・散逸・Jacobi 8反復圧力射影+fixed-point atomic raster(scale 4096)/バイリニアsample+`/m12-grid/`8検証+format往復+WebGL2は`NACHI_GRID2D_WEBGL2_UNSUPPORTED`明示拒否。①Claudeレビュー: **PASS(BLOCKER 0/SHOULD 4/NIT 6)** — 流体数学は全検算一致(移流バックトレース0.99厳密/散逸e^-k誤差2.5e-8/JacobiはGPU Gems標準形/y鏡像・転置プローブ0)、submit計数745厳密一致、ping-pongハザードなし、スケジューラ統合はpause/カリング/プール/spawn失敗の全経路でgrid解放を確認、8検証の弁別性を偽実装5種の棄却で確認 ②SHOULD全4+NIT全6をCodexで消化: [S1]**全gridカーネルへinvocation範囲ガード**(three r185はceil(cells/64) dispatchのみでガード非生成。WebGPU仕様上OOB書込は破棄or同一バインディング内任意位置が許容され、Tintクランプ実装=Metal系では余剰スレッドが最終セルを競合上書きし得る移植性リスク。SwiftShaderでは破棄実装と実測済みだが3層検証はMetalを踏まないため予防) [S2]custom stage factory戻り値の宣言チャネル照合+成分数診断 [S3]custom stage実行経路+未解決診断2種のruntimeテスト [S4]grid含む定義のbakeに`NACHI_SIM_CACHE_GRID2D_NOT_RECORDED`警告+RFC規定(v1キャッシュはgrid状態を記録しない) [N1]RFC dispatch同期記述をthree実測知見帰属へ修正 [N2]rasterize負値・非有限のCPU拒否 [N3]grid内部exportの公開面過大(M11監査B3の再発形)→明示export化 [N4]単位系明記 [N5]schema詳細化 [N6]dt=0初期化文書化 ③最終: /m12-grid/両バックエンド全緑(数値回帰なし)、golden-ultimate/m11-cache回帰緑、テスト490本、全静的ゲート緑。視覚基準m12-grid.png(注入源+上昇プルーム、非対称位置)は取得時目視確認済み |
@@ -68,9 +69,9 @@
 | スケーラビリティ(品質段階・significance・プーリング) | M11 | ✅ 残差分: Effect Type共有資産/per-platform profile/オクルージョンカリング/cull proxy/カスタムsignificanceハンドラ/動的FXバジェット自動降格なし |
 | sim caching(ベイク&リプレイ) | M11 | ✅ 残差分: Texture/Volume系Baker出力/全属性キャッシュ/Sequencerスクラブ統合/world-space rebase/velocity外挿/WebGL2 replayなし |
 | デバッガ(属性スプレッドシート・プロファイラ) | M11 | ✅ 残差分: 連続ストリーミング表示/System名前空間値/式フィルタ/FX Outliner/remote Session Browser/モジュール別・エミッタ別GPU時間配賦なし |
-| アセットフォーマット&ローダ | M12 | ⬜ |
+| アセットフォーマット&ローダ | M12 | ✅ `@nachi/format` v1、Golden #5 JSONロード |
 | Grid2D/3D流体(Niagara Fluids相当) | M12 | ✅ Grid2Dバッチ2+Grid3Dバッチ3(packed DI、半ラグランジュ流体、trilinear、粒子sample volume、WebGL2明示診断) |
-| Neighbor grid / boids / PBD | M12 | ⬜ |
+| Neighbor grid / boids / PBD | M12 | ✅ バッチ4受入済み |
 
 ## M0 — 基盤とスパイク ✅(条件付きPASS)
 
@@ -201,13 +202,13 @@
 
 - [x] JSONアセットフォーマットv1(スキーマ、シリアライザ、ローダ、バージョンマイグレーション) — バッチ1受入済み(2026-07-12): `@nachi/format`、`nachi-effect` v1封筒、NACHI_ASSET_*厳格検証(深度上限・疎配列・参照構文含む)、明示migration registry、asset emitter extends(外部resolver+循環検出)、registration形tslModuleのJSON化
 - [x] 🎯 ゴールデン#5がJSONからロードして再生できる — バッチ1受入済み(2026-07-12): `/golden-ultimate/`主経路をJSONロードへ変更し、コード版とのtimeline action列+GPU属性byte等価を常設(jsonGpuEquivalent実測緑)。既存スクショ基準0差分
-- [ ] R3Fバインディング(@nachi/react)
-- [ ] ドキュメントサイト+デモギャラリー公開
-- [ ] npm公開(changesets等でリリース自動化)
+- [x] R3Fバインディング(@nachi/react) — バッチ5受入済み(2026-07-12): `VFXSystemProvider`/`useVFXSystem`/`useEffectInstance`/`VFXEffect`、useFrame駆動、Object3D追従、cleanup release、FakeRuntimeRendererライフサイクルunit
+- [x] ドキュメントサイト+デモギャラリー公開準備 — バッチ5受入済み(2026-07-12): `apps/docs`の軽量Vite静的サイト、入門+主要8ガイド、既存playgroundリンク、ゴールデン7枚の静的コピー。デプロイは未実施
+- [x] npm公開準備(changesets等でリリース自動化) — Changesets独立version、全公開パッケージESM一括ゲート、`release:dry`。実publishは未実施
 - [x] Grid2Dスモーク/炎シミュレーション(sim stages基盤) — バッチ2受入済み(2026-07-12): `defineGrid2D()`+effect-element `defineSimStage()`、iterationごとのsubmit分割、packed vec4 storage、cell read/write+bilinear、fixed-point atomic particle raster/sample、移流+浮力+散逸+Jacobi圧力、`/m12-grid/`、format往復、WebGL2診断
 - [x] Grid3D流体(Niagara Fluids相当、ストレッチ) — バッチ3受入済み(2026-07-12): packed vec4 current/scratch、trilinear、3D移流/浮力/散逸/注入/Jacobi射影、メモリ見積り+device limit診断、粒子sample billboard volume
 - [x] neighbor grid(boids)、PBD的拘束(ストレッチ) — バッチ4受入済み(2026-07-12): atomic固定slot bucket+overflow readback、before-particles再構築、TSL近傍iterator、boids、submit分割Jacobi PBD、`/m12-neighbors/`、format往復、WebGL2明示拒否
-- [ ] Effekseerインポータ調査(実装判断はここで)
+- [x] Effekseerインポータ調査(実装判断はここで) — バッチ5受入済み(2026-07-12)、**統括裁定: 調査完了・実装は1.0以降へ延期を採用**。RFC 002に構造/対応/非対応/8–12週subset・20–30週+広域見積りを記録。推奨裁定は「調査完了、実装は1.0以降へ延期」
 - [x] 🎯 ゴールデン#7「流体風の煙」が動く — バッチ3受入済み(2026-07-12)、**ゴールデン7/7全達成**。`/golden-fluid/`: 32³煙、密度sample粒子、重心上昇/3軸非対称/圧力反復/600f安定/飽和上限/console/perf、WebGL2拒否スモーク
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
@@ -223,13 +224,14 @@
 - [ ] API安定性レビュー:RFC最終整合、semver方針の明文化、非推奨・実験的APIの整理
 - [ ] ドキュメント完全性:全公開APIリファレンス、入門ガイド、Niagaraユーザー向け対応表、デモギャラリー
 - [ ] バンドルサイズ計測と予算判定(tree-shaking検証、パッケージ別サイズ表)
-- [ ] npm publish dry-run、README/CHANGELOG最終化
+- [ ] npm publish dry-run、README/CHANGELOG最終化 — 公開前にorg/リポジトリ名を確定し、プレースホルダ `nachi-vfx/nachi` を全URLで差し替える
 - [ ] **1.0リリース判定**(不合格項目は該当マイルストーンへ差し戻し、修正後にFA再実施)
 
 ## セッションログ
 
 | 日付 | セッション成果 |
 |---|---|
+| 2026-07-12 | **M12バッチ5「エコシステム」実装**: `@nachi/react`のProvider/hook/component、R3F frame駆動、Object3D attach、parameter検証後commit、unmount releaseとモックR3F+FakeRuntimeRenderer unitを追加。Changesets独立version、公開metadata、全ESMゲート、全package `npm publish --dry-run`の`release:dry`を整備。`apps/docs`を軽量Vite静的サイトとして追加し、Getting Started、主要8ガイド、playgroundリンク、ゴールデン7枚を同梱。Effekseer `.efkefc`調査をRFC 002に記録し、1.0以降延期を推奨。実publish/デプロイは未実施。`packages/core`はno-touch制約を維持。 |
 | 2026-07-12 | **M12バッチ4実装(静的検収完了、GPU実測待ち)**: `defineNeighborGrid()`を追加し、1 emitterのalive positionを毎update前にatomic cell count+固定index slotへ再構築。cellCapacity overflow/out-of-boundsを明示drop+readback、position/velocity snapshotに対するradius-cell近傍走査とcode-only `neighborGridTslModule()`、古典boids、submit分割Jacobi pair-distance PBD(1〜N反復)を実装。`/m12-neighbors/`はCPU独立レプリカ近傍数、boids無効対照、PBD最小距離、過密overflow、submission、console/perf v1と`m12-neighbors.png`契約を公開。format v1閉構造round-trip、RFC§10.7/README/CLAUDE更新。WebGL2は`NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED`。GPU実測と画像取得時目視は統括検収へ。 |
 | 2026-07-12 | **M12バッチ3実装(静的検収完了、GPU実測待ち)**: Grid2D契約をGrid3Dへ拡張。`defineGrid3D()`、x-fast 3D添字、f32/vec3 packed vec4 current+scratch、8-tap trilinear、全kernel invocation guard、fixed-point particle rasterとdensity sample、3D注入/半ラグランジュ移流+散逸/浮力/6近傍Jacobi/3軸射影を追加。`defineSimStage()`はtarget実体の2D/3D kindを検証し同じbefore/after・submit分割・ping-pongを共有。`estimateGrid3DMemory()`は`32*C*G+24*C` byte内訳を公開し`maxStorageBufferBindingSize`/`maxBufferSize`超過を`NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED`で事前拒否。`/golden-fluid/`は32³密度をGPU sampleした粒子billboard、重心上昇/3軸非対称/圧力反復/600f安定/飽和上限/console/perfを検証し、WebGL2は`NACHI_GRID3D_WEBGL2_UNSUPPORTED`。format v1閉構造+登録参照round-trip、RFC§10.7/README/CLAUDEを更新。GPU実測と`golden-fluid.png`取得時目視は統括検収へ。 |
 | 2026-07-12 | **M12バッチ2実装(静的検収完了、GPU実測待ち)**: coreへGrid2D DIとeffect-element sim stagesを追加。密度/温度/速度/圧力をvec4セルレコードへ詰め、状態+scratchの2 storage bufferで上限を節約。before/after particle境界、反復ごとのstage+commit独立submit、inline/registered Grid TSL、GPU fixed-point atomic particle→gridとGPU bilinear grid→particleを実装。参照流体は半ラグランジュ移流+指数散逸+浮力+Jacobi圧力/射影。`/m12-grid/`は解析注入/散逸、非対称移流、1 vs N反復、独立粒子サンプル、live submit、単一画像/console/perfを公開し、WebGL2は`NACHI_GRID2D_WEBGL2_UNSUPPORTED`のみを検証。format v1へgrid/stage閉構造とinline拒否を追加。静的ゲートとGPU実測結果は本バッチ最終報告へ記録。 |

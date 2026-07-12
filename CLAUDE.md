@@ -6,12 +6,14 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 
 - `packages/core`: public `@nachi/core` API types, compiler, and particle runtime.
 - `packages/format`: `nachi-effect` JSON schema, strict serializer/loader, migrations, and asset inheritance.
+- `packages/react`: thin React Three Fiber provider/hook/component lifecycle binding.
 - `packages/trails`: ribbon/trail definitions and renderer integration.
 - `packages/tsl-kit`: standalone reusable Three Shading Language helpers.
 - `packages/mesh-fx`: procedural effect meshes, materials, and VAT runtime.
 - `packages/post`: RenderPipeline distortion/blur/bloom plus native-WebGPU weighted blended OIT.
 - `packages/timeline`: effect composition, sequencing, hit stop, and mesh-fx lifecycle runtime.
 - `apps/playground`: Vite/TypeScript playground plus compute and depth spikes.
+- `apps/docs`: lightweight Vite static documentation and seven-effect demo gallery.
 - `tools`: Playwright-based WebGPU probes, spike collection, and screenshots.
 - `docs/rfc`: normative design RFCs; keep implementation and RFC terminology aligned.
 
@@ -23,6 +25,9 @@ pnpm test       # Vitest
 pnpm typecheck  # all workspace TypeScript projects
 pnpm lint       # ESLint flat config
 pnpm build      # all workspace builds
+pnpm docs:build # static documentation artifact in apps/docs/dist
+pnpm changeset  # record independently versioned package changes
+pnpm release:dry # build + all package ESM gates + npm publish --dry-run; never publishes
 ```
 
 Tooling (run `pnpm dev` first unless noted):
@@ -152,6 +157,15 @@ counts plus fixed cell-major particle-index slots and rebuilds before each parti
 `(2r+1)^3 * cellCapacity` scan. PBD iterations require clear/bucket/constraint submit separation;
 the Jacobi snapshot is position/velocity only in v1. WebGL2 must report
 `NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED`.
+
+`@nachi/react` is lifecycle-only. `VFXSystemProvider` owns one core system and drives it with R3F
+`useFrame`; `useEffectInstance()`/`VFXEffect` release the exact spawned handle on cleanup. Live
+parameter props must be validated and forwarded by core before the binding records them. React,
+R3F, and Three are peers, with Three fixed to 0.185.1 for this release.
+
+Release metadata uses Changesets with independent package versions (`fixed`/`linked` are empty).
+The release gate imports every built public export in plain Node ESM and runs `npm publish
+--dry-run` for every public package. Do not replace `release:dry` with a real publish command.
 
 ## Three-layer verification
 

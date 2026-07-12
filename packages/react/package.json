@@ -1,12 +1,12 @@
 {
-  "name": "@nachi/mesh-fx",
+  "name": "@nachi/react",
   "version": "0.0.0",
-  "description": "Procedural Three.js VFX meshes and declarative NodeMaterial composition",
+  "description": "Thin React Three Fiber lifecycle bindings for nachi VFX systems",
   "keywords": [
+    "react",
+    "react-three-fiber",
     "three.js",
-    "tsl",
     "webgpu",
-    "mesh",
     "vfx"
   ],
   "license": "MIT",
@@ -15,7 +15,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nachi-vfx/nachi.git",
-    "directory": "packages/mesh-fx"
+    "directory": "packages/react"
   },
   "types": "./dist/index.d.ts",
   "exports": {
@@ -25,7 +25,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node ../../tools/check-package-esm.mjs .",
@@ -33,10 +34,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/tsl-kit": "workspace:^"
+    "@nachi/core": "workspace:^"
   },
   "peerDependencies": {
+    "@react-three/fiber": ">=9.0.0 <10.0.0",
     "@types/three": ">=0.185.0 <0.186.0",
+    "react": ">=19.0.0 <20.0.0",
     "three": "0.185.1"
   },
   "peerDependenciesMeta": {
@@ -48,7 +51,14 @@
     "access": "public"
   },
   "devDependencies": {
+    "@react-three/fiber": "9.3.0",
+    "@types/react": "19.1.9",
+    "@types/react-dom": "19.1.7",
+    "@types/react-test-renderer": "19.1.0",
     "@types/three": "0.185.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "react-test-renderer": "19.1.1",
     "three": "0.185.1"
   }
 }
