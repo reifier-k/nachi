@@ -49,6 +49,7 @@ export default defineConfig({
         m12Grid: 'm12-grid/index.html',
         m12Neighbors: 'm12-neighbors/index.html',
         showcaseBarrier: 'showcase-barrier/index.html',
+        showcaseBeam: 'showcase-beam/index.html',
         showcaseHeal: 'showcase-heal/index.html',
         showcaseIce: 'showcase-ice/index.html',
         showcaseMachina: 'showcase-machina/index.html',

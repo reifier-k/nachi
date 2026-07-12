@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi Plasma Lance</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">Showcase · ultimate beam attack</p>
+        <h1>Plasma Lance</h1>
+        <p>
+          Converging charge, vertical rune circle, a white-hot beam with a scrolling plasma
+          sheath and pulsing width, sustained impact blowback, hit stop, screen distortion,
+          and a residual ionized trail — authored end to end with @nachi.
+        </p>
+      </header>
+      <section class="stage" id="stage">
+        <canvas id="beam-visual" width="1920" height="720"></canvas>
+      </section>
+      <div class="labels" id="frame-labels"></div>
+      <dl>
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Mode</dt>
+          <dd id="mode-value">detecting</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd id="status-value">running</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/showcase-beam.ts"></script>
+  </body>
+</html>
