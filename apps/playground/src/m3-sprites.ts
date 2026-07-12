@@ -333,18 +333,23 @@ async function run(): Promise<void> {
     count: 1,
     map: translucentRef,
   });
+  const untexturedPremultiplied = await createSprite({
+    blending: 'premultiplied',
+    color: [1, 1, 1, 1],
+    count: 1,
+  });
   const opaquePremultiplied = await createSprite({
     blending: 'premultiplied',
     color: [1, 1, 1, 1],
     count: 1,
     map: opaqueControlRef,
   });
-  const translucentAlphaPixels = await render(translucentAlpha.mesh);
   const translucentPremultipliedPixels = await render(translucentPremultiplied.mesh);
+  const untexturedPremultipliedPixels = await render(untexturedPremultiplied.mesh);
   const opaquePremultipliedPixels = await render(opaquePremultiplied.mesh);
   const premultipliedTextureDifference = compareReadbacks(
-    translucentAlphaPixels,
     translucentPremultipliedPixels,
+    untexturedPremultipliedPixels,
   );
   const premultipliedOpacityDifference = compareReadbacks(
     translucentPremultipliedPixels,
@@ -566,6 +571,9 @@ async function run(): Promise<void> {
       premultipliedOpacityDifference.meanAbsoluteDifference > 0.05 &&
       centerBrightness(translucentPremultipliedPixels) <
         centerBrightness(opaquePremultipliedPixels),
+    premultipliedTextureDifference:
+      premultipliedTextureDifference.changedPixelRatio > 0.001 &&
+      premultipliedTextureDifference.meanAbsoluteDifference > 0.05,
     softIntersectionFade:
       softFadeDifference.changedPixelRatio > 0.001 &&
       softFadeDifference.meanAbsoluteDifference > 0.05 &&

@@ -142,14 +142,46 @@ function normalizedTimeline(definition: RuntimeDefinition): TimelineDefinition {
       ),
     );
   }
-  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   const entries = source.entries
     .map((entry, authorIndex) => ({ authorIndex, entry }))
     .sort((left, right) => left.entry.at - right.entry.at || left.authorIndex - right.authorIndex)
     .map(({ entry }) => entry);
+  const lastTime = entries.at(-1)?.at ?? 0;
+  const duration = source.duration ?? lastTime;
+  if (!Number.isFinite(duration) || duration < lastTime || duration < 0) {
+    diagnostics.push(
+      runtimeDiagnostic(
+        'NACHI_TIMELINE_DURATION_INVALID',
+        'Timeline duration must be finite and no earlier than its last entry.',
+        'timeline.duration',
+      ),
+    );
+  }
+  if (
+    (source.loop === true || (typeof source.loop === 'number' && source.loop > 1)) &&
+    duration <= 0
+  ) {
+    diagnostics.push(
+      runtimeDiagnostic(
+        'NACHI_TIMELINE_LOOP_DURATION_REQUIRED',
+        'A looping timeline requires a positive duration.',
+        'timeline.duration',
+      ),
+    );
+  }
+  if (typeof source.loop === 'number' && (!Number.isSafeInteger(source.loop) || source.loop <= 0)) {
+    diagnostics.push(
+      runtimeDiagnostic(
+        'NACHI_TIMELINE_LOOP_INVALID',
+        'Timeline loop count must be a positive safe integer.',
+        'timeline.loop',
+      ),
+    );
+  }
+  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   return {
     ...source,
-    duration: source.duration ?? entries.at(-1)?.at ?? 0,
+    duration,
     entries,
     kind: 'timeline',
     speed,
@@ -301,20 +333,35 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       this.#state = 'error';
       return;
     }
-    for (const [key, resource] of getMeshFxResources(definition)) {
-      const mesh = cloneMesh(key, resource);
-      setMeshTransform(mesh, this.#position, this.#rotation);
-      this.#scene?.add(mesh);
-      this.#meshRuntimes.set(key, {
-        duration: resource.duration,
-        elapsed: 0,
-        mesh,
-        playing: false,
-      });
-    }
-    if (definition.timeline === undefined) {
-      for (const key of Object.keys(definition.elements)) this.#playElement(key);
-      this.#started = true;
+    try {
+      for (const [key, resource] of getMeshFxResources(definition)) {
+        const mesh = cloneMesh(key, resource);
+        setMeshTransform(mesh, this.#position, this.#rotation);
+        this.#scene?.add(mesh);
+        this.#meshRuntimes.set(key, {
+          duration: resource.duration,
+          elapsed: 0,
+          mesh,
+          playing: false,
+        });
+      }
+      if (definition.timeline === undefined) {
+        for (const key of Object.keys(definition.elements)) this.#playElement(key);
+        this.#started = true;
+      }
+    } catch (error) {
+      const failureDiagnostics =
+        error instanceof VfxDiagnosticError
+          ? error.diagnostics
+          : [
+              runtimeDiagnostic(
+                'NACHI_TIMELINE_INSTANCE_CONSTRUCTION_FAILED',
+                error instanceof Error ? error.message : String(error),
+              ),
+            ];
+      const [first, ...rest] = failureDiagnostics;
+      if (first) this.markError(first);
+      this.diagnostics.push(...rest);
     }
   }
 
@@ -470,11 +517,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   release(): void {
     if (this.#released) return;
     this.#stopAllElements();
-    for (const runtime of this.#meshRuntimes.values()) {
-      this.#scene?.remove(runtime.mesh);
-      runtime.mesh.material.dispose();
-    }
-    this.#meshRuntimes.clear();
+    this.#disposeMeshes();
     this.#actionListeners.clear();
     this.#eventListeners.clear();
     this.#released = true;
@@ -496,6 +539,15 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
         ),
       );
     }
+    this.#disposeMeshes();
+  }
+
+  #disposeMeshes(): void {
+    for (const runtime of this.#meshRuntimes.values()) {
+      this.#scene?.remove(runtime.mesh);
+      runtime.mesh.material.dispose();
+    }
+    this.#meshRuntimes.clear();
   }
 
   /** @internal World seconds until the next action, loop, shake, mesh-life, or hit-stop boundary. */

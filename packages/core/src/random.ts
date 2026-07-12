@@ -90,7 +90,11 @@ export function pcgRandomFloat(
   return pcgHashUint32(mixedInput) * PCG_RANDOM_CONSTANTS.uint32ToUnitFloat;
 }
 
-/** Builds the PCG operations on Three.js TSL-compatible uint nodes without importing Three.js. */
+/**
+ * Builds the PCG operations on Three.js TSL-compatible uint nodes without importing Three.js.
+ * The integer mapping is mathematically [0, 1), but f32 materialization can round the maximum
+ * hash to exactly 1.0 (about one sample in 2^25); GPU consumers therefore use [0, 1].
+ */
 export function pcgRandomFloatNode<
   FloatNode extends TslPcgFloatNode<FloatNode>,
   UintNode extends TslPcgUintNode<UintNode, FloatNode>,

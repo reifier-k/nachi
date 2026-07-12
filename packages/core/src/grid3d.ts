@@ -24,6 +24,13 @@ import type {
 export const GRID3D_WORKGROUP_SIZE = 64;
 export const GRID3D_FIXED_POINT_SCALE = 4096;
 const MAX_U32 = 0xffff_ffff;
+const GRID3D_BUILTIN_STAGE_SOURCES = new Set([
+  'core/grid3d-advect',
+  'core/grid3d-buoyancy',
+  'core/grid3d-inject',
+  'core/grid3d-pressure-jacobi',
+  'core/grid3d-project-velocity',
+]);
 
 export interface Grid3DStageContext {
   readonly cell: readonly [KernelNode, KernelNode, KernelNode];
@@ -395,6 +402,125 @@ function stageFactory(
   if (module.source !== 'inline') return undefined;
   return (module as Grid3DStageModuleDefinition & { readonly factory?: Grid3DStageFactory })
     .factory;
+}
+
+function stageConfigDiagnostics(
+  definition: Grid3DDefinition,
+  stage: SimStageDefinition & { readonly update: Grid3DStageModuleDefinition },
+  stageIndex: number,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  const source = stage.update.source;
+  const config = stage.update.config as Record<string, unknown>;
+  const path = (field: string) => `stages[${stageIndex}].update.config.${field}`;
+  const add = (code: string, message: string, field: string) =>
+    diagnostics.push({ code, message, path: path(field), phase: 'compile', severity: 'error' });
+  const channel = (name: unknown, type: 'f32' | 'vec3', field: string) => {
+    const declaration = typeof name === 'string' ? definition.channels[name] : undefined;
+    if (!declaration || declaration.type !== type) {
+      add(
+        'NACHI_GRID3D_STAGE_CHANNEL_TYPE_INVALID',
+        `Grid3D ${field} must name a declared ${type} channel.`,
+        field,
+      );
+    }
+  };
+  const finite = (value: unknown, field: string) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      add('NACHI_GRID3D_STAGE_VALUE_INVALID', `Grid3D ${field} must be finite.`, field);
+    }
+  };
+  if (
+    typeof source === 'string' &&
+    source !== 'inline' &&
+    !GRID3D_BUILTIN_STAGE_SOURCES.has(source)
+  ) {
+    diagnostics.push({
+      code: 'NACHI_GRID3D_STAGE_SOURCE_UNKNOWN',
+      message: `Unknown Grid3D built-in stage source "${source}".`,
+      path: `stages[${stageIndex}].update.source`,
+      phase: 'compile',
+      severity: 'error',
+    });
+    return diagnostics;
+  }
+  if (source === 'core/grid3d-inject') {
+    const center = config.center;
+    if (
+      !Array.isArray(center) ||
+      center.length !== 3 ||
+      center.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+    ) {
+      add(
+        'NACHI_GRID3D_STAGE_VALUE_INVALID',
+        'Grid3D inject center must be a finite vec3.',
+        'center',
+      );
+    }
+    finite(config.radius, 'radius');
+    if (typeof config.radius === 'number' && config.radius < 0)
+      add(
+        'NACHI_GRID3D_STAGE_VALUE_INVALID',
+        'Grid3D inject radius must be non-negative.',
+        'radius',
+      );
+    const values = config.values;
+    if (typeof values !== 'object' || values === null || Array.isArray(values)) {
+      add(
+        'NACHI_GRID3D_STAGE_VALUE_INVALID',
+        'Grid3D inject values must be a channel map.',
+        'values',
+      );
+    } else {
+      for (const [name, value] of Object.entries(values)) {
+        const type = definition.channels[name]?.type;
+        const valid =
+          type === 'f32'
+            ? typeof value === 'number' && Number.isFinite(value)
+            : type === 'vec3' &&
+              Array.isArray(value) &&
+              value.length === 3 &&
+              value.every((item) => typeof item === 'number' && Number.isFinite(item));
+        if (!valid)
+          add(
+            'NACHI_GRID3D_STAGE_VALUE_INVALID',
+            `Grid3D inject value for "${name}" must match its declared channel type and contain only finite components.`,
+            `values.${name}`,
+          );
+      }
+    }
+  } else if (source === 'core/grid3d-advect') {
+    channel(config.velocity ?? 'velocity', 'vec3', 'velocity');
+    const dissipation = config.dissipation ?? {};
+    if (typeof dissipation !== 'object' || dissipation === null || Array.isArray(dissipation)) {
+      add(
+        'NACHI_GRID3D_STAGE_VALUE_INVALID',
+        'Grid3D dissipation must be a channel map.',
+        'dissipation',
+      );
+    } else {
+      for (const [name, value] of Object.entries(dissipation)) {
+        if (
+          !definition.channels[name] ||
+          typeof value !== 'number' ||
+          !Number.isFinite(value) ||
+          value < 0
+        )
+          add(
+            'NACHI_GRID3D_STAGE_VALUE_INVALID',
+            `Grid3D dissipation for "${name}" must target a declared channel with a non-negative finite rate.`,
+            `dissipation.${name}`,
+          );
+      }
+    }
+  } else if (source === 'core/grid3d-buoyancy') {
+    channel(config.velocity ?? 'velocity', 'vec3', 'velocity');
+    channel(config.density ?? 'density', 'f32', 'density');
+    channel(config.temperature ?? 'temperature', 'f32', 'temperature');
+    finite(config.densityWeight ?? 0.1, 'densityWeight');
+    finite(config.temperatureBuoyancy ?? 1, 'temperatureBuoyancy');
+  }
+  return diagnostics;
 }
 
 function buildStage(
@@ -840,6 +966,7 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
           severity: 'error',
         });
       }
+      diagnostics.push(...stageConfigDiagnostics(definition, stage, index));
     }
     if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
     this.memoryEstimate = memoryEstimate!;
@@ -1039,7 +1166,15 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
 
   async capture(): Promise<Grid3DSnapshot> {
     if (!this.#renderer.readStorage) {
-      throw new Error('Grid3D capture requires renderer storage readback support.');
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_GRID3D_READBACK_UNSUPPORTED',
+          message: 'Grid3D capture requires renderer storage readback support.',
+          path: 'renderer.readStorage',
+          phase: 'runtime',
+          severity: 'error',
+        },
+      ]);
     }
     await this.initialize();
     return {
@@ -1089,7 +1224,15 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
       );
     }
     if (!this.#renderer.readStorage) {
-      throw new Error('Grid3D particle sampling requires storage readback support.');
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_GRID3D_READBACK_UNSUPPORTED',
+          message: 'Grid3D particle sampling requires storage readback support.',
+          path: 'renderer.readStorage',
+          phase: 'runtime',
+          severity: 'error',
+        },
+      ]);
     }
     this.#uploadParticles(points);
     await this.#renderer.flushStorageWrites?.();
@@ -1123,7 +1266,15 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
       }
     }
     if (!this.#renderer.writeStorage) {
-      throw new Error('Grid3D particle transfer requires renderer storage upload support.');
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_GRID3D_UPLOAD_UNSUPPORTED',
+          message: 'Grid3D particle transfer requires renderer storage upload support.',
+          path: 'renderer.writeStorage',
+          phase: 'runtime',
+          severity: 'error',
+        },
+      ]);
     }
     const data = new Float32Array(capacity * 4);
     points.forEach(([x, y, z], index) => {

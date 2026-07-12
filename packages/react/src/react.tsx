@@ -59,7 +59,10 @@ export function VFXSystemProvider({
       system.setCamera({
         projectionMatrix: state.camera.projectionMatrix.elements,
         viewMatrix: state.camera.matrixWorldInverse.elements,
-        viewportSize: [state.size.width, state.size.height],
+        viewportSize: [
+          state.size.width * state.viewport.dpr,
+          state.size.height * state.viewport.dpr,
+        ],
       });
     }
     void system.update(delta).catch((error: unknown) => setUpdateError(error));

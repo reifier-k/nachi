@@ -143,36 +143,6 @@ async function readRenderAttributes(runtime: VfxRuntimeRenderer, emitter: VfxEmi
   );
 }
 
-function readCachedRenderAttributes(cache: SimulationCache, frame: number) {
-  const emitter = cache.metadata.emitters[0];
-  if (!emitter) throw new Error('M11 cache metadata has no emitter.');
-  return Object.fromEntries(
-    emitter.attributes.map((attribute) => {
-      const length = emitter.capacity * attribute.components;
-      const offset = attribute.offsetBytes + frame * attribute.frameStrideBytes;
-      if (attribute.encoding === 'float32') {
-        return [attribute.name, [...new Float32Array(cache.data, offset, length)]] as const;
-      }
-      if (attribute.encoding === 'int32') {
-        return [attribute.name, [...new Int32Array(cache.data, offset, length)]] as const;
-      }
-      if (attribute.encoding === 'uint32') {
-        return [attribute.name, [...new Uint32Array(cache.data, offset, length)]] as const;
-      }
-      const encoded = new Uint16Array(cache.data, offset, length);
-      const range = attribute.quantization!;
-      return [
-        attribute.name,
-        [...encoded].map((value, index) => {
-          const component = index % attribute.components;
-          const minimum = range.minimum[component]!;
-          return minimum + (value / 65535) * (range.maximum[component]! - minimum);
-        }),
-      ] as const;
-    }),
-  );
-}
-
 function attributeDifference(
   left: Readonly<Record<string, readonly number[]>>,
   right: Readonly<Record<string, readonly number[]>>,
@@ -188,6 +158,36 @@ function attributeDifference(
     }
   }
   return { maximum, mismatchCount };
+}
+
+function webglReplayDiagnosticCache(): SimulationCache {
+  return {
+    data: new ArrayBuffer(0),
+    diagnostics: [],
+    kind: 'simulation-cache',
+    metadata: {
+      compression: 'float32',
+      durationSeconds: 0,
+      emitters: [],
+      frameCount: 1,
+      frameRate: FRAME_RATE,
+      interpolation: 'nearest',
+      kind: 'nachi-simulation-cache-metadata',
+      loop: {
+        aliveIndicesMatch: true,
+        continuous: true,
+        enabled: false,
+        integerAttributesMatch: true,
+        maximumAttributeError: 0,
+        tolerance: 0,
+      },
+      qualityTier: 'low',
+      sampleStartFrame: 0,
+      sourceBackend: 'webgl2',
+      uploadBytesPerFrame: 0,
+      version: 1,
+    },
+  };
 }
 
 async function capture(
@@ -419,69 +419,103 @@ async function run(): Promise<void> {
   };
 
   if (!webgpu) {
-    const bakeCounter = countedRuntime(baseRuntime);
-    const bakeSystem = new VFXSystem(bakeCounter.runtime, undefined, {
+    const diagnosticCounter = countedRuntime(baseRuntime);
+    const diagnosticSystem = new VFXSystem(diagnosticCounter.runtime, undefined, {
       aliveCountReadbackInterval: 1,
     });
-    const cache = await bakeSimulation(bakeSystem, singleShotEffect, singleShotBakeOptions);
-    const comparisonFrame = 15;
-    const liveCounter = countedRuntime(baseRuntime);
-    const liveSystem = new VFXSystem(liveCounter.runtime, undefined, {
-      aliveCountReadbackInterval: 1,
-    });
-    const liveInstance = liveSystem.spawn(singleShotEffect, spawn);
-    await liveSystem.update(0);
-    for (let frame = 0; frame < comparisonFrame; frame += 1) {
-      await liveSystem.update(1 / FRAME_RATE);
-    }
-    const liveAttributes = await readRenderAttributes(liveCounter.runtime, view(liveInstance));
-    const bakedAttributes = readCachedRenderAttributes(cache, comparisonFrame);
-    const attributes = attributeDifference(bakedAttributes, liveAttributes);
-    liveInstance.release();
-    let diagnosticCode = '';
+    const errorInstance = diagnosticSystem.spawn(singleShotEffect, spawn);
+    const spawnState = errorInstance.state;
+    const spawnDiagnostic = errorInstance.diagnostics.find(
+      ({ code }) => code === 'NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED',
+    );
+    let bakeDiagnosticCode = '';
+    let bakeDiagnosticMessage = '';
+    let bakeRejectedWithStructuredDiagnostic = false;
+    let bakeRejectedWithTypeError = false;
     try {
-      await replaySimulation(new VFXSystem(baseRuntime), singleShotEffect, cache);
+      await bakeSimulation(diagnosticSystem, singleShotEffect, {
+        ...singleShotBakeOptions,
+        frames: 1,
+      });
     } catch (error) {
-      if (error instanceof VfxDiagnosticError) diagnosticCode = error.diagnostics[0]?.code ?? '';
-      else throw error;
+      bakeRejectedWithTypeError = error instanceof TypeError;
+      if (error instanceof VfxDiagnosticError) {
+        const diagnostic = error.diagnostics.find(
+          ({ code }) => code === 'NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED',
+        );
+        bakeDiagnosticCode = diagnostic?.code ?? error.diagnostics[0]?.code ?? '';
+        bakeDiagnosticMessage = diagnostic?.message ?? error.message;
+        bakeRejectedWithStructuredDiagnostic = diagnostic !== undefined;
+      }
     }
-    const memory = estimateSimulationCacheMemory(cache);
-    root.dataset.cacheMemory = JSON.stringify(memory);
-    required<HTMLElement>('#memory-value').textContent = `${memory.totalBytes} bytes`;
+    errorInstance.release();
+
+    let replayDiagnosticCode = '';
+    let replayDiagnosticMessage = '';
+    try {
+      await replaySimulation(
+        new VFXSystem(baseRuntime),
+        singleShotEffect,
+        webglReplayDiagnosticCache(),
+      );
+    } catch (error) {
+      if (error instanceof VfxDiagnosticError) {
+        replayDiagnosticCode = error.diagnostics[0]?.code ?? '';
+        replayDiagnosticMessage = error.diagnostics[0]?.message ?? error.message;
+      }
+    }
+    root.dataset.cacheMemory = JSON.stringify({ supported: false });
+    required<HTMLElement>('#memory-value').textContent = 'Not available on WebGL2';
     await capturePerformance();
     const validation = {
-      bakeReadback:
-        cache.metadata.frameCount === LOOP_FRAMES + 1 &&
-        cache.metadata.sampleStartFrame === 0 &&
-        cache.metadata.sourceBackend === 'webgl2' &&
-        !cache.metadata.loop.enabled &&
-        cache.data.byteLength > 0,
-      bakedVsLiveAttributes: attributes.maximum <= 1e-6 && attributes.mismatchCount === 0,
+      bakeRejectedWithStructuredDiagnostic:
+        bakeRejectedWithStructuredDiagnostic &&
+        !bakeRejectedWithTypeError &&
+        bakeDiagnosticCode === 'NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED',
       consoleClean: consoleMessages.length === 0,
-      explicitReplayDiagnostic: diagnosticCode === 'NACHI_SIM_CACHE_REPLAY_WEBGL2_UNSUPPORTED',
-      renderReadsOnly:
-        cache.metadata.emitters[0]?.attributes.map(({ name }) => name).join(',') ===
-        'color,position,size,spriteRotation',
+      explicitReplayDiagnostic:
+        replayDiagnosticCode === 'NACHI_SIM_CACHE_REPLAY_WEBGL2_UNSUPPORTED',
+      richSchemaSpawnDiagnostic:
+        spawnState === 'error' &&
+        spawnDiagnostic?.code === 'NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED' &&
+        spawnDiagnostic.message.includes('higher element groups would alias group 0'),
+      simulationNotSubmitted:
+        diagnosticCounter.counts.simulation === 0 && diagnosticCounter.counts.indirect === 0,
     };
     const result = {
       activeBackend,
-      attributes,
-      capability: { bake: 'supported', replay: 'diagnosed-unsupported', diagnosticCode },
-      computeSubmissions: { bake: bakeCounter.counts, live: liveCounter.counts },
+      capability: {
+        bake: 'diagnosed-unsupported',
+        replay: 'diagnosed-unsupported',
+      },
+      computeSubmissions: diagnosticCounter.counts,
       constraints: {
-        loopingBurstEmission: {
+        packedSimulationStorage: {
           reason:
-            'Looping burst emission is unsupported on WebGL2 because prefix spawning would overwrite the same particle prefix on each loop.',
+            'Renderable lifecycle emitters require packed float group 1, which WebGL2 transform feedback cannot address without aliasing group 0.',
           supported: false,
         },
       },
+      diagnostics: {
+        bake: {
+          code: bakeDiagnosticCode,
+          message: bakeDiagnosticMessage,
+          structured: bakeRejectedWithStructuredDiagnostic,
+          typeError: bakeRejectedWithTypeError,
+        },
+        replay: { code: replayDiagnosticCode, message: replayDiagnosticMessage },
+        spawn: {
+          code: spawnDiagnostic?.code ?? '',
+          message: spawnDiagnostic?.message ?? '',
+          state: spawnState,
+        },
+      },
       fixture: {
-        comparisonFrame,
         emission: 'single-shot-burst',
         loopContinuityChecked: false,
+        schema: 'rich-billboard',
+        validationMode: 'structured-diagnostics',
       },
-      loop: cache.metadata.loop,
-      memory,
       ok: Object.values(validation).every(Boolean),
       validation,
     };

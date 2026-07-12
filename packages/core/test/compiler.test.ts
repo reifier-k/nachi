@@ -20,6 +20,7 @@ import {
   compileEmitter,
   coreModuleImplementationAccess,
   createCoreKernelModuleRegistry,
+  defaultAttributeSampleOffset,
   curve,
   curlNoise,
   defineEmitter,
@@ -47,6 +48,7 @@ import {
   pbdDistanceConstraint,
   perDistance,
   paddedSortCapacity,
+  pbdPairCorrection,
   pointAttractor,
   pcgRandomFloat,
   positionSphere,
@@ -195,6 +197,31 @@ describe('M12 neighbor-module diagnostic coverage', () => {
         'NACHI_PBD_STIFFNESS_INVALID',
       ]),
     );
+  });
+
+  it('enforces defensive capacity, PBD-iteration, and prewarm limits before materialization', () => {
+    const valid = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const oversized = compileEmitter(
+      {
+        ...valid,
+        capacity: 2 ** 22 + 1,
+        lifecycle: { prewarm: 301 },
+        update: [pbdDistanceConstraint({ distance: 1, grid: 'neighbors', iterations: 65 })],
+      },
+      { neighborGrids: { neighbors } },
+    );
+    expect(oversized.diagnostics.map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'NACHI_EMITTER_CAPACITY_LIMIT_EXCEEDED',
+        'NACHI_LIFECYCLE_PREWARM_LIMIT_EXCEEDED',
+        'NACHI_PBD_ITERATIONS_LIMIT_EXCEEDED',
+      ]),
+    );
+    expect(() => oversized.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
   });
 });
 import type {
@@ -1680,7 +1707,7 @@ describe('emitter kernel compiler', () => {
     const unsupported = () => {
       throw new Error('unsupported WebGL2 operation was materialized');
     };
-    const built = compileEmitter(baseEmitter()).buildKernels({
+    const built = compileEmitter(baseEmitter({ integration: 'none' })).buildKernels({
       ...fakeAdapter(),
       atomicAdd: unsupported,
       atomicLoad: unsupported,
@@ -1697,6 +1724,74 @@ describe('emitter kernel compiler', () => {
     expect(built.capabilityPath).toBe('webgl2-cpu-readback');
     expect(built.drawIndirect).toBeUndefined();
     expect(built.spawnDispatch).toBeUndefined();
+  });
+
+  it('allows unused higher packed groups on WebGL2', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 8,
+        integration: 'none',
+        render: billboard({ blending: 'alpha' }),
+        spawn: burst({ count: 8 }),
+      }),
+    );
+    const packed = program.attributeSchema.storageArrays.find(
+      ({ groupCount, packed }) => packed && groupCount > 1,
+    );
+    expect(packed?.attributes).toEqual(
+      expect.arrayContaining(['position', 'size', 'spriteRotation']),
+    );
+    expect(program.attributeSchema.byName.spriteRotation?.physical.group).toBe(1);
+
+    expect(() =>
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects multi-group packed particle storage on WebGL2 before TF groups alias', () => {
+    const aliasesPackedGroups = tslModule(({ position, velocity }) => ({
+      position: position.add(velocity),
+    }));
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [aliasesPackedGroups],
+      }),
+    );
+    const packed = program.attributeSchema.storageArrays.find(
+      ({ groupCount, packed }) => packed && groupCount > 1,
+    );
+    expect(packed?.attributes).toEqual(expect.arrayContaining(['position', 'velocity']));
+
+    let caught: unknown;
+    try {
+      program.buildKernels({
+        ...fakeAdapter(),
+        capabilities: {
+          atomics: false,
+          backend: 'webgl2',
+          indirectDispatch: false,
+          indirectDraw: false,
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(VfxDiagnosticError);
+    expect(caught instanceof VfxDiagnosticError ? caught.diagnostics : []).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED',
+        path: `attributeSchema.storageArrays.${packed?.index}.groupCount`,
+      }),
+    );
   });
 
   it('rejects WebGL2 initialize when all physical attribute buffers exceed the TF budget', () => {
@@ -2141,6 +2236,25 @@ describe('emitter kernel compiler', () => {
     expect(lut.data[0]).toBeCloseTo(0);
     expect(lut.data[128]).toBeCloseTo(0.996, 2);
     expect(lut.data[255]).toBeCloseTo(0);
+  });
+
+  it('rejects LUT widths that cannot represent both endpoints', () => {
+    expect(() => bakeCurveLut(curve([0, 0], [1, 1]), 'curve', 1)).toThrow('at least 2');
+    expect(() => bakeGradientLut(gradient('#000', '#fff'), 'gradient', 1)).toThrow('at least 2');
+  });
+
+  it('allocates non-overlapping four-sample blocks to adjacent attribute defaults', () => {
+    const firstBase = defaultAttributeSampleOffset(4);
+    const secondBase = defaultAttributeSampleOffset(5);
+    expect([firstBase, firstBase + 1, firstBase + 2]).not.toContain(secondBase);
+    const moduleSlot = 23;
+    expect(pcgRandomFloat(0, 73, resolveRandomSampleSlot(moduleSlot, firstBase + 1), 0)).not.toBe(
+      pcgRandomFloat(0, 73, resolveRandomSampleSlot(moduleSlot, secondBase), 0),
+    );
+  });
+
+  it('pins the symmetric PBD pair correction coefficient', () => {
+    expect(pbdPairCorrection(0.75, 1)).toBe(0.125);
   });
 
   it('bakes gradient colors into a 256-sample RGBA Float32 LUT', () => {
@@ -3110,6 +3224,18 @@ describe('emitter kernel compiler', () => {
       'NACHI_KILL_VOLUME_RADIUS_INVALID',
       'NACHI_KILL_VOLUME_SIZE_INVALID',
     ]);
+  });
+
+  it('diagnoses a statically degenerate velocity-cone direction', () => {
+    const program = compileEmitter(
+      baseEmitter({
+        init: [velocityCone({ angle: 30, direction: [0, 0, 0], speed: 1 })],
+        integration: 'none',
+      }),
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_VELOCITY_CONE_DIRECTION_INVALID' }),
+    );
   });
 
   it('supports an optional inward acceleration in the vortex config', () => {

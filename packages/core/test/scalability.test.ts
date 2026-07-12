@@ -166,6 +166,17 @@ describe('M11 deterministic culling/significance mathematics', () => {
   });
 
   it('combines distance, projected occupancy, and priority with the documented formula', () => {
+    const analytic = significanceScore({
+      camera,
+      priority: 1,
+      sphere: { center: [0, 0, 2], radius: 0.5 },
+    });
+    expect(analytic.distance).toBe(2);
+    expect(analytic.distanceScore).toBe(1 / 3);
+    expect(analytic.screenOccupancy).toBe(0.140625);
+    expect(analytic.screenScore).toBe(0.28125);
+    expect(analytic.priorityScore).toBe(4);
+    expect(analytic.score).toBe(4.614583333333333);
     const low = significanceScore({
       camera,
       priority: 0,
@@ -176,7 +187,6 @@ describe('M11 deterministic culling/significance mathematics', () => {
       priority: 1,
       sphere: { center: [-0.4, 0.3, 2], radius: 0.5 },
     });
-    expect(high.score).toBe(high.priority * 4 + high.screenOccupancy * 2 + high.distanceScore);
     expect(high.score).toBeGreaterThan(low.score);
     expect(
       significanceScore({ camera, priority: 1, sphere: { center: [-0.4, 0.3, 2], radius: 0.5 } }),

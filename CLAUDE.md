@@ -116,10 +116,21 @@ indirection. `bakeSimulation()` advances a constant frame step and returns metad
 Float interpolation applies only to slots alive in both frames. Loop caches require a continuous
 duplicated endpoint. Keep the v1 per-frame upload path and WebGL2 replay diagnostic aligned with RFC
 §10.5 unless a later RFC explicitly adds all-frame residency or a WebGL2 alive-index renderer path.
+On WebGL2, any behavioral spawn/init/update access to packed group 1 or above is a build error
+(`NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED`), because Three r185 transform feedback would alias it
+onto group 0. Do not restore the former reduced-prefix silent-corruption behavior. Group-0-only
+reduced runtime emitters remain valid (including the existing WebGL2 smoke pages), but all float
+attributes share `packed_float` and lifecycle implicitly adds age/lifetime/normalizedAge. Position
+plus lifecycle therefore requires six float components and group 1, so there is no renderable
+lifecycle fixture for WebGL2 cache equivalence under the strict gate. Treat WebGL2 bake as
+diagnostic-only/effectively unsupported, and keep numerical bake equivalence in the WebGPU branch.
 
 M11 runtime debugging is exposed through `instance.debug.captureAttributes()` and
 `system.debug.captureProfile()`. Attribute capture must reuse renderer storage readback and compiled
 logical packing, retain explicit truncation, and report one-frame-late asynchronous semantics.
+WebGL2 capture may mark a declared higher-group column `aliased` when only the compiler defaults pass
+materialized it; that inspection warning coexists with, and does not bypass, the behavioral build
+gate above.
 Profiler counters reset per top-level system update. Feed it the cached `nachi.perf-baseline` v1 GPU
 record; do not add another timestamp resolver or infer GPU time from CPU duration. Keep long-run
 correctness renderers timestamp-free and use a separate short perf capture when dispatch counts are

@@ -164,15 +164,26 @@ describe('@nachi/timeline authoring', () => {
     expect(clone.fx.time).not.toBeNull();
   });
 
-  it('diagnoses raw mesh-fx materials whose controls cannot be regenerated', () => {
+  it('returns an error instance and removes already-added meshes when construction fails', () => {
     const effect = defineEffect({
-      elements: { arc: slashArc({ angle: 90, material: meshFxMaterial() }) },
-      timeline: [at(0, play('arc'))],
+      elements: {
+        addedFirst: mesh(),
+        invalid: slashArc({ angle: 90, material: meshFxMaterial() }),
+      },
+      timeline: [at(0, play('addedFirst'))],
     });
+    const scene = new THREE.Scene();
+    const dispose = vi.spyOn(THREE.Material.prototype, 'dispose');
 
-    expect(() => new VFXSystem({}, new THREE.Scene()).spawn(effect)).toThrow(
-      '@nachi/timeline fxMaterial()',
+    const instance = new VFXSystem({}, scene).spawn(effect);
+
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_MESH_FX_MATERIAL_CLONE_UNSUPPORTED' }),
     );
+    expect(scene.children).toHaveLength(0);
+    expect(dispose).toHaveBeenCalled();
+    dispose.mockRestore();
   });
 
   it('rejects externally bound mesh-fx time during timeline authoring', () => {
@@ -207,6 +218,25 @@ describe('@nachi/timeline authoring', () => {
 });
 
 describe('@nachi/timeline runtime', () => {
+  it('returns an error instance when an implicit timeline targets an unsupported element', () => {
+    const effect = defineCoreEffect({
+      elements: {
+        unsupported: {
+          config: {},
+          kind: 'visual-element',
+          type: 'test/unsupported',
+          version: 1,
+        },
+      },
+    });
+    const instance = new VFXSystem({}).spawn(effect);
+
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_TIMELINE_ELEMENT_ADAPTER_MISSING' }),
+    );
+  });
+
   it('keeps timeline children outside the core significance budget', () => {
     expect(
       timelineCoreOptions({
@@ -266,6 +296,26 @@ describe('@nachi/timeline runtime', () => {
       'NaN entry time',
       coreTimeline([coreAt(Number.NaN, coreMarker('invalid'))]),
       'NACHI_TIMELINE_TIME_INVALID',
+    ],
+    [
+      'duration before last entry',
+      { duration: 0.1, entries: [coreAt(0.2, coreMarker('late'))], kind: 'timeline' } as const,
+      'NACHI_TIMELINE_DURATION_INVALID',
+    ],
+    [
+      'NaN duration',
+      { duration: Number.NaN, entries: [], kind: 'timeline' } as const,
+      'NACHI_TIMELINE_DURATION_INVALID',
+    ],
+    [
+      'zero-duration loop',
+      { duration: 0, entries: [], kind: 'timeline', loop: true } as const,
+      'NACHI_TIMELINE_LOOP_DURATION_REQUIRED',
+    ],
+    [
+      'zero loop count',
+      { duration: 1, entries: [], kind: 'timeline', loop: 0 } as const,
+      'NACHI_TIMELINE_LOOP_INVALID',
     ],
   ])('marks a core-authored timeline with %s as an error', (_label, invalidTimeline, code) => {
     const effect = defineCoreEffect({ elements: {}, timeline: invalidTimeline });
@@ -576,6 +626,7 @@ describe('@nachi/timeline runtime', () => {
       true,
     );
     const positiveDecay = first.map(({ decay }) => decay).filter((value) => value > 0);
+    expect(positiveDecay).toContain(0.75);
     expect(positiveDecay).toEqual([...positiveDecay].sort((a, b) => b - a));
     expect(first.filter(({ decay }) => decay === 0)).toHaveLength(1);
     expect(first.at(-1)).toMatchObject({ decay: 0, translation: [0, 0, 0] });

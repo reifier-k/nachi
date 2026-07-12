@@ -571,7 +571,15 @@ class NeighborGridRuntime implements NeighborGridRuntimeView {
 
   async capture(): Promise<NeighborGridSnapshot> {
     if (!this.renderer.readStorage) {
-      throw new Error('NeighborGrid capture requires renderer storage readback support.');
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_NEIGHBOR_GRID_READBACK_UNSUPPORTED',
+          message: 'NeighborGrid capture requires renderer storage readback support.',
+          path: 'renderer.readStorage',
+          phase: 'runtime',
+          severity: 'error',
+        },
+      ]);
     }
     const counts = await this.renderer.readStorage(this.kernels.counts);
     const slots = await this.renderer.readStorage(this.kernels.slots);

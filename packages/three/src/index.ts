@@ -1403,14 +1403,21 @@ export function directionEulerAngles(
 }
 
 function directionEuler(direction: KernelNode): KernelNode {
+  const lengthSquared = asNode(
+    direction.x
+      .mul(direction.x)
+      .add(direction.y.mul(direction.y))
+      .add(direction.z.mul(direction.z)),
+  );
   const yzLength = asNode(direction.y.mul(direction.y).add(direction.z.mul(direction.z)).sqrt());
-  return asNode(
+  const angles = asNode(
     vec3(
       asNode(mx_atan2(direction.z as never, direction.y as never)).mul(-1) as never,
       0,
       mx_atan2(direction.x as never, yzLength as never) as never,
     ),
   );
+  return asNode(select(lengthSquared.equal(0) as never, vec3(0, 0, 0), angles as never));
 }
 
 function rotateByQuaternion(position: KernelNode, quaternion: KernelNode): KernelNode {

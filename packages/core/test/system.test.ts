@@ -30,6 +30,11 @@ import {
   emitTo,
   estimateSimulationCacheMemory,
   gridAdvect,
+  gridBuoyancy,
+  gridInject,
+  grid3DAdvect,
+  grid3DBuoyancy,
+  grid3DInject,
   grid3DTslModule,
   gridPressureJacobi,
   gridTslModule,
@@ -358,6 +363,85 @@ describe('M12 Grid2D runtime scheduling', () => {
     ]);
   });
 
+  it('validates built-in Grid2D/3D stage channel types, finite values, and source IDs', () => {
+    const fluid = defineGrid2D({
+      channels: {
+        density: { type: 'f32' },
+        temperature: { type: 'f32' },
+        velocity: { type: 'vec2' },
+      },
+      resolution: [2, 2],
+    });
+    const invalid2D = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          fluid,
+          inject: defineSimStage({
+            target: 'fluid',
+            update: gridInject({ center: [0, 0], radius: 1, values: { velocity: 1 as never } }),
+          }),
+          decay: defineSimStage({
+            target: 'fluid',
+            update: gridAdvect({ dissipation: { density: Number.NaN } }),
+          }),
+          buoyancy: defineSimStage({
+            target: 'fluid',
+            update: gridBuoyancy({ velocity: 'density' }),
+          }),
+          unknown: defineSimStage({
+            target: 'fluid',
+            update: { ...gridAdvect(), source: 'core/grid2d-typo' } as never,
+          }),
+        },
+      }),
+    );
+    expect(invalid2D.diagnostics.map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'NACHI_GRID2D_STAGE_VALUE_INVALID',
+        'NACHI_GRID2D_STAGE_CHANNEL_TYPE_INVALID',
+        'NACHI_GRID2D_STAGE_SOURCE_UNKNOWN',
+      ]),
+    );
+
+    const volume = defineGrid3D({
+      channels: {
+        density: { type: 'f32' },
+        temperature: { type: 'f32' },
+        velocity: { type: 'vec3' },
+      },
+      resolution: [2, 2, 2],
+    });
+    const invalid3D = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          volume,
+          inject: defineSimStage({
+            target: 'volume',
+            update: grid3DInject({
+              center: [0, 0, 0],
+              radius: 1,
+              values: { velocity: 1 as never },
+            }),
+          }),
+          decay: defineSimStage({
+            target: 'volume',
+            update: grid3DAdvect({ dissipation: { density: Number.POSITIVE_INFINITY } }),
+          }),
+          buoyancy: defineSimStage({
+            target: 'volume',
+            update: grid3DBuoyancy({ temperature: 'velocity' }),
+          }),
+        },
+      }),
+    );
+    expect(invalid3D.diagnostics.map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'NACHI_GRID3D_STAGE_VALUE_INVALID',
+        'NACHI_GRID3D_STAGE_CHANNEL_TYPE_INVALID',
+      ]),
+    );
+  });
+
   it('annotates v1 bakes that execute but do not record Grid2D state', async () => {
     const cache = await bakeSimulation(
       new VFXSystem(new CacheRuntimeRenderer()),
@@ -403,6 +487,26 @@ describe('M12 Grid2D runtime scheduling', () => {
     await expect(grid.sampleParticles([[0, Number.POSITIVE_INFINITY]], 'density')).rejects.toThrow(
       RangeError,
     );
+  });
+
+  it('reports missing Grid2D storage readback/upload as structured runtime diagnostics', async () => {
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          fluid: defineGrid2D({
+            channels: { density: { type: 'f32' } },
+            resolution: [2, 2],
+          }),
+        },
+      }),
+    );
+    const grid = instance.getGrid2D('fluid')!;
+    await expect(grid.capture()).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_GRID2D_READBACK_UNSUPPORTED' })],
+    });
+    await expect(grid.rasterizeParticles([[0, 0]], 'density')).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_GRID2D_UPLOAD_UNSUPPORTED' })],
+    });
   });
 });
 
@@ -585,6 +689,27 @@ describe('M12 data-interface capture FIFO', () => {
     expect(grid.initialized).toBe(true);
     instance.release();
     expect(grid.initialized).toBe(false);
+  });
+
+  it('reports missing NeighborGrid storage readback as a structured runtime diagnostic', async () => {
+    const neighbors = defineNeighborGrid({ resolution: [2, 2, 2] });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          neighbors,
+          particles: defineEmitter({
+            capacity: 1,
+            integration: 'none',
+            render: computeRender,
+            spawn: burst({ count: 0 }),
+            update: [boids({ grid: 'neighbors', radius: 0 })],
+          }),
+        },
+      }),
+    );
+    await expect(instance.getNeighborGrid('neighbors')!.capture()).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_NEIGHBOR_GRID_READBACK_UNSUPPORTED' })],
+    });
   });
 
   it('rejects queued Grid and NeighborGrid operations after their instance is released', async () => {
@@ -3308,7 +3433,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
     }
   });
 
-  it('bakes WebGL2 transform-feedback records against an independent analytic fixture', async () => {
+  it('rejects WebGL2 cache baking before multi-group transform-feedback records alias', async () => {
     const render: ModuleDefinition<'render', Record<string, never>> = {
       ...computeRender,
       access: {
@@ -3323,56 +3448,18 @@ describe('M11 VFXSystem scalability scheduling', () => {
     });
     const definition = defineEffect({ elements: { particles: emitter } });
     const program = compileEmitter(emitter);
-    const schema = program.attributeSchema;
-    const lifetimeAttribute = schema.byName.lifetime!;
-    const lifetimeStorage = schema.storageArrays[lifetimeAttribute.physical.bufferIndex]!;
-    const aliveAttribute = schema.byName.alive!;
-    const aliveStorage = schema.storageArrays[aliveAttribute.physical.bufferIndex]!;
-
+    const lifetimeAttribute = program.attributeSchema.byName.lifetime!;
+    const lifetimeStorage =
+      program.attributeSchema.storageArrays[lifetimeAttribute.physical.bufferIndex]!;
     expect(lifetimeStorage.groupCount).toBe(2);
     expect(lifetimeAttribute.physical).toMatchObject({ group: 0, offset: 3, packed: true });
-
-    // This fixture is authored directly in Three r185 TF record order: one vec4 per storage and
-    // particle. It deliberately does not call the production address helper used by sim-cache.
-    const lifetimePhysical = new Float32Array(lifetimeStorage.length * 4);
-    const expectedLifetime = [1.5, 4.5, 7.5, 10.5];
-    for (let particle = 0; particle < schema.capacity; particle += 1) {
-      lifetimePhysical[particle * 4 + lifetimeAttribute.physical.offset] =
-        expectedLifetime[particle]!;
-    }
-    const alivePhysical = new Uint32Array(aliveStorage.length * 4);
-    for (let particle = 0; particle < schema.capacity; particle += 1) {
-      alivePhysical[particle * 4 + aliveAttribute.physical.offset] = 1;
-    }
-    const lifecycle = new Uint32Array(program.meta.lifecycleStorage.buffers.state.wordCount);
-    const fields = program.meta.lifecycleStorage.buffers.state.fields;
-    lifecycle[fields.aliveCount.offsetWords] = schema.capacity;
-    for (let particle = 0; particle < schema.capacity; particle += 1) {
-      lifecycle[fields.aliveIndices.offsetWords + particle] = particle;
-    }
-
-    const renderer = new (class extends CacheRuntimeRenderer {
-      override readStorage(storage?: KernelStorageNode): Promise<ArrayBuffer> {
-        if (!storage) throw new Error('Analytic WebGL2 readback requires a storage node.');
-        const name = (storage as FakeStorage).name;
-        if (name.includes('packed_float')) return Promise.resolve(lifetimePhysical.slice().buffer);
-        if (name.includes('packed_uint')) return Promise.resolve(alivePhysical.slice().buffer);
-        if (name.includes('LifecycleState')) return Promise.resolve(lifecycle.slice().buffer);
-        throw new Error(`Unexpected analytic WebGL2 readback storage ${name}.`);
-      }
-    })();
+    const renderer = new CacheRuntimeRenderer();
     Object.assign(renderer.kernelAdapter.capabilities, { backend: 'webgl2' });
-    const cache = await bakeSimulation(new VFXSystem(renderer), definition, {
-      frames: 1,
+    await expect(
+      bakeSimulation(new VFXSystem(renderer), definition, { frames: 1 }),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED' })],
     });
-    const cachedLifetime = cache.metadata.emitters[0]!.attributes.find(
-      ({ name }) => name === 'lifetime',
-    )!;
-
-    expect(cache.metadata.sourceBackend).toBe('webgl2');
-    expect([...new Float32Array(cache.data, cachedLifetime.offsetBytes, schema.capacity)]).toEqual(
-      expectedLifetime,
-    );
   });
 
   it('bakes render reads into quantized binary metadata and replays without simulation submits', async () => {

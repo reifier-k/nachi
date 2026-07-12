@@ -107,7 +107,7 @@ export interface SimulationCacheMemoryEstimate {
   readonly uploadBytesPerFrame: number;
 }
 
-type LogicalArray = Float32Array | Int32Array | Uint32Array;
+export type LogicalArray = Float32Array | Int32Array | Uint32Array;
 
 type RecordedEmitterFrame = {
   readonly aliveIndices: Uint32Array;
@@ -157,6 +157,16 @@ function requirePositiveFinite(value: number, name: string): void {
 
 function align(value: number, alignment: number): number {
   return Math.ceil(value / alignment) * alignment;
+}
+
+export function validateSimulationCachePayloadSize(dataBytes: number): void {
+  if (!Number.isSafeInteger(dataBytes) || dataBytes < 0 || dataBytes > 0x7fff_ffff) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_SIZE_LIMIT_EXCEEDED',
+      `Simulation-cache payload requires ${dataBytes} bytes, exceeding the supported 2147483647-byte ArrayBuffer limit.`,
+      'options.frames',
+    );
+  }
 }
 
 function assertLittleEndian(): void {
@@ -661,6 +671,13 @@ function quantizationRange(
   for (let component = 0; component < attribute.components; component += 1) {
     if (minimum[component] === Number.POSITIVE_INFINITY) minimum[component] = 0;
     if (maximum[component] === Number.NEGATIVE_INFINITY) maximum[component] = 0;
+    if (!Number.isFinite(maximum[component]! - minimum[component]!)) {
+      throw cacheDiagnostic(
+        'NACHI_SIM_CACHE_QUANTIZATION_EXTENT_INVALID',
+        `Particles.${attribute.name} has a non-finite quantization extent.`,
+        `attributes.${attribute.name}`,
+      );
+    }
   }
   return { maximum, minimum };
 }
@@ -747,7 +764,9 @@ function buildCache(
       emitter.lifecycleWordCount * 4 +
       4;
   }
-  const data = new ArrayBuffer(align(offset, 4));
+  const dataBytes = align(offset, 4);
+  validateSimulationCachePayloadSize(dataBytes);
+  const data = new ArrayBuffer(dataBytes);
   for (const [emitterIndex, emitter] of recorded.entries()) {
     const metadata = emitters[emitterIndex]!;
     for (const [frameIndex, frame] of emitter.frames.entries()) {
@@ -1003,7 +1022,7 @@ function aliveFrame(
   ).slice();
 }
 
-function interpolateAttribute(
+export function interpolateSimulationCacheAttribute(
   left: LogicalArray,
   right: LogicalArray,
   alpha: number,
@@ -1133,7 +1152,7 @@ export class SimulationCachePlayer<Definition = AnyEffectDefinition> {
     if (replayBackend !== 'webgpu') {
       throw cacheDiagnostic(
         'NACHI_SIM_CACHE_REPLAY_WEBGL2_UNSUPPORTED',
-        'Simulation-cache replay requires the WebGPU indirect-draw upload path; WebGL2 baking remains available for compatible burst emitters.',
+        'Simulation-cache replay requires the WebGPU indirect-draw upload path; WebGL2 simulation-cache use is diagnostic-only because renderable lifecycle emitters exceed packed group 0.',
       );
     }
     if (!this.#renderer.writeStorage) {
@@ -1323,7 +1342,7 @@ export class SimulationCachePlayer<Definition = AnyEffectDefinition> {
             : decodeAttributeFrame(this.#cache, cachedAttribute, rightFrame, schema.capacity);
         writeLogicalAttribute(
           target,
-          interpolateAttribute(
+          interpolateSimulationCacheAttribute(
             left,
             right,
             alpha,

@@ -4,6 +4,7 @@ import {
   bakeSdf,
   burst,
   compileEmitter,
+  VfxDiagnosticError,
   collideSceneDepth,
   collideSdf,
   defineEmitter,
@@ -57,7 +58,7 @@ import {
 } from '../src/index.js';
 
 describe('three kernel adapter', () => {
-  it('keeps the M11 WebGL2 scale probes within burst and transform-feedback limits', () => {
+  it('rejects M11 WebGL2 scale probes whose packed TF storage has multiple groups', () => {
     const adapter = createThreeKernelAdapter({
       backend: 'webgl2',
       maxTransformFeedbackSeparateAttribs: 4,
@@ -89,7 +90,7 @@ describe('three kernel adapter', () => {
     for (const program of programs) {
       expect(program.spawn.modules.map(({ type }) => type)).toEqual(['core/burst']);
       expect(program.meta.backendBudgets.webgl2.initializeVaryingCount).toBe(3);
-      expect(() => program.buildKernels(adapter)).not.toThrow();
+      expect(() => program.buildKernels(adapter)).toThrow(VfxDiagnosticError);
     }
   });
 
@@ -98,7 +99,15 @@ describe('three kernel adapter', () => {
     const program = compileEmitter(
       defineEmitter({
         capacity: 8,
-        render: billboard({ blending: 'additive' }),
+        integration: 'none',
+        render: {
+          access: { reads: ['Particles.position'], writes: [] },
+          config: {},
+          kind: 'module',
+          stage: 'render',
+          type: 'test/compute',
+          version: 1,
+        },
         spawn: burst({ count: 8 }),
       }),
     );

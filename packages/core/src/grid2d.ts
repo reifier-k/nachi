@@ -23,6 +23,13 @@ import type {
 export const GRID2D_WORKGROUP_SIZE = 64;
 export const GRID2D_FIXED_POINT_SCALE = 4096;
 const MAX_U32 = 0xffff_ffff;
+const GRID2D_BUILTIN_STAGE_SOURCES = new Set([
+  'core/grid2d-advect',
+  'core/grid2d-buoyancy',
+  'core/grid2d-inject',
+  'core/grid2d-pressure-jacobi',
+  'core/grid2d-project-velocity',
+]);
 
 export interface Grid2DStageContext {
   readonly cell: readonly [KernelNode, KernelNode];
@@ -370,6 +377,127 @@ function isGrid2DStage(
   stage: SimStageDefinition,
 ): stage is SimStageDefinition & { readonly update: Grid2DStageModuleDefinition } {
   return stage.update.kind === 'grid2d-stage-module';
+}
+
+function stageConfigDiagnostics(
+  definition: Grid2DDefinition,
+  stage: SimStageDefinition & { readonly update: Grid2DStageModuleDefinition },
+  stageIndex: number,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  const source = stage.update.source;
+  const config = stage.update.config as Record<string, unknown>;
+  const path = (field: string) => `stages[${stageIndex}].update.config.${field}`;
+  const add = (code: string, message: string, field: string) =>
+    diagnostics.push({ code, message, path: path(field), phase: 'compile', severity: 'error' });
+  const channel = (name: unknown, type: 'f32' | 'vec2', field: string) => {
+    const declaration = typeof name === 'string' ? definition.channels[name] : undefined;
+    if (!declaration || declaration.type !== type) {
+      add(
+        'NACHI_GRID2D_STAGE_CHANNEL_TYPE_INVALID',
+        `Grid2D ${field} must name a declared ${type} channel.`,
+        field,
+      );
+    }
+  };
+  const finite = (value: unknown, field: string) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      add('NACHI_GRID2D_STAGE_VALUE_INVALID', `Grid2D ${field} must be finite.`, field);
+    }
+  };
+  if (
+    typeof source === 'string' &&
+    source !== 'inline' &&
+    !GRID2D_BUILTIN_STAGE_SOURCES.has(source)
+  ) {
+    diagnostics.push({
+      code: 'NACHI_GRID2D_STAGE_SOURCE_UNKNOWN',
+      message: `Unknown Grid2D built-in stage source "${source}".`,
+      path: `stages[${stageIndex}].update.source`,
+      phase: 'compile',
+      severity: 'error',
+    });
+    return diagnostics;
+  }
+  if (source === 'core/grid2d-inject') {
+    const center = config.center;
+    if (
+      !Array.isArray(center) ||
+      center.length !== 2 ||
+      center.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+    ) {
+      add(
+        'NACHI_GRID2D_STAGE_VALUE_INVALID',
+        'Grid2D inject center must be a finite vec2.',
+        'center',
+      );
+    }
+    finite(config.radius, 'radius');
+    if (typeof config.radius === 'number' && config.radius < 0) {
+      add(
+        'NACHI_GRID2D_STAGE_VALUE_INVALID',
+        'Grid2D inject radius must be non-negative.',
+        'radius',
+      );
+    }
+    const values = config.values;
+    if (typeof values !== 'object' || values === null || Array.isArray(values)) {
+      add(
+        'NACHI_GRID2D_STAGE_VALUE_INVALID',
+        'Grid2D inject values must be a channel map.',
+        'values',
+      );
+    } else {
+      for (const [name, value] of Object.entries(values)) {
+        const type = definition.channels[name]?.type;
+        const valid =
+          type === 'f32'
+            ? typeof value === 'number' && Number.isFinite(value)
+            : type === 'vec2' &&
+              Array.isArray(value) &&
+              value.length === 2 &&
+              value.every((item) => typeof item === 'number' && Number.isFinite(item));
+        if (!valid)
+          add(
+            'NACHI_GRID2D_STAGE_VALUE_INVALID',
+            `Grid2D inject value for "${name}" must match its declared channel type and contain only finite components.`,
+            `values.${name}`,
+          );
+      }
+    }
+  } else if (source === 'core/grid2d-advect') {
+    channel(config.velocity ?? 'velocity', 'vec2', 'velocity');
+    const dissipation = config.dissipation ?? {};
+    if (typeof dissipation !== 'object' || dissipation === null || Array.isArray(dissipation)) {
+      add(
+        'NACHI_GRID2D_STAGE_VALUE_INVALID',
+        'Grid2D dissipation must be a channel map.',
+        'dissipation',
+      );
+    } else {
+      for (const [name, value] of Object.entries(dissipation)) {
+        if (
+          !definition.channels[name] ||
+          typeof value !== 'number' ||
+          !Number.isFinite(value) ||
+          value < 0
+        ) {
+          add(
+            'NACHI_GRID2D_STAGE_VALUE_INVALID',
+            `Grid2D dissipation for "${name}" must target a declared channel with a non-negative finite rate.`,
+            `dissipation.${name}`,
+          );
+        }
+      }
+    }
+  } else if (source === 'core/grid2d-buoyancy') {
+    channel(config.velocity ?? 'velocity', 'vec2', 'velocity');
+    channel(config.density ?? 'density', 'f32', 'density');
+    channel(config.temperature ?? 'temperature', 'f32', 'temperature');
+    finite(config.densityWeight ?? 0.1, 'densityWeight');
+    finite(config.temperatureBuoyancy ?? 1, 'temperatureBuoyancy');
+  }
+  return diagnostics;
 }
 
 function buildStage(
@@ -753,6 +881,7 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
           severity: 'error',
         });
       }
+      diagnostics.push(...stageConfigDiagnostics(definition, stage, index));
     }
     if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
     this.#renderer = renderer;
@@ -955,7 +1084,15 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
 
   async capture(): Promise<Grid2DSnapshot> {
     if (!this.#renderer.readStorage) {
-      throw new Error('Grid2D capture requires renderer storage readback support.');
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_GRID2D_READBACK_UNSUPPORTED',
+          message: 'Grid2D capture requires renderer storage readback support.',
+          path: 'renderer.readStorage',
+          phase: 'runtime',
+          severity: 'error',
+        },
+      ]);
     }
     await this.initialize();
     return {
@@ -1003,7 +1140,15 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
       );
     }
     if (!this.#renderer.readStorage)
-      throw new Error('Grid2D particle sampling requires storage readback support.');
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_GRID2D_READBACK_UNSUPPORTED',
+          message: 'Grid2D particle sampling requires storage readback support.',
+          path: 'renderer.readStorage',
+          phase: 'runtime',
+          severity: 'error',
+        },
+      ]);
     this.#uploadParticles(points);
     await this.#renderer.flushStorageWrites?.();
     await this.initialize();
@@ -1033,7 +1178,15 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
       }
     }
     if (!this.#renderer.writeStorage)
-      throw new Error('Grid2D particle transfer requires renderer storage upload support.');
+      throw new VfxDiagnosticError([
+        {
+          code: 'NACHI_GRID2D_UPLOAD_UNSUPPORTED',
+          message: 'Grid2D particle transfer requires renderer storage upload support.',
+          path: 'renderer.writeStorage',
+          phase: 'runtime',
+          severity: 'error',
+        },
+      ]);
     const data = new Float32Array(capacity * 2);
     points.forEach(([x, y], index) => {
       data[index * 2] = x;

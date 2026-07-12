@@ -244,6 +244,7 @@ async function run(): Promise<void> {
     const authored = defineEmitter({
       bounds: { center: [0.13, -0.09, 0], radius: 0.4 },
       capacity: 8,
+      integration: 'none',
       lifecycle: { duration: 20 },
       quality: { low: { capacityScale: 0.5, spawnRateScale: 1 } },
       render: billboard({ blending: 'alpha', lit: true, soft: true, sorted: true }),
@@ -281,6 +282,7 @@ async function run(): Promise<void> {
       elements: {
         particles: defineEmitter({
           capacity: 8,
+          integration: 'none',
           quality: { low: { capacityScale: 1, spawnRateScale: 0.25 } },
           render: billboard({ blending: 'additive' }),
           spawn: burst({ count: 8 }),

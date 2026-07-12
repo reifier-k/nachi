@@ -39,6 +39,7 @@ import {
   parameter,
   play,
   positionSphere,
+  pbdDistanceConstraint,
   range,
   sizeOverLife,
   stop,
@@ -181,6 +182,29 @@ describe('effect asset v1', () => {
     expect(serialized).toContain('"stage":"update"');
     expect(serialized).toContain('"stage":"event"');
     expect(serialized).toContain('"stage":"render"');
+  });
+
+  it('validates timeline duration and loop semantics in the asset format', () => {
+    const invalid = {
+      effect: {
+        elements: {},
+        kind: 'effect',
+        timeline: {
+          duration: 0,
+          entries: [{ actions: [{ kind: 'marker', name: 'late' }], at: 1 }],
+          kind: 'timeline',
+          loop: 0,
+        },
+      },
+      format: 'nachi-effect',
+      version: 1,
+    };
+    expect(validateEffectAsset(invalid).map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'NACHI_ASSET_TIMELINE_DURATION_INVALID',
+        'NACHI_ASSET_TIMELINE_LOOP_INVALID',
+      ]),
+    );
   });
 
   it('publishes the v1 JSON schema and treats v1 -> v1 migration as identity', () => {
@@ -680,6 +704,72 @@ describe('asset-reference emitter inheritance', () => {
     );
     expect(diagnosticCodes(() => loadEffect(invalid))).toContain(
       'NACHI_ASSET_GRID_STAGE_SOURCE_UNKNOWN',
+    );
+  });
+
+  it('validates grid inject values against the target channel declaration', () => {
+    const document = serializeEffect(
+      defineEffect({
+        elements: {
+          fluid: defineGrid2D({
+            channels: { density: { type: 'f32' }, velocity: { type: 'vec2' } },
+            resolution: [2, 2],
+          }),
+          inject: defineSimStage({
+            target: 'fluid',
+            update: gridInject({ center: [0, 0], radius: 1, values: { velocity: [1, 2] } }),
+          }),
+        },
+      }),
+    );
+    const invalid = structuredClone(document) as unknown as {
+      effect: { elements: { inject: { update: { config: { values: { velocity: unknown } } } } } };
+    };
+    invalid.effect.elements.inject.update.config.values.velocity = 1;
+    expect(validateEffectAsset(invalid)).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_GRID2D_STAGE_VALUE_INVALID' }),
+    );
+    expect(diagnosticCodes(() => loadEffect(invalid))).toContain(
+      'NACHI_GRID2D_STAGE_VALUE_INVALID',
+    );
+  });
+
+  it('enforces asset capacity, prewarm, and PBD iteration limits', () => {
+    const neighbors = defineNeighborGrid({ resolution: [2, 2, 2] });
+    const document = serializeEffect(
+      defineEffect({
+        elements: {
+          neighbors,
+          particles: defineEmitter({
+            capacity: 1,
+            lifecycle: { prewarm: 1 },
+            render: billboard({}),
+            spawn: burst({ count: 1 }),
+            update: [pbdDistanceConstraint({ distance: 1, grid: 'neighbors', iterations: 1 })],
+          }),
+        },
+      }),
+    );
+    const invalid = structuredClone(document) as unknown as {
+      effect: {
+        elements: {
+          particles: {
+            capacity: number;
+            lifecycle: { prewarm: number };
+            update: [{ config: { iterations: number } }];
+          };
+        };
+      };
+    };
+    invalid.effect.elements.particles.capacity = 2 ** 22 + 1;
+    invalid.effect.elements.particles.lifecycle.prewarm = 301;
+    invalid.effect.elements.particles.update[0].config.iterations = 65;
+    expect(validateEffectAsset(invalid).map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'NACHI_ASSET_CAPACITY_LIMIT_EXCEEDED',
+        'NACHI_ASSET_PREWARM_LIMIT_EXCEEDED',
+        'NACHI_ASSET_PBD_ITERATIONS_LIMIT_EXCEEDED',
+      ]),
     );
   });
 

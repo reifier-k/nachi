@@ -1,5 +1,8 @@
 import {
   VfxDiagnosticError,
+  MAX_EMITTER_CAPACITY,
+  MAX_PBD_ITERATIONS,
+  MAX_PREWARM_SECONDS,
   defineEffect,
   defineEmitter,
   type AttributeType,
@@ -370,6 +373,12 @@ class AssetValidator {
         'Emitter capacity must be a positive safe integer.',
         `${path}.capacity`,
       );
+    } else if ((value.capacity as number) > MAX_EMITTER_CAPACITY) {
+      this.error(
+        'NACHI_ASSET_CAPACITY_LIMIT_EXCEEDED',
+        `Emitter capacity must not exceed ${MAX_EMITTER_CAPACITY}.`,
+        `${path}.capacity`,
+      );
     }
     if (value.attributes !== undefined) this.attributes(value.attributes, `${path}.attributes`);
     if (value.bounds !== undefined) this.bounds(value.bounds, `${path}.bounds`);
@@ -529,7 +538,20 @@ class AssetValidator {
       this.type('positive integer', value.version, `${path}.version`);
     if (value.label !== undefined && typeof value.label !== 'string')
       this.type('string', value.label, `${path}.label`);
-    if (this.record(value.config, `${path}.config`)) this.json(value.config, `${path}.config`);
+    if (this.record(value.config, `${path}.config`)) {
+      this.json(value.config, `${path}.config`);
+      if (
+        value.type === 'core/pbd-distance-constraint' &&
+        typeof value.config.iterations === 'number' &&
+        value.config.iterations > MAX_PBD_ITERATIONS
+      ) {
+        this.error(
+          'NACHI_ASSET_PBD_ITERATIONS_LIMIT_EXCEEDED',
+          `PBD iterations must not exceed ${MAX_PBD_ITERATIONS}.`,
+          `${path}.config.iterations`,
+        );
+      }
+    }
     if (value.access !== undefined) this.access(value.access, `${path}.access`);
   }
 
@@ -633,6 +655,13 @@ class AssetValidator {
     for (const field of ['duration', 'prewarm', 'startDelay'] as const) {
       if (value[field] !== undefined) this.finiteNumber(value[field], `${path}.${field}`);
     }
+    if (typeof value.prewarm === 'number' && value.prewarm > MAX_PREWARM_SECONDS) {
+      this.error(
+        'NACHI_ASSET_PREWARM_LIMIT_EXCEEDED',
+        `Emitter prewarm must not exceed ${MAX_PREWARM_SECONDS} seconds.`,
+        `${path}.prewarm`,
+      );
+    }
     if (
       value.loopCount !== undefined &&
       value.loopCount !== 'infinite' &&
@@ -719,12 +748,47 @@ class AssetValidator {
     ) {
       this.type('boolean or integer', value.loop, `${path}.loop`);
     }
+    if (typeof value.loop === 'number' && (!Number.isSafeInteger(value.loop) || value.loop <= 0)) {
+      this.error(
+        'NACHI_ASSET_TIMELINE_LOOP_INVALID',
+        'Timeline loop count must be a positive safe integer.',
+        `${path}.loop`,
+      );
+    }
     if (!Array.isArray(value.entries)) this.type('array', value.entries, `${path}.entries`);
     else {
       this.denseArray(value.entries, `${path}.entries`);
       value.entries.forEach((entry, index) =>
         this.timelineEntry(entry, `${path}.entries[${index}]`),
       );
+      const times = value.entries.flatMap((entry) =>
+        isRecord(entry) && typeof entry.at === 'number' && Number.isFinite(entry.at)
+          ? [entry.at]
+          : [],
+      );
+      const lastTime = times.length === 0 ? 0 : Math.max(...times);
+      const duration = value.duration ?? lastTime;
+      if (
+        typeof duration === 'number' &&
+        (!Number.isFinite(duration) || duration < lastTime || duration < 0)
+      ) {
+        this.error(
+          'NACHI_ASSET_TIMELINE_DURATION_INVALID',
+          'Timeline duration must be finite and no earlier than its last entry.',
+          `${path}.duration`,
+        );
+      }
+      if (
+        (value.loop === true || (typeof value.loop === 'number' && value.loop > 1)) &&
+        typeof duration === 'number' &&
+        duration <= 0
+      ) {
+        this.error(
+          'NACHI_ASSET_TIMELINE_LOOP_DURATION_REQUIRED',
+          'A looping timeline requires a positive duration.',
+          `${path}.duration`,
+        );
+      }
     }
   }
 
@@ -733,6 +797,13 @@ class AssetValidator {
     this.unknownFields(value, new Set(['actions', 'at']), path);
     this.required(value, ['actions', 'at'], path);
     this.finiteNumber(value.at, `${path}.at`);
+    if (typeof value.at === 'number' && Number.isFinite(value.at) && value.at < 0) {
+      this.error(
+        'NACHI_ASSET_TIMELINE_TIME_INVALID',
+        'Timeline entry time must be non-negative.',
+        `${path}.at`,
+      );
+    }
     if (!Array.isArray(value.actions)) this.type('array', value.actions, `${path}.actions`);
     else {
       this.denseArray(value.actions, `${path}.actions`);
@@ -1268,13 +1339,60 @@ function gridStageSourceDiagnostics(
   return diagnostics;
 }
 
+function gridStageConfigDiagnostics(input: unknown): readonly VfxDiagnostic[] {
+  if (!isRecord(input) || !isRecord(input.effect) || !isRecord(input.effect.elements)) return [];
+  const elements = input.effect.elements;
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const [key, element] of Object.entries(elements)) {
+    if (!isRecord(element) || element.kind !== 'sim-stage' || !isRecord(element.update)) continue;
+    if (
+      element.update.source !== 'core/grid2d-inject' &&
+      element.update.source !== 'core/grid3d-inject'
+    )
+      continue;
+    if (typeof element.target !== 'string' || !isRecord(element.update.config)) continue;
+    const target = elements[element.target];
+    if (!isRecord(target) || !isRecord(target.channels)) continue;
+    const values = element.update.config.values;
+    if (!isRecord(values)) continue;
+    const dimensions = element.update.source === 'core/grid3d-inject' ? 3 : 2;
+    for (const [name, value] of Object.entries(values)) {
+      const declaration = target.channels[name];
+      const type = isRecord(declaration) ? declaration.type : undefined;
+      const valid =
+        type === 'f32'
+          ? typeof value === 'number' && Number.isFinite(value)
+          : type === `vec${dimensions}` &&
+            Array.isArray(value) &&
+            value.length === dimensions &&
+            value.every((component) => typeof component === 'number' && Number.isFinite(component));
+      if (!valid) {
+        pushDiagnostic(
+          diagnostics,
+          'deserialize',
+          dimensions === 3
+            ? 'NACHI_GRID3D_STAGE_VALUE_INVALID'
+            : 'NACHI_GRID2D_STAGE_VALUE_INVALID',
+          `Grid inject value for "${name}" must match the target channel type and contain only finite components.`,
+          `$.effect.elements.${key}.update.config.values.${name}`,
+        );
+      }
+    }
+  }
+  return diagnostics;
+}
+
 export function validateEffectAsset(
   input: unknown,
   options: LoadEffectOptions = {},
 ): readonly VfxDiagnostic[] {
   const validator = new AssetValidator('deserialize');
   validator.document(input);
-  return [...validator.diagnostics, ...gridStageSourceDiagnostics(input, options)];
+  return [
+    ...validator.diagnostics,
+    ...gridStageSourceDiagnostics(input, options),
+    ...gridStageConfigDiagnostics(input),
+  ];
 }
 
 export function serializeEffect<
@@ -1290,7 +1408,8 @@ export function serializeEffect<
   } satisfies EffectAssetDocumentV1;
   const validator = new AssetValidator('serialize');
   validator.document(document);
-  if (validator.diagnostics.length > 0) throw new VfxDiagnosticError(validator.diagnostics);
+  const validationDiagnostics = [...validator.diagnostics, ...gridStageConfigDiagnostics(document)];
+  if (validationDiagnostics.length > 0) throw new VfxDiagnosticError(validationDiagnostics);
   return document;
 }
 
@@ -1302,7 +1421,11 @@ function migratedDocument(input: unknown, options: LoadEffectOptions): UnknownRe
   );
   const validator = new AssetValidator('deserialize');
   validator.document(migrated);
-  const diagnostics = [...validator.diagnostics, ...gridStageSourceDiagnostics(migrated, options)];
+  const diagnostics = [
+    ...validator.diagnostics,
+    ...gridStageSourceDiagnostics(migrated, options),
+    ...gridStageConfigDiagnostics(migrated),
+  ];
   if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   return jsonClone(migrated) as UnknownRecord;
 }

@@ -215,6 +215,9 @@ describe('deterministic PCG random', () => {
   });
 
   it('hashes module labels deterministically and distinguishes label text', () => {
+    expect(hashModuleLabel('init')).toBe(380_752_755);
+    expect(hashModuleLabel('update')).toBe(672_109_684);
+    expect(hashModuleLabel('stable-smoke')).toBe(2_072_313_442);
     expect(hashModuleLabel('火花')).toBe(hashModuleLabel('火花'));
     expect(hashModuleLabel('fire')).not.toBe(hashModuleLabel('smoke'));
   });

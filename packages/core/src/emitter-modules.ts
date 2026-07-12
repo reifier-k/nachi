@@ -6,6 +6,7 @@ import type {
   ParameterSchema,
   VfxDiagnostic,
 } from './types.js';
+import { MAX_PREWARM_SECONDS } from './limits.js';
 
 export type LocatedEmitterModule = {
   readonly module: ModuleDefinition<ModuleStage, object>;
@@ -151,6 +152,15 @@ export function collectEmitterLifecycleDiagnostics(
   nonNegativeFinite(lifecycle.duration, 'duration');
   nonNegativeFinite(lifecycle.prewarm, 'prewarm');
   nonNegativeFinite(lifecycle.startDelay, 'startDelay');
+  if (lifecycle.prewarm !== undefined && lifecycle.prewarm > MAX_PREWARM_SECONDS) {
+    diagnostics.push(
+      compileDiagnostic(
+        'NACHI_LIFECYCLE_PREWARM_LIMIT_EXCEEDED',
+        `Emitter lifecycle prewarm must not exceed ${MAX_PREWARM_SECONDS} seconds.`,
+        'lifecycle.prewarm',
+      ),
+    );
+  }
   if (
     lifecycle.loopCount !== undefined &&
     lifecycle.loopCount !== 'infinite' &&
@@ -295,6 +305,19 @@ export function collectEmitterBehaviorConfigDiagnostics(
             'NACHI_COLLISION_SDF_THICKNESS_INVALID',
             'SDF collision thickness must be positive and finite.',
             `${path}.config.thickness`,
+          ),
+        );
+      }
+    }
+
+    if (module.type === 'core/velocity-cone') {
+      const direction = moduleConfig.direction;
+      if (!isFiniteVector(direction, 3) || Math.hypot(...direction) === 0) {
+        diagnostics.push(
+          compileDiagnostic(
+            'NACHI_VELOCITY_CONE_DIRECTION_INVALID',
+            'Velocity-cone direction must be a finite non-zero vec3.',
+            `${path}.config.direction`,
           ),
         );
       }

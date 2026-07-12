@@ -5,6 +5,7 @@ import {
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
 } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
+import { MAX_EMITTER_CAPACITY, MAX_PBD_ITERATIONS } from './limits.js';
 import { neighborGridCellCount, validateNeighborGridDefinition } from './neighbor-grid.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
@@ -85,6 +86,16 @@ export const CURL_NOISE_FINITE_DIFFERENCE = 0.1;
 export const DEFAULT_SOFT_PARTICLE_FADE_DISTANCE = 0.035;
 /** Bound keeps O(log^2 n) dispatch count and two padded storage buffers explicit. */
 export const MAX_SORTED_PARTICLE_CAPACITY = 65_536;
+
+/** Reserves four deterministic random samples for each compiler-authored attribute default. */
+export function defaultAttributeSampleOffset(storageIndex: number): number {
+  return storageIndex * 4;
+}
+
+/** CPU scalar mirror of one side of the symmetric PBD distance correction. */
+export function pbdPairCorrection(distance: number, targetDistance: number): number {
+  return (targetDistance - distance) * 0.5;
+}
 
 export interface BitonicSortPass {
   readonly blockSize: number;
@@ -1735,6 +1746,9 @@ export function bakeCurveLut(
   id = 'curve',
   width = DEFAULT_LUT_RESOLUTION,
 ): BakedLut {
+  if (!Number.isSafeInteger(width) || width < 2) {
+    throw new RangeError('Curve LUT width must be a safe integer of at least 2.');
+  }
   const data = new Float32Array(width);
   for (let index = 0; index < width; index += 1) {
     data[index] = sampleCurve(curve, index / (width - 1));
@@ -1770,6 +1784,9 @@ export function bakeGradientLut(
   id = 'gradient',
   width = DEFAULT_LUT_RESOLUTION,
 ): BakedLut {
+  if (!Number.isSafeInteger(width) || width < 2) {
+    throw new RangeError('Gradient LUT width must be a safe integer of at least 2.');
+  }
   const data = new Float32Array(width * 4);
   for (let index = 0; index < width; index += 1) {
     data.set(sampleGradient(gradient, index / (width - 1)), index * 4);
@@ -2736,6 +2753,45 @@ function createBuildKernels(
       return index.bitXor(identity).bitXor(identity);
     };
     if (backend === 'webgl2') {
+      const kernelAttributeAccesses = new Set(
+        [
+          ...program.spawn.modules,
+          ...program.kernels.init.modules.filter(({ type }) => type !== 'core/defaults'),
+          ...program.kernels.update.modules,
+        ]
+          .flatMap(({ access }) => [
+            ...access.reads,
+            ...(access.optionalReads ?? []),
+            ...access.writes,
+          ])
+          .filter((path) => path.startsWith('Particles.')),
+      );
+      for (const storage of program.attributeSchema.storageArrays) {
+        if (!storage.packed || storage.groupCount <= 1) continue;
+        const usedHigherGroups = storage.attributes.flatMap((name) => {
+          const attribute = program.attributeSchema.byName[name];
+          return attribute &&
+            attribute.physical.group > 0 &&
+            kernelAttributeAccesses.has(attribute.path)
+            ? [{ group: attribute.physical.group, name }]
+            : [];
+        });
+        // The compiler-authored defaults module mirrors every allocated attribute and therefore
+        // only proves that the packed storage exists. Reject when a behavioral kernel actually
+        // addresses a higher group, which is where Three r185 TF aliases the destination to group 0.
+        if (usedHigherGroups.length === 0) continue;
+        const accesses = usedHigherGroups
+          .map(({ group, name }) => `${name} (group ${group})`)
+          .join(', ');
+        buildDiagnostics.push({
+          code: 'NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED',
+          hint: 'Use the WebGPU backend or declare attributes in dedicated physical storage.',
+          message: `WebGL2 transform feedback cannot preserve packed storage Particles.${storage.name} when kernel access reaches ${accesses}; higher element groups would alias group 0.`,
+          path: `attributeSchema.storageArrays.${storage.index}.groupCount`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
       if (program.events.length > 0 || (options.eventInputs?.length ?? 0) > 0) {
         buildDiagnostics.push({
           code: 'NACHI_BACKEND_EVENT_UNSUPPORTED',
@@ -3680,7 +3736,11 @@ function createBuildKernels(
                 const distance = length3(delta);
                 adapter.branch(distance.lessThan(config.distance), () => {
                   correction.addAssign(
-                    delta.div(distance.clamp(1e-6, 1e20)).mul(config.distance).sub(delta).mul(0.5),
+                    delta
+                      .div(distance.clamp(1e-6, 1e20))
+                      .mul(config.distance)
+                      .sub(delta)
+                      .mul(pbdPairCorrection(0, 1)),
                   );
                   count.addAssign(1);
                 });
@@ -4284,6 +4344,23 @@ export function compileEmitter<
   const diagnostics: VfxDiagnostic[] = [];
   const registry = options.registry ?? createCoreKernelModuleRegistry();
   const untypedDefinition = definition as EmitterDefinition<AttributeSchema, ParameterSchema>;
+  if (!Number.isSafeInteger(definition.capacity) || definition.capacity <= 0) {
+    diagnostics.push({
+      code: 'NACHI_EMITTER_CAPACITY_INVALID',
+      message: 'Emitter capacity must be a positive safe integer.',
+      path: 'capacity',
+      phase: 'compile',
+      severity: 'error',
+    });
+  } else if (definition.capacity > MAX_EMITTER_CAPACITY) {
+    diagnostics.push({
+      code: 'NACHI_EMITTER_CAPACITY_LIMIT_EXCEEDED',
+      message: `Emitter capacity ${definition.capacity} exceeds the defensive limit ${MAX_EMITTER_CAPACITY}.`,
+      path: 'capacity',
+      phase: 'compile',
+      severity: 'error',
+    });
+  }
   diagnostics.push(...collectEmitterLifecycleDiagnostics(untypedDefinition));
   diagnostics.push(...collectEmitterBehaviorConfigDiagnostics(untypedDefinition));
   diagnostics.push(...collectEmitterModuleLabelDiagnostics(untypedDefinition));
@@ -4378,6 +4455,14 @@ export function compileEmitter<
         diagnostics.push({
           code: 'NACHI_PBD_ITERATIONS_INVALID',
           message: 'PBD iterations must be a positive safe integer.',
+          path: `update[${index}].config.iterations`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      } else if ((pbd.iterations ?? 1) > MAX_PBD_ITERATIONS) {
+        diagnostics.push({
+          code: 'NACHI_PBD_ITERATIONS_LIMIT_EXCEEDED',
+          message: `PBD iterations must not exceed ${MAX_PBD_ITERATIONS}.`,
           path: `update[${index}].config.iterations`,
           phase: 'compile',
           severity: 'error',
@@ -4860,7 +4945,11 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       for (const attribute of config.attributes) {
         context.write(
           attribute.name,
-          context.value(attribute.default, attribute.logicalType, attribute.storageIndex),
+          context.value(
+            attribute.default,
+            attribute.logicalType,
+            defaultAttributeSampleOffset(attribute.storageIndex),
+          ),
         );
       }
     },

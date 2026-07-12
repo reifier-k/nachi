@@ -564,6 +564,7 @@ async function run(): Promise<void> {
     cameraShakeDeterministic: shake.byteEqual,
     cameraShakeDecay: shake.monotonicDecay && shake.zeroTail,
     consoleClean: consoleMessages.length === 0,
+    curveChanged: curveChanged > 24,
     hitStopSeparation:
       Math.abs(hitStopSeparation.localTime - 0.05) < 1e-8 &&
       Math.abs(hitStopSeparation.worldTime - 0.09) < 1e-8,

@@ -37,6 +37,7 @@ type R3FFrameState = {
     projectionMatrix: { elements: readonly number[] };
   };
   size: { height: number; width: number };
+  viewport: { dpr: number };
 };
 
 vi.mock('@react-three/fiber', () => ({
@@ -283,6 +284,7 @@ const IDENTITY_FRAME_STATE: R3FFrameState = {
     projectionMatrix: { elements: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
   },
   size: { height: 360, width: 640 },
+  viewport: { dpr: 1 },
 };
 
 describe('@nachi/react lifecycle', () => {
@@ -444,6 +446,7 @@ describe('@nachi/react lifecycle', () => {
               projectionMatrix: { elements: projectionMatrix },
             },
             size: { height: 720, width: 1280 },
+            viewport: { dpr: 2 },
           },
           1 / 60,
         );
@@ -453,7 +456,7 @@ describe('@nachi/react lifecycle', () => {
     expect(setCamera).toHaveBeenCalledWith({
       projectionMatrix,
       viewMatrix,
-      viewportSize: [1280, 720],
+      viewportSize: [2560, 1440],
     });
 
     await act(async () => root.unmount());
