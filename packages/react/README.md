@@ -3,13 +3,78 @@
 Thin React Three Fiber bindings for `@nachi/core`. React, R3F, and Three.js are peer dependencies;
 the package does not create a second renderer or VFX runtime.
 
-```tsx
-<Canvas>
-  <VFXSystemProvider renderer={runtimeRenderer}>
-    <VFXEffect definition={sparks} position={[0, 1, 0]} />
-  </VFXSystemProvider>
-</Canvas>
+```sh
+pnpm add @nachi/core @nachi/three @nachi/react react@^19 @react-three/fiber@^9 three@0.185.1
+pnpm add -D @types/three@0.185.0
 ```
+
+```tsx
+import {
+  billboard,
+  burst,
+  defineEffect,
+  defineEmitter,
+  lifetime,
+  positionSphere,
+} from '@nachi/core';
+import { VFXSystemProvider, useEffectInstance } from '@nachi/react';
+import {
+  createThreeKernelAdapter,
+  createThreeRuntimeRenderer,
+  materializeThreeSpriteDraw,
+} from '@nachi/three';
+import { Canvas, useThree } from '@react-three/fiber';
+import { useEffect } from 'react';
+import * as THREE from 'three/webgpu';
+
+const effect = defineEffect({
+  elements: {
+    sparks: defineEmitter({
+      capacity: 256,
+      init: [positionSphere({ radius: 0.2 }), lifetime(0.8)],
+      render: billboard({ blending: 'additive' }),
+      spawn: burst({ count: 80 }),
+    }),
+  },
+});
+
+const threeRenderer = new THREE.WebGPURenderer({ antialias: true });
+await threeRenderer.init();
+const kernelAdapter = createThreeKernelAdapter({ backend: 'webgpu' });
+const runtimeRenderer = createThreeRuntimeRenderer(threeRenderer, kernelAdapter);
+
+function Sparks() {
+  const scene = useThree((state) => state.scene);
+  const instance = useEffectInstance(effect, { position: [0, 1, 0], seed: 42 });
+
+  useEffect(() => {
+    const emitter = instance?.getEmitter('sparks');
+    if (!emitter) return;
+    const draw = materializeThreeSpriteDraw(emitter.program, emitter.kernels);
+    scene.add(draw);
+    return () => {
+      scene.remove(draw);
+      draw.geometry.dispose();
+      draw.material.dispose();
+    };
+  }, [instance, scene]);
+
+  return null;
+}
+
+export function App() {
+  return (
+    <Canvas gl={threeRenderer} camera={{ position: [0, 1, 5] }}>
+      <VFXSystemProvider renderer={runtimeRenderer}>
+        <Sparks />
+      </VFXSystemProvider>
+    </Canvas>
+  );
+}
+```
+
+`three@0.185.1` is an exact peer. TypeScript projects also need `@types/three@0.185.0` because Three
+publishes its declarations separately.
 
 `VFXSystemProvider` copies the active R3F camera matrices and pixel viewport to core, then calls
 `system.update(delta)` from `useFrame`. Camera synchronization is enabled by default so distance and

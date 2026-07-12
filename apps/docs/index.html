@@ -35,12 +35,25 @@
           <article>
             <span>01</span>
             <h3>Install</h3>
-            <pre><code>pnpm add @nachi/core three@0.185.1</code></pre>
+            <pre><code>pnpm add @nachi/core @nachi/three three@0.185.1
+pnpm add -D @types/three@0.185.0 # TypeScript</code></pre>
           </article>
           <article>
             <span>02</span>
-            <h3>Define</h3>
-            <pre><code>const sparks = defineEmitter({
+            <h3>Import and define</h3>
+            <pre><code>import {
+  VFXSystem, billboard, burst, defineEffect,
+  defineEmitter, drag, gravity, lifetime,
+  positionSphere,
+} from '@nachi/core'
+import {
+  createThreeKernelAdapter,
+  createThreeRuntimeRenderer,
+  materializeThreeSpriteDraw,
+} from '@nachi/three'
+import * as THREE from 'three/webgpu'
+
+const sparks = defineEmitter({
   capacity: 512,
   spawn: burst({ count: 120 }),
   init: [positionSphere({ radius: .2 }), lifetime(.8)],
@@ -52,23 +65,47 @@ const effect = defineEffect({ elements: { sparks } })</code></pre>
           </article>
           <article>
             <span>03</span>
-            <h3>Play</h3>
-            <pre><code>const system = new VFXSystem(runtimeRenderer)
-const instance = system.spawn(effect, { position: hitPoint })
+            <h3>Materialize and play</h3>
+            <pre><code>const renderer = new THREE.WebGPURenderer()
+renderer.setSize(innerWidth, innerHeight)
+document.body.append(renderer.domElement)
+await renderer.init()
 
-// game loop
-await system.update(deltaSeconds)
+const scene = new THREE.Scene()
+const camera = new THREE.PerspectiveCamera(
+  50, innerWidth / innerHeight, .1, 100,
+)
+camera.position.set(0, 1, 5)
 
-// teardown
-instance.release()</code></pre>
+const adapter = createThreeKernelAdapter({ backend: 'webgpu' })
+const runtimeRenderer = createThreeRuntimeRenderer(renderer, adapter)
+const system = new VFXSystem(runtimeRenderer, scene)
+const instance = system.spawn(effect, { position: [0, 1, 0], seed: 42 })
+const emitter = instance.getEmitter('sparks')
+if (!emitter) throw new Error('Missing sparks emitter')
+const draw = materializeThreeSpriteDraw(emitter.program, emitter.kernels)
+scene.add(draw)
+
+let previous = performance.now()
+async function frame(now) {
+  await system.update(Math.min((now - previous) / 1000, .1))
+  previous = now
+  renderer.render(scene, camera)
+  requestAnimationFrame(frame)
+}
+requestAnimationFrame(frame)</code></pre>
           </article>
         </div>
         <aside class="react-note">
-          <strong>Using R3F?</strong> Install <code>@nachi/react</code>, wrap effects in
-          <code>&lt;VFXSystemProvider renderer={runtimeRenderer}&gt;</code>, then mount
-          <code>&lt;VFXEffect definition={effect} /&gt;</code>. The provider drives updates and the
-          component releases automatically.
+          <strong>Using R3F?</strong> Install <code>@nachi/react</code> and use its package README's
+          complete adapter, materializer, provider, and cleanup example. The provider drives updates
+          and the component releases automatically.
         </aside>
+        <p>
+          The playground links on this page assume the docs and playground are deployed as sibling
+          paths. A standalone docs deployment must configure those target URLs or omit the demo
+          links; the npm Quick Start above has no playground dependency.
+        </p>
       </section>
 
       <section id="guides">

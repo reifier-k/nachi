@@ -21,7 +21,7 @@ import {
   createThreeTextureResolver,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from './three-kernel-adapter';
+} from '@nachi/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m10-lit.css';
 

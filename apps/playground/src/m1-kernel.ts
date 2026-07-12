@@ -21,7 +21,8 @@ import type { KernelTslAdapter, ModuleDefinition } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
-import { createThreeKernelAdapter, readLogicalAttribute } from './three-kernel-adapter';
+import { createThreeKernelAdapter } from '@nachi/three';
+import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';
 

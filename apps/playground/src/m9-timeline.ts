@@ -39,8 +39,8 @@ import {
   createThreeRuntimeRenderer,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-  readStorage,
-} from './three-kernel-adapter';
+} from '@nachi/three';
+import { readStorage } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m9-timeline.css';
 

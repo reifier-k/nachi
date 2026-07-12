@@ -25,8 +25,8 @@ import {
   createThreeRuntimeRenderer,
   createThreeSdfResolver,
   createThreeSdfResource,
-  readLogicalAttribute,
-} from './three-kernel-adapter';
+} from '@nachi/three';
+import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m6-collision.css';

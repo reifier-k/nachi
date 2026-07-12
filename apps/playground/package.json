@@ -19,6 +19,7 @@
     "@nachi/format": "workspace:^",
     "@nachi/mesh-fx": "workspace:^",
     "@nachi/post": "workspace:^",
+    "@nachi/three": "workspace:^",
     "@nachi/timeline": "workspace:^",
     "@nachi/trails": "workspace:^",
     "@nachi/tsl-kit": "workspace:^",

@@ -28,7 +28,7 @@ import {
   vortex,
   createCoreKernelModuleRegistry,
 } from '@nachi/core';
-import { applyEmitterQualityTier } from '../../../packages/core/src/scalability.js';
+import { applyEmitterQualityTier } from '../../core/src/scalability.js';
 import type { EffectInstanceState } from '@nachi/core';
 import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
 import { materializeThreeRibbonDraw } from '@nachi/trails/three';
@@ -53,7 +53,7 @@ import {
   materializeThreeLightDraw,
   materializeThreeDecalDraw,
   materializeThreeSpriteDraw,
-} from './three-kernel-adapter.js';
+} from '../src/index.js';
 
 describe('three kernel adapter', () => {
   it('keeps the M11 WebGL2 scale probes within burst and transform-feedback limits', () => {

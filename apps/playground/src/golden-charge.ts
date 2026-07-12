@@ -35,8 +35,8 @@ import {
   createThreeRuntimeRenderer,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-  readLogicalAttribute,
-} from './three-kernel-adapter';
+} from '@nachi/three';
+import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { compactRgba8Readback } from './readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';

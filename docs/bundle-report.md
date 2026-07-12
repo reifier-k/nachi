@@ -14,13 +14,14 @@ level 9. Numbers are evidence only—the FA coordinator owns budget judgment.
 | `@nachi/mesh-fx`  |    10 |   43132 (42.12 KiB) |   11826 (11.55 KiB) |
 | `@nachi/post`     |    16 |   41924 (40.94 KiB) |   12357 (12.07 KiB) |
 | `@nachi/react`    |     4 |     9953 (9.72 KiB) |     2869 (2.80 KiB) |
+| `@nachi/three`    |     2 |   65154 (63.63 KiB) |   14645 (14.30 KiB) |
 | `@nachi/timeline` |     6 |   49662 (48.50 KiB) |   12514 (12.22 KiB) |
 | `@nachi/trails`   |     4 |   21714 (21.21 KiB) |     6161 (6.02 KiB) |
 | `@nachi/tsl-kit`  |    16 |   18469 (18.04 KiB) |     7108 (6.94 KiB) |
 
-**Total:** 100 files, 951991 bytes
-(929.68 KiB) raw, 209499 bytes
-(204.59 KiB) gzip.
+**Total:** 102 files, 1017145 bytes
+(993.31 KiB) raw, 224144 bytes
+(218.89 KiB) gzip.
 
 ## Tree-shaking probe
 

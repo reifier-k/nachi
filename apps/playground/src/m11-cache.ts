@@ -25,7 +25,7 @@ import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-} from './three-kernel-adapter';
+} from '@nachi/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m11-cache.css';
 

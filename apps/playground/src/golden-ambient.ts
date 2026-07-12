@@ -33,8 +33,8 @@ import {
   createThreeTextureResolver,
   materializeThreeMeshDraw,
   materializeThreeSpriteDraw,
-  readLogicalAttribute,
-} from './three-kernel-adapter';
+} from '@nachi/three';
+import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-ambient.css';
 

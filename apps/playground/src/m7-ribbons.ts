@@ -21,11 +21,8 @@ import {
 } from '@nachi/trails/three';
 import * as THREE from 'three/webgpu';
 
-import {
-  createThreeKernelAdapter,
-  createThreeRuntimeRenderer,
-  readLogicalAttribute,
-} from './three-kernel-adapter';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
+import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m7-ribbons.css';

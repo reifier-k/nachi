@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { context } from 'three/tsl';
 
-import { createThreeKernelAdapter } from './three-kernel-adapter';
+import { createThreeKernelAdapter } from '@nachi/three';
 
 const grid = defineNeighborGrid({
   cellCapacity: 8,

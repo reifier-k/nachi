@@ -21,7 +21,7 @@ import * as THREE from 'three/webgpu';
 import { vec3 } from 'three/tsl';
 
 import { createPerformanceMonitor } from './perf';
-import { createThreeKernelAdapter, createThreeRuntimeRenderer } from './three-kernel-adapter';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m12-neighbors.css';
 

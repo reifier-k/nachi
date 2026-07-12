@@ -11,12 +11,8 @@ import {
 import type { EffectEventSummary, VfxEmitterRuntimeView } from '@nachi/core';
 import type { CompiledEventQueueDescription, KernelUniformNode } from '@nachi/core';
 
-import {
-  createThreeKernelAdapter,
-  createThreeRuntimeRenderer,
-  readLogicalAttribute,
-  readStorage,
-} from './three-kernel-adapter';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
+import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m3-sprites.css';

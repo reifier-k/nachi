@@ -42,6 +42,14 @@
       "version": "0.0.0"
     },
     {
+      "files": 2,
+      "gzipBytes": 14645,
+      "name": "@nachi/three",
+      "rawBytes": 65154,
+      "runtimeJsRawBytes": 58049,
+      "version": "0.0.0"
+    },
+    {
       "files": 6,
       "gzipBytes": 12514,
       "name": "@nachi/timeline",
@@ -67,9 +75,9 @@
     }
   ],
   "totals": {
-    "files": 100,
-    "gzipBytes": 209499,
-    "rawBytes": 951991
+    "files": 102,
+    "gzipBytes": 224144,
+    "rawBytes": 1017145
   },
   "treeShaking": {
     "bundler": "rollup@4.62.2",

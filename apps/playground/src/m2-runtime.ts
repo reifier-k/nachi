@@ -14,12 +14,8 @@ import type { ModuleDefinition, SpawnModule, VfxEmitterRuntimeView } from '@nach
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
-import {
-  createThreeKernelAdapter,
-  createThreeRuntimeRenderer,
-  readLogicalAttribute,
-  readStorage,
-} from './three-kernel-adapter';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
+import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';
 

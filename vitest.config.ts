@@ -6,6 +6,10 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: '@nachi/three',
+        replacement: fileURLToPath(new URL('./packages/three/src/index.ts', import.meta.url)),
+      },
+      {
         find: '@nachi/format',
         replacement: fileURLToPath(new URL('./packages/format/src/index.ts', import.meta.url)),
       },

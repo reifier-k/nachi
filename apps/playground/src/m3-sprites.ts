@@ -19,8 +19,8 @@ import {
   createThreeRuntimeRenderer,
   createThreeTextureResolver,
   materializeThreeSpriteDraw,
-  readLogicalAttribute,
-} from './three-kernel-adapter';
+} from '@nachi/three';
+import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m3-sprites.css';

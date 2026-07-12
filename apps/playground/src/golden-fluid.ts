@@ -15,7 +15,7 @@ import {
 } from '@nachi/core';
 
 import { createPerformanceMonitor } from './perf';
-import { createThreeKernelAdapter, createThreeRuntimeRenderer } from './three-kernel-adapter';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-fluid.css';
 

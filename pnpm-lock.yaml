@@ -59,6 +59,9 @@ importers:
       '@nachi/post':
         specifier: workspace:^
         version: link:../../packages/post
+      '@nachi/three':
+        specifier: workspace:^
+        version: link:../../packages/three
       '@nachi/timeline':
         specifier: workspace:^
         version: link:../../packages/timeline
@@ -145,6 +148,22 @@ importers:
       react-test-renderer:
         specifier: 19.1.1
         version: 19.1.1(react@19.1.1)
+      three:
+        specifier: 0.185.1
+        version: 0.185.1
+
+  packages/three:
+    dependencies:
+      '@nachi/core':
+        specifier: workspace:^
+        version: link:../core
+    devDependencies:
+      '@nachi/trails':
+        specifier: workspace:^
+        version: link:../trails
+      '@types/three':
+        specifier: 0.185.0
+        version: 0.185.0
       three:
         specifier: 0.185.1
         version: 0.185.1

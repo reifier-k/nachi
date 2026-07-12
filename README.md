@@ -9,6 +9,7 @@ Three Fiber bindings, release automation, and a buildable documentation gallery.
 | Package           | Purpose                                                                                                                 |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `@nachi/core`     | Definitions, particle modules, compiler, GPU scheduler, scalability, sim cache, debugger, Grid2D/3D, and neighbor grids |
+| `@nachi/three`    | Three.js WebGPU kernel/runtime adapter, resource resolvers, and particle draw materializers                             |
 | `@nachi/format`   | Strict `nachi-effect` v1 JSON schema, serializer/loader, migrations, and asset inheritance                              |
 | `@nachi/react`    | Thin R3F provider, hook, component lifecycle, and `Object3D` attachment                                                 |
 | `@nachi/timeline` | Effect-local sequencing, camera shake, hit stop, markers, and mesh-fx lifecycle                                         |
@@ -25,16 +26,16 @@ The repository also contains the Vite [playground](./apps/playground) and static
 Core Three.js usage:
 
 ```sh
-pnpm add @nachi/core three@0.185.1
+pnpm add @nachi/core @nachi/three three@0.185.1
 ```
 
 React Three Fiber usage keeps React, R3F, and Three as peers:
 
 ```sh
-pnpm add @nachi/core @nachi/react react@^19 @react-three/fiber@^9 three@0.185.1
+pnpm add @nachi/core @nachi/three @nachi/react react@^19 @react-three/fiber@^9 three@0.185.1
 ```
 
-Packages that expose Three.js types (`@nachi/tsl-kit`, `@nachi/mesh-fx`, `@nachi/trails`,
+Packages that expose Three.js types (`@nachi/three`, `@nachi/tsl-kit`, `@nachi/mesh-fx`, `@nachi/trails`,
 `@nachi/timeline`, `@nachi/post`, and `@nachi/react`) also expect the separately published matching
 declarations in TypeScript projects:
 
@@ -63,6 +64,24 @@ import {
   lifetime,
   positionSphere,
 } from '@nachi/core';
+import {
+  createThreeKernelAdapter,
+  createThreeRuntimeRenderer,
+  materializeThreeSpriteDraw,
+} from '@nachi/three';
+import * as THREE from 'three/webgpu';
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.append(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 1, 5);
+
+const kernelAdapter = createThreeKernelAdapter({ backend: 'webgpu' });
+const runtimeRenderer = createThreeRuntimeRenderer(renderer, kernelAdapter);
 
 const sparks = defineEmitter({
   capacity: 512,
@@ -73,22 +92,30 @@ const sparks = defineEmitter({
 });
 
 const effect = defineEffect({ elements: { sparks } });
-const system = new VFXSystem(runtimeRenderer);
+const system = new VFXSystem(runtimeRenderer, scene);
 const instance = system.spawn(effect, { position: [0, 1, 0], seed: 42 });
+const emitter = instance.getEmitter('sparks');
+if (!emitter) throw new Error('The sparks emitter was not created.');
 
-await system.update(deltaSeconds);
-instance.release();
+const draw = materializeThreeSpriteDraw(emitter.program, emitter.kernels);
+scene.add(draw);
+
+let previousTime = performance.now();
+async function frame(time: number) {
+  const deltaSeconds = Math.min((time - previousTime) / 1000, 0.1);
+  previousTime = time;
+  await system.update(deltaSeconds);
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// When the effect is no longer needed:
+// scene.remove(draw); instance.release(); draw.geometry.dispose(); draw.material.dispose();
 ```
 
-In R3F, mount the runtime adapter once and let the binding own instance cleanup:
-
-```tsx
-<Canvas>
-  <VFXSystemProvider renderer={runtimeRenderer}>
-    <VFXEffect definition={effect} attachTo={weaponSocket} />
-  </VFXSystemProvider>
-</Canvas>
-```
+In R3F, create the same adapter once and let the binding own instance cleanup. The complete
+materialization example is in [`@nachi/react`](./packages/react/README.md).
 
 `useEffectInstance()` is the hook form. Live `parameters`, transform, time scale, and attachment are
 forwarded to core; changing seed or priority creates a fresh instance. Keep `definition` at module

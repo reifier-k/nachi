@@ -26,9 +26,8 @@ import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-  readLogicalAttribute,
-  readStorage,
-} from './three-kernel-adapter';
+} from '@nachi/three';
+import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m9-compose.css';
 
