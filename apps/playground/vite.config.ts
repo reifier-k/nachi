@@ -48,6 +48,7 @@ export default defineConfig({
         m11Debug: 'm11-debug/index.html',
         m12Grid: 'm12-grid/index.html',
         m12Neighbors: 'm12-neighbors/index.html',
+        showcaseBarrier: 'showcase-barrier/index.html',
         showcaseHeal: 'showcase-heal/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
