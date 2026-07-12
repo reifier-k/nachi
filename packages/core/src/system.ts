@@ -2,6 +2,7 @@ import {
   allocateEventQueueResources,
   compileEmitter,
   type BuiltEmitterKernels,
+  type BuiltNeighborGridKernels,
   type CompiledSpawnModule,
   type CompiledEmitterProgram,
   type KernelComputeNode,
@@ -67,6 +68,9 @@ import type {
   Grid2DRuntimeView,
   Grid3DDefinition,
   Grid3DRuntimeView,
+  NeighborGridDefinition,
+  NeighborGridRuntimeView,
+  NeighborGridSnapshot,
   SimStageDefinition,
 } from './types.js';
 
@@ -535,6 +539,59 @@ type AdvanceContext = {
   readonly systemTime: number;
 };
 
+class NeighborGridRuntime implements NeighborGridRuntimeView {
+  #initialized = false;
+  #submissionCount = 0;
+
+  constructor(
+    readonly definition: NeighborGridDefinition,
+    readonly kernels: BuiltNeighborGridKernels,
+    readonly renderer: VfxRuntimeRenderer,
+  ) {}
+
+  get initialized(): boolean {
+    return this.#initialized;
+  }
+
+  get submissionCount(): number {
+    return this.#submissionCount;
+  }
+
+  recordSubmission(): void {
+    this.#initialized = true;
+    this.#submissionCount += 1;
+  }
+
+  async capture(): Promise<NeighborGridSnapshot> {
+    if (!this.renderer.readStorage) {
+      throw new Error('NeighborGrid capture requires renderer storage readback support.');
+    }
+    const counts = await this.renderer.readStorage(this.kernels.counts);
+    const slots = await this.renderer.readStorage(this.kernels.slots);
+    const stats = await this.renderer.readStorage(this.kernels.stats);
+    const counters = new Uint32Array(stats);
+    const dropped = counters[0] ?? 0;
+    return {
+      counts: new Uint32Array(counts),
+      dropped,
+      diagnostics:
+        dropped === 0
+          ? []
+          : [
+              {
+                code: 'NACHI_NEIGHBOR_GRID_CELL_OVERFLOW',
+                message: `NeighborGrid fixed cell capacity ${this.definition.cellCapacity} dropped ${dropped} particle insertion(s) during the latest rebuild.`,
+                path: 'neighbor-grid.cellCapacity',
+                phase: 'runtime',
+                severity: 'warning',
+              },
+            ],
+      outOfBounds: counters[1] ?? 0,
+      slots: new Uint32Array(slots),
+    };
+  }
+}
+
 export interface VfxEmitterRuntimeView {
   readonly aliveCount: number | undefined;
   readonly definition: EmitterDefinition;
@@ -778,6 +835,7 @@ type LogicalSpawnBatch = { readonly count: number; readonly expiresAt: number };
 class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly controller: EmitterLifecycleController;
   readonly kernels: BuiltEmitterKernels;
+  readonly #neighborGrids = new Map<string, NeighborGridRuntime>();
   readonly program: CompiledEmitterProgram;
   readonly #aliveCountReadbackInterval: number | undefined;
   readonly #maxLifetime: number;
@@ -845,6 +903,9 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.controller = new EmitterLifecycleController(definition.lifecycle);
     this.kernels =
       reusedKernels ?? program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
+    for (const [key, kernels] of Object.entries(this.kernels.neighborGrids)) {
+      this.#neighborGrids.set(key, new NeighborGridRuntime(kernels.definition, kernels, renderer));
+    }
     renderer.clearStorageReplayReady?.(this.kernels);
     this.setQualityTier(qualityTier);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
@@ -895,6 +956,10 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     return this.program.kernels.update.modules.some(
       ({ type }) => type === 'core/collide-scene-depth',
     );
+  }
+
+  neighborGridEntries(): IterableIterator<[string, NeighborGridRuntime]> {
+    return this.#neighborGrids.entries();
   }
 
   get alphaBlended(): boolean {
@@ -1071,6 +1136,23 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     await this.#renderer.submitCompute(kernel);
   }
 
+  async #rebuildNeighborGrids(): Promise<void> {
+    for (const runtime of this.#neighborGrids.values()) {
+      const submit = async (kernel: KernelComputeNode) => {
+        await this.#submitCompute(kernel);
+        runtime.recordSubmission();
+      };
+      for (const constraint of runtime.kernels.pbdIterations) {
+        await submit(runtime.kernels.clear);
+        await submit(runtime.kernels.bucket);
+        await submit(constraint);
+      }
+      // The final rebuild is the snapshot consumed by boids/custom neighbor readers in update.
+      await submit(runtime.kernels.clear);
+      await submit(runtime.kernels.bucket);
+    }
+  }
+
   async #submitComputeIndirect(kernel: KernelComputeNode, resource: unknown): Promise<void> {
     const submit = this.#renderer.submitComputeIndirect;
     if (!submit) throw new Error('Indirect compute submission is unavailable.');
@@ -1153,6 +1235,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
             await this.#dispatchSpawn(this.#stepSpawnCount(step, this.#pendingDistance));
             this.#pendingDistance = 0;
           }
+          await this.#rebuildNeighborGrids();
           await this.#submitCompute(this.kernels.update);
           updated = true;
           this.#emitterAge += step;
@@ -1499,6 +1582,7 @@ export class VfxEffectInstance<
   readonly #emitters = new Map<string, RuntimeEmitter>();
   readonly #grids = new Map<string, Grid2DRuntime>();
   readonly #grids3D = new Map<string, Grid3DRuntime>();
+  readonly #neighborGrids = new Map<string, NeighborGridRuntime>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
   readonly #now: () => number;
@@ -1585,6 +1669,10 @@ export class VfxEffectInstance<
     this.#grids3D.set(key, grid);
   }
 
+  addNeighborGrid(key: string, grid: NeighborGridRuntime): void {
+    this.#neighborGrids.set(key, grid);
+  }
+
   getGrid2D(key: string): Grid2DRuntimeView | undefined {
     this.#assertNotReleased();
     return this.#grids.get(key);
@@ -1593,6 +1681,11 @@ export class VfxEffectInstance<
   getGrid3D(key: string): Grid3DRuntimeView | undefined {
     this.#assertNotReleased();
     return this.#grids3D.get(key);
+  }
+
+  getNeighborGrid(key: string): NeighborGridRuntimeView | undefined {
+    this.#assertNotReleased();
+    return this.#neighborGrids.get(key);
   }
 
   get boundingSphere(): BoundingSphere {
@@ -1784,6 +1877,7 @@ export class VfxEffectInstance<
     this.#grids.clear();
     for (const grid of this.#grids3D.values()) grid.release();
     this.#grids3D.clear();
+    this.#neighborGrids.clear();
   }
 
   setParameter<Path extends UserParameterKeys<Definition>>(
@@ -2270,6 +2364,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         );
         runtimeEmitter.setCamera(this.#cameraState);
         instance.addEmitter(entry.key, runtimeEmitter);
+        for (const [gridKey, grid] of runtimeEmitter.neighborGridEntries()) {
+          instance.addNeighborGrid(gridKey, grid);
+        }
       }
     } catch (error) {
       const kernelsToRelease = new Set<BuiltEmitterKernels>();
@@ -2483,6 +2580,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           entry[1].kind === 'grid2d' || entry[1].kind === 'grid3d',
       ),
     );
+    const neighborGridDefinitions = new Map(
+      Object.entries(definition.elements).filter(
+        (entry): entry is [string, NeighborGridDefinition] => entry[1].kind === 'neighbor-grid',
+      ),
+    );
     const simStages = Object.entries(definition.elements).filter(
       (entry): entry is [string, SimStageDefinition] => entry[1].kind === 'sim-stage',
     );
@@ -2505,6 +2607,55 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           code: 'NACHI_SIM_STAGE_TARGET_KIND_MISMATCH',
           message: `Simulation stage "${key}" uses ${stage.update.kind} for ${target.kind} target "${stage.target}".`,
           path: `elements.${key}.update.kind`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+    }
+    const neighborReferences = new Map<string, Set<string>>();
+    const emitterNeighborKeys = new Map<string, Set<string>>();
+    for (const [emitterKey, emitter] of emitterDefinitions) {
+      for (const { module, path } of collectEmitterModules(emitter)) {
+        if (
+          module.type !== 'core/boids' &&
+          module.type !== 'core/pbd-distance-constraint' &&
+          module.type !== 'core/neighbor-grid-tsl'
+        )
+          continue;
+        const grid = (module.config as { grid?: unknown }).grid;
+        if (typeof grid !== 'string') continue;
+        const keys = emitterNeighborKeys.get(emitterKey) ?? new Set<string>();
+        keys.add(grid);
+        emitterNeighborKeys.set(emitterKey, keys);
+        const consumers = neighborReferences.get(grid) ?? new Set<string>();
+        consumers.add(emitterKey);
+        neighborReferences.set(grid, consumers);
+        if (!neighborGridDefinitions.has(grid)) {
+          gridDiagnostics.push({
+            code: 'NACHI_NEIGHBOR_GRID_TARGET_UNKNOWN',
+            message: `Emitter "${emitterKey}" ${path} targets missing NeighborGrid "${grid}".`,
+            path: `elements.${emitterKey}.${path}.config.grid`,
+            phase: 'compile',
+            severity: 'error',
+          });
+        }
+      }
+    }
+    for (const [key] of neighborGridDefinitions) {
+      const consumers = neighborReferences.get(key) ?? new Set<string>();
+      if (consumers.size === 0) {
+        gridDiagnostics.push({
+          code: 'NACHI_NEIGHBOR_GRID_UNBOUND',
+          message: `NeighborGrid "${key}" is not referenced by an emitter update module.`,
+          path: `elements.${key}`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      } else if (consumers.size > 1) {
+        gridDiagnostics.push({
+          code: 'NACHI_NEIGHBOR_GRID_MULTIPLE_EMITTERS',
+          message: `NeighborGrid "${key}" is referenced by multiple emitters (${[...consumers].join(', ')}); v1 grids have one particle source.`,
+          path: `elements.${key}`,
           phase: 'compile',
           severity: 'error',
         });
@@ -2543,6 +2694,12 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           key,
           program: compileEmitter(emitter, {
             eventPayloadFields: [...(eventPayloadFields.get(key) ?? [])],
+            neighborGrids: Object.fromEntries(
+              [...(emitterNeighborKeys.get(key) ?? [])].flatMap((gridKey) => {
+                const grid = neighborGridDefinitions.get(gridKey);
+                return grid ? [[gridKey, grid] as const] : [];
+              }),
+            ),
             ...(this.#registry === undefined ? {} : { registry: this.#registry }),
           }),
         };

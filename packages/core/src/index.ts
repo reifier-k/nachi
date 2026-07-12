@@ -66,6 +66,16 @@ export type {
   GridSourceOptions,
 } from './grid2d.js';
 export * from './random.js';
+export {
+  NEIGHBOR_GRID_EMPTY_SLOT,
+  bucketNeighborGridPoints,
+  enumerateNeighborGridCells,
+  neighborGridCellCount,
+  neighborGridCellIndex,
+  neighborGridPositionCell,
+  validateNeighborGridDefinition,
+} from './neighbor-grid.js';
+export type { CpuNeighborGridBuckets } from './neighbor-grid.js';
 export { detectDeviceQualityTier, selectDeviceQualityTier } from './scalability.js';
 export type {
   DetectDeviceQualityOptions,

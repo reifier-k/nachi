@@ -14,10 +14,12 @@ import {
   defineGrid2DStageFunction,
   defineGrid3D,
   defineGrid3DStageFunction,
+  defineNeighborGrid,
   defineSimStage,
   defineParameter,
   defineTslFunction,
   drag,
+  boids,
   emitTo,
   gradient,
   gravity,
@@ -647,6 +649,26 @@ describe('asset-reference emitter inheritance', () => {
     });
     const document = serializeEffect(effect);
     expect(serializeEffect(loadEffect(document))).toEqual(document);
+  });
+
+  it('round-trips NeighborGrid declarations and built-in boids references', () => {
+    const neighbors = defineNeighborGrid({
+      cellCapacity: 24,
+      cellSize: 0.5,
+      origin: [-4, -2, -4],
+      resolution: [16, 8, 16],
+    });
+    const flock = defineEmitter({
+      capacity: 256,
+      render: billboard({}),
+      spawn: burst({ count: 64 }),
+      update: [boids({ cohesion: 0.8, grid: 'neighbors', radius: 1 })],
+    });
+    const effect = defineEffect({ elements: { flock, neighbors } });
+    const document = serializeEffect(effect);
+    const loaded = loadEffect(document);
+    expect(serializeEffect(loaded)).toEqual(document);
+    expect(loaded.elements.neighbors).toEqual(neighbors);
   });
 
   it('rejects inline Grid3D TSL', () => {

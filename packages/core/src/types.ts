@@ -247,6 +247,13 @@ export interface TslExpression<T> {
   sub(value: T | TslExpression<T>): TslExpression<T>;
   /** Explicit numeric conversion for integer-backed bindings such as spawnOrder. */
   toFloat(): TslExpression<number>;
+  /** Materialize a mutable TSL local for accumulation inside dynamic control flow. */
+  toVar(): TslMutableExpression<T>;
+}
+
+export interface TslMutableExpression<T> extends TslExpression<T> {
+  addAssign(value: T | TslExpression<T>): TslMutableExpression<T>;
+  assign(value: T | TslExpression<T>): TslMutableExpression<T>;
 }
 
 export interface BuiltInTslParticleBindings {
@@ -760,6 +767,62 @@ export interface Grid3DDefinition<Channels extends Grid3DChannelSchema = Grid3DC
   readonly version: 1;
 }
 
+/** WebGPU spatial hash rebuilt from one consuming emitter before its particle update. */
+export interface NeighborGridDefinition {
+  /** Maximum particle indices retained per cell. Later inserts are dropped and counted. */
+  readonly cellCapacity: number;
+  /** World-space edge length of one cubic cell. Search radii are authored in these units. */
+  readonly cellSize: number;
+  readonly kind: 'neighbor-grid';
+  /** World-space position of cell (0, 0, 0)'s minimum corner. */
+  readonly origin: Vec3;
+  readonly resolution: readonly [width: number, height: number, depth: number];
+  readonly version: 1;
+}
+
+export interface BoidsOptions {
+  readonly alignment?: number;
+  readonly cohesion?: number;
+  readonly grid: string;
+  readonly maxAcceleration?: number;
+  /** Cubic neighbor-cell radius. The world-space extent is radius * grid.cellSize. */
+  readonly radius?: number;
+  readonly separation?: number;
+  /** Separation distance in cell-size units. */
+  readonly separationRadius?: number;
+}
+
+export interface PbdDistanceConstraintOptions {
+  /** Minimum pair distance in world units. Exactly coincident v1 pairs have no jitter direction. */
+  readonly distance: number;
+  readonly grid: string;
+  /** Independent Jacobi submissions. */
+  readonly iterations?: number;
+  /** Cubic neighbor-cell radius; defaults to ceil(distance / cellSize). */
+  readonly radius?: number;
+  readonly stiffness?: number;
+}
+
+export interface NeighborGridTslParticle {
+  readonly index: TslExpression<number>;
+  readonly position: TslExpression<Vec3>;
+  readonly velocity: TslExpression<Vec3>;
+}
+
+export interface NeighborGridTslContext extends NeighborGridTslParticle {
+  /** Visits bucket-time snapshots; the inherited context position/velocity are live attributes. */
+  forEachNeighbor(visitor: (neighbor: NeighborGridTslParticle) => void): void;
+}
+
+export type NeighborGridTslFactory = (
+  context: NeighborGridTslContext,
+) => Readonly<Record<string, TslExpression<unknown>>>;
+
+export interface NeighborGridTslModuleDefinition extends UpdateModule {
+  readonly config: Readonly<{ grid: string; radius: number; source: { kind: 'inline' } }>;
+  readonly factory?: NeighborGridTslFactory;
+}
+
 export interface Grid3DStageFunctionRef {
   readonly id: string;
   readonly kind: 'grid3d-function-ref';
@@ -790,6 +853,7 @@ export type EffectElementDefinition =
   | EmitterDefinition<AttributeSchema, ParameterSchema>
   | Grid2DDefinition
   | Grid3DDefinition
+  | NeighborGridDefinition
   | SimStageDefinition
   | VisualElementDefinition;
 export type EffectElements = Readonly<Record<string, EffectElementDefinition>>;
@@ -1057,6 +1121,7 @@ export interface EffectInstance<Definition = EffectDefinition> {
   readonly timeScale: number;
   getGrid2D(key: string): Grid2DRuntimeView | undefined;
   getGrid3D(key: string): Grid3DRuntimeView | undefined;
+  getNeighborGrid(key: string): NeighborGridRuntimeView | undefined;
   applyHitStop(durationMs: number, timeScale?: number): void;
   attachTo(source: EffectTransformSource): void;
   detach(): void;
@@ -1132,6 +1197,24 @@ export interface Grid3DRuntimeView {
   rasterizeParticles(points: readonly Vec3[], channel: string, value?: number): Promise<void>;
   /** GPU cell-centered trilinear scalar sampling at normalized particle positions. */
   sampleParticles(points: readonly Vec3[], channel: string): Promise<Float32Array>;
+}
+
+export interface NeighborGridSnapshot {
+  /** Per-cell attempted insertion counts; values can exceed cellCapacity. */
+  readonly counts: Uint32Array;
+  readonly dropped: number;
+  readonly diagnostics: readonly VfxDiagnostic[];
+  readonly outOfBounds: number;
+  /** Fixed cell-major slots. Unused lanes contain the u32 sentinel 0xffffffff. */
+  readonly slots: Uint32Array;
+}
+
+export interface NeighborGridRuntimeView {
+  readonly definition: NeighborGridDefinition;
+  readonly initialized: boolean;
+  /** clear, bucket, and PBD iteration submissions since materialization. */
+  readonly submissionCount: number;
+  capture(): Promise<NeighborGridSnapshot>;
 }
 
 export type EffectScalabilityAction = 'culled' | 'full' | 'spawn-suppressed';

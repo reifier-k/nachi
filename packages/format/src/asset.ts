@@ -158,11 +158,12 @@ class AssetValidator {
     else if (value.kind === 'emitter-extends') this.emitterExtension(value, path);
     else if (value.kind === 'grid2d') this.grid2D(value, path);
     else if (value.kind === 'grid3d') this.grid3D(value, path);
+    else if (value.kind === 'neighbor-grid') this.neighborGrid(value, path);
     else if (value.kind === 'sim-stage') this.simStage(value, path);
     else
       this.error(
         'NACHI_ASSET_ELEMENT_KIND_UNKNOWN',
-        'Effect elements must be emitter, Grid2D, Grid3D, simulation-stage, emitter-extends, or visual-element definitions.',
+        'Effect elements must be emitter, Grid2D, Grid3D, NeighborGrid, simulation-stage, emitter-extends, or visual-element definitions.',
         `${path}.kind`,
       );
   }
@@ -249,6 +250,35 @@ class AssetValidator {
         }
       }
     }
+  }
+
+  neighborGrid(value: UnknownRecord, path: string): void {
+    this.unknownFields(
+      value,
+      new Set(['cellCapacity', 'cellSize', 'kind', 'origin', 'resolution', 'version']),
+      path,
+    );
+    this.required(
+      value,
+      ['cellCapacity', 'cellSize', 'kind', 'origin', 'resolution', 'version'],
+      path,
+    );
+    if (value.version !== 1) this.literal(value.version, '1', `${path}.version`);
+    this.numberTuple(value.resolution, 3, `${path}.resolution`);
+    if (Array.isArray(value.resolution)) {
+      value.resolution.forEach((dimension, index) => {
+        if (!Number.isSafeInteger(dimension) || (dimension as number) <= 0)
+          this.type('positive integer', dimension, `${path}.resolution[${index}]`);
+      });
+    }
+    if (!Number.isSafeInteger(value.cellCapacity) || (value.cellCapacity as number) <= 0) {
+      this.type('positive integer', value.cellCapacity, `${path}.cellCapacity`);
+    }
+    this.finiteNumber(value.cellSize, `${path}.cellSize`);
+    if (typeof value.cellSize === 'number' && value.cellSize <= 0) {
+      this.error('NACHI_ASSET_VALUE_INVALID', 'cellSize must be positive.', `${path}.cellSize`);
+    }
+    this.numberTuple(value.origin, 3, `${path}.origin`);
   }
 
   simStage(value: UnknownRecord, path: string): void {
@@ -1123,7 +1153,7 @@ function collectSerializableDiagnostics(value: unknown, phase: DiagnosticPhase):
         if (
           key === 'factory' &&
           item.kind === 'module' &&
-          item.type === 'core/tsl-module' &&
+          (item.type === 'core/tsl-module' || item.type === 'core/neighbor-grid-tsl') &&
           descriptor?.enumerable === false &&
           'value' in descriptor &&
           typeof descriptor.value === 'function'

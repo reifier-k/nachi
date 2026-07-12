@@ -13,6 +13,7 @@ export const effectAssetSchemaV1 = {
         { $ref: '#/$defs/emitterExtension' },
         { $ref: '#/$defs/grid2d' },
         { $ref: '#/$defs/grid3d' },
+        { $ref: '#/$defs/neighborGrid' },
         { $ref: '#/$defs/simStage' },
       ],
     },
@@ -159,6 +160,29 @@ export const effectAssetSchemaV1 = {
         version: { const: 1 },
       },
       required: ['config', 'kind', 'source', 'version'],
+      type: 'object',
+    },
+    neighborGrid: {
+      additionalProperties: false,
+      properties: {
+        cellCapacity: { minimum: 1, type: 'integer' },
+        cellSize: { exclusiveMinimum: 0, type: 'number' },
+        kind: { const: 'neighbor-grid' },
+        origin: {
+          items: { type: 'number' },
+          maxItems: 3,
+          minItems: 3,
+          type: 'array',
+        },
+        resolution: {
+          items: { minimum: 1, type: 'integer' },
+          maxItems: 3,
+          minItems: 3,
+          type: 'array',
+        },
+        version: { const: 1 },
+      },
+      required: ['kind', 'version', 'resolution', 'cellCapacity', 'cellSize', 'origin'],
       type: 'object',
     },
     simStage: {

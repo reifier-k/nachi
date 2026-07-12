@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M12 Neighbor Grid</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">M12 / neighbor data interface</p>
+        <h1>Boids + PBD constraints</h1>
+        <p>Atomic fixed-slot buckets, flocking, and Jacobi pair push-out.</p>
+      </header>
+      <canvas id="neighbor-visual" width="512" height="384"></canvas>
+      <dl class="status">
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Contract</dt>
+          <dd id="status-value">running</dd>
+        </div>
+        <div>
+          <dt>Submissions</dt>
+          <dd id="submission-value">pending</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/m12-neighbors.ts"></script>
+  </body>
+</html>

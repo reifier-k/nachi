@@ -87,9 +87,32 @@ import type {
   Grid2DChannelSchema,
   Grid3DDefinition,
   Grid3DChannelSchema,
+  NeighborGridDefinition,
+  BoidsOptions,
+  PbdDistanceConstraintOptions,
+  NeighborGridTslFactory,
+  NeighborGridTslModuleDefinition,
   GridStageModuleDefinition,
   SimStageDefinition,
 } from './types.js';
+
+export const DEFAULT_NEIGHBOR_CELL_CAPACITY = 32;
+
+export function defineNeighborGrid(config: {
+  readonly cellCapacity?: number;
+  readonly cellSize?: number;
+  readonly origin?: Vec3;
+  readonly resolution: readonly [number, number, number];
+}): NeighborGridDefinition {
+  return {
+    cellCapacity: config.cellCapacity ?? DEFAULT_NEIGHBOR_CELL_CAPACITY,
+    cellSize: config.cellSize ?? 1,
+    kind: 'neighbor-grid',
+    origin: config.origin ?? [0, 0, 0],
+    resolution: config.resolution,
+    version: 1,
+  };
+}
 
 export function defineGrid2D<const Channels extends Grid2DChannelSchema>(config: {
   readonly boundary?: 'clamp';
@@ -731,6 +754,47 @@ export function drag(value: ValueInput<number>): UpdateModule {
       writes: ['Particles.velocity'],
     },
   );
+}
+
+/** Classic separation/alignment/cohesion evaluated through a NeighborGrid data interface. */
+export function boids(options: BoidsOptions): UpdateModule {
+  return createModule('update', 'core/boids', options, {
+    reads: ['Emitter.deltaTime', 'Particles.alive', 'Particles.position', 'Particles.velocity'],
+    writes: ['Particles.velocity'],
+  });
+}
+
+/**
+ * Jacobi-style pair push-out. Each iteration reads a bucket-time position snapshot. Exactly
+ * coincident pairs remain coincident because v1 does not inject a deterministic jitter direction.
+ */
+export function pbdDistanceConstraint(options: PbdDistanceConstraintOptions): UpdateModule {
+  return createModule('update', 'core/pbd-distance-constraint', options, {
+    reads: ['Particles.alive', 'Particles.position'],
+    writes: ['Particles.position'],
+  });
+}
+
+/**
+ * Code-only NeighborGrid scratch pad. The current particle is live; retained neighbors use the
+ * bucket-time position/velocity snapshot.
+ */
+export function neighborGridTslModule(
+  options: {
+    readonly access: ModuleAccess;
+    readonly grid: string;
+    readonly radius?: number;
+  },
+  factory: NeighborGridTslFactory,
+): NeighborGridTslModuleDefinition {
+  const module = createModule(
+    'update',
+    'core/neighbor-grid-tsl',
+    { grid: options.grid, radius: options.radius ?? 1, source: { kind: 'inline' as const } },
+    options.access,
+  ) as NeighborGridTslModuleDefinition;
+  Object.defineProperty(module, 'factory', { enumerable: false, value: factory });
+  return module;
 }
 
 export function curlNoise(options: CurlNoiseOptions): UpdateModule {

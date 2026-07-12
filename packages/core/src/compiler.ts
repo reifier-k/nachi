@@ -5,6 +5,7 @@ import {
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
 } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
+import { neighborGridCellCount, validateNeighborGridDefinition } from './neighbor-grid.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
   collectEmitterBehaviorConfigDiagnostics,
@@ -66,6 +67,10 @@ import type {
   SdfRef,
   VelocityMeshNormalOptions,
   KillVolumeOptions,
+  NeighborGridDefinition,
+  BoidsOptions,
+  PbdDistanceConstraintOptions,
+  NeighborGridTslFactory,
 } from './types.js';
 
 export const DEFAULT_LUT_RESOLUTION = 256;
@@ -444,6 +449,16 @@ export interface KernelTslAdapter {
   instancedArray(length: number, type: TslStorageType): KernelStorageNode;
   indirectArray(values: Uint32Array): KernelIndirectStorageNode;
   inverse(value: KernelNode): KernelNode;
+  /** Optional structured GPU loop; NeighborGrid scans require this on WebGPU. */
+  loop?(
+    range: {
+      readonly end: number;
+      readonly name?: string;
+      readonly start: number;
+      readonly type: 'int' | 'uint';
+    },
+    body: (index: KernelNode) => void,
+  ): void;
   mod?(value: KernelNodeInput, divisor: KernelNodeInput): KernelNode;
   sampleTexture(texture: unknown, uv: KernelNode): KernelNode;
   sampleSceneDepth?(uv: KernelNode): KernelNode;
@@ -501,6 +516,7 @@ export interface BuiltEmitterKernels {
   /** Starts the M2 lifecycle path; mixing it with `init` leaves allocator counters inconsistent. */
   readonly initialize: KernelComputeNode;
   readonly luts: Readonly<Record<string, unknown>>;
+  readonly neighborGrids: Readonly<Record<string, BuiltNeighborGridKernels>>;
   readonly prepareSpawn?: KernelComputeNode;
   readonly resetAliveCount?: KernelComputeNode;
   /** Initializes padded depth/index keys from the latest alive compaction. */
@@ -519,6 +535,17 @@ export interface BuiltEmitterKernels {
   readonly storages: Readonly<Record<string, KernelStorageNode>>;
   readonly uniforms: Readonly<Record<string, KernelUniformNode>>;
   readonly update: KernelComputeNode;
+}
+
+export interface BuiltNeighborGridKernels {
+  readonly bucket: KernelComputeNode;
+  readonly clear: KernelComputeNode;
+  readonly counts: KernelStorageNode;
+  readonly definition: NeighborGridDefinition;
+  readonly pbdIterations: readonly KernelComputeNode[];
+  readonly slots: KernelStorageNode;
+  /** [dropped, outOfBounds] for the latest rebuild. */
+  readonly stats: KernelStorageNode;
 }
 
 export interface EventQueueResources {
@@ -696,6 +723,7 @@ export interface CompileEmitterOptions {
   /** Event payload fields inherited by this emitter from effect-scoped emitTo() links. */
   readonly eventPayloadFields?: readonly string[];
   readonly registry?: KernelModuleRegistry;
+  readonly neighborGrids?: Readonly<Record<string, NeighborGridDefinition>>;
   readonly resolveTsl?: (reference: TslFunctionRef) => TslModuleFactory | undefined;
   readonly spawnGeneration?: number;
   readonly workgroupSize?: number;
@@ -1175,6 +1203,24 @@ function normalizeModules(
     stage: Stage,
   ): ModuleDefinition<Stage, object>[] =>
     modules.map((module, index) => {
+      if (module.type === 'core/neighbor-grid-tsl') {
+        const path = `${stage}[${index}]`;
+        const factory = (
+          module as ModuleDefinition<Stage, object> & {
+            readonly factory?: NeighborGridTslFactory;
+          }
+        ).factory;
+        if (factory) factories.set(path, factory as unknown as TslModuleFactory);
+        else
+          diagnostics.push(
+            diagnostic(
+              'NACHI_NEIGHBOR_GRID_FACTORY_UNRESOLVED',
+              'Inline NeighborGrid TSL factory metadata is unavailable.',
+              `${path}.factory`,
+            ),
+          );
+        return withDerivedConfigReads(module);
+      }
       if (module.type !== 'core/tsl-module') return withDerivedConfigReads(module);
       const path = `${stage}[${index}]`;
       const trace = traceTslModule(module as TslModuleDefinition, path, options);
@@ -1195,6 +1241,7 @@ function normalizeModules(
           'core/collide-scene-depth',
           'core/collide-sdf',
           'core/collide-sphere',
+          'core/pbd-distance-constraint',
         ].includes(module.type)
       ) {
         diagnostics.push(
@@ -2668,6 +2715,7 @@ function createBuildKernels(
   registry: KernelModuleRegistry,
   factories: ReadonlyMap<string, TslModuleFactory>,
   lifecycle: EmitterLifecycle | undefined,
+  neighborGridDefinitions: Readonly<Record<string, NeighborGridDefinition>>,
 ): (adapter: KernelTslAdapter, options?: BuildEmitterKernelOptions) => BuiltEmitterKernels {
   return (adapter, options = {}) => {
     const buildDiagnostics = [...program.diagnostics];
@@ -2888,11 +2936,71 @@ function createBuildKernels(
         severity: 'error',
       });
     }
+    if (Object.keys(neighborGridDefinitions).length > 0) {
+      if (backend !== 'webgpu') {
+        buildDiagnostics.push({
+          code: 'NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED',
+          message:
+            'NeighborGrid requires WebGPU atomics and arbitrary indexed storage reads; WebGL2 transform feedback is unsupported.',
+          path: 'neighbor-grid',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      if (!adapter.floor || !adapter.loop) {
+        const missing = [!adapter.floor ? 'floor' : undefined, !adapter.loop ? 'loop' : undefined]
+          .filter((operation): operation is string => operation !== undefined)
+          .join(', ');
+        buildDiagnostics.push({
+          code: 'NACHI_NEIGHBOR_GRID_ADAPTER_UNSUPPORTED',
+          message: `NeighborGrid requires ${missing} support from the pinned TSL adapter.`,
+          path: 'neighbor-grid',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      for (const [key, definition] of Object.entries(neighborGridDefinitions)) {
+        try {
+          validateNeighborGridDefinition(definition);
+          const cells = neighborGridCellCount(definition.resolution);
+          const largestBuffer = Math.max(
+            cells * definition.cellCapacity * Uint32Array.BYTES_PER_ELEMENT,
+            program.attributeSchema.capacity * 16,
+          );
+          const activeLimits = [
+            adapter.deviceLimits?.maxStorageBufferBindingSize,
+            adapter.deviceLimits?.maxBufferSize,
+          ].filter((value): value is number => value !== undefined);
+          const allocationLimit = activeLimits.length > 0 ? Math.min(...activeLimits) : undefined;
+          if (allocationLimit !== undefined && largestBuffer > allocationLimit) {
+            buildDiagnostics.push({
+              code: 'NACHI_NEIGHBOR_GRID_STORAGE_LIMIT_EXCEEDED',
+              message: `NeighborGrid "${key}" requires a ${largestBuffer}-byte storage binding, exceeding the active device buffer limit ${allocationLimit}.`,
+              path: `neighborGrids.${key}.cellCapacity`,
+              phase: 'compile',
+              severity: 'error',
+            });
+          }
+        } catch (error) {
+          if (error instanceof VfxDiagnosticError) {
+            buildDiagnostics.push(
+              ...error.diagnostics.map((diagnostic) => ({
+                ...diagnostic,
+                path: `neighborGrids.${key}.${diagnostic.path ?? ''}`,
+              })),
+            );
+          } else throw error;
+        }
+      }
+    }
     const storageBufferLimit = adapter.deviceLimits?.maxStorageBuffersPerShaderStage;
     // Incoming queues are effect-owned and therefore absent from standalone emitter meta. Event
     // spawn reads one source state buffer and one payload buffer in addition to target resources.
-    const materializedStorageBufferCount =
-      program.meta.storageBufferCount + ((options.eventInputs?.length ?? 0) > 0 ? 2 : 0);
+    const materializedStorageBufferCount = Math.max(
+      program.meta.storageBufferCount + ((options.eventInputs?.length ?? 0) > 0 ? 2 : 0),
+      program.attributeSchema.storageArrays.length +
+        Object.keys(neighborGridDefinitions).length * 5,
+    );
     if (
       storageBufferLimit !== undefined &&
       materializedStorageBufferCount > storageBufferLimit &&
@@ -3238,9 +3346,302 @@ function createBuildKernels(
       }
     };
 
+    type MutableNeighborGrid = Omit<BuiltNeighborGridKernels, 'pbdIterations'> & {
+      pbdIterations: KernelComputeNode[];
+      readonly positionSnapshot: KernelStorageNode;
+      readonly velocitySnapshot: KernelStorageNode;
+    };
+    const neighborGrids: Record<string, MutableNeighborGrid> = {};
+    for (const [key, definition] of Object.entries(neighborGridDefinitions)) {
+      const cells = neighborGridCellCount(definition.resolution);
+      const slotCount = cells * definition.cellCapacity;
+      const counts = adapter
+        .instancedArray(cells, 'uint')
+        .setName(`NachiNeighborGridCounts_${key}`)
+        .toAtomic();
+      const slots = adapter
+        .instancedArray(slotCount, 'uint')
+        .setName(`NachiNeighborGridSlots_${key}`);
+      const stats = adapter
+        .instancedArray(2, 'uint')
+        .setName(`NachiNeighborGridStats_${key}`)
+        .toAtomic();
+      const positionSnapshot = adapter
+        .instancedArray(capacity, 'vec4')
+        .setName(`NachiNeighborGridPosition_${key}`);
+      const velocitySnapshot = adapter
+        .instancedArray(capacity, 'vec4')
+        .setName(`NachiNeighborGridVelocity_${key}`);
+      const [width, height, depth] = definition.resolution;
+      const clear = adapter
+        .fn(() => {
+          const invocation = adapter.uint(adapter.instanceIndex);
+          adapter.branch(invocation.lessThan(slotCount), () => {
+            slots.element(invocation).assign(adapter.uint(0xffff_ffff));
+          });
+          adapter.branch(invocation.lessThan(cells), () => {
+            adapter.atomicStore(counts.element(invocation), adapter.uint(0));
+          });
+          adapter.branch(invocation.lessThan(2), () => {
+            adapter.atomicStore(stats.element(invocation), adapter.uint(0));
+          });
+        })
+        .compute(Math.max(slotCount, 2), [program.kernels.update.workgroupSize])
+        .setName(`NachiNeighborGridClear_${key}`);
+      const bucket = adapter
+        .fn(() => {
+          const particleIndex = adapter.uint(adapter.instanceIndex);
+          adapter.branch(particleIndex.lessThan(capacity), () => {
+            const position = attributeNode('position', particleIndex);
+            const velocity = program.attributeSchema.byName.velocity
+              ? attributeNode('velocity', particleIndex)
+              : adapter.vec3(0, 0, 0);
+            positionSnapshot
+              .element(particleIndex)
+              .assign(adapter.vec4(position.x, position.y, position.z, 0));
+            velocitySnapshot
+              .element(particleIndex)
+              .assign(adapter.vec4(velocity.x, velocity.y, velocity.z, 0));
+            adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(1)), () => {
+              const x = adapter.floor!(
+                position.x.sub(definition.origin[0]).div(definition.cellSize),
+              );
+              const y = adapter.floor!(
+                position.y.sub(definition.origin[1]).div(definition.cellSize),
+              );
+              const z = adapter.floor!(
+                position.z.sub(definition.origin[2]).div(definition.cellSize),
+              );
+              const zero = adapter.constant(0, 'f32');
+              const inside = x
+                .greaterThanEqual(zero)
+                .and(x.lessThan(width))
+                .and(y.greaterThanEqual(zero))
+                .and(y.lessThan(height))
+                .and(z.greaterThanEqual(zero))
+                .and(z.lessThan(depth));
+              adapter.branch(
+                inside,
+                () => {
+                  const cellIndex = adapter
+                    .uint(z)
+                    .mul(height)
+                    .add(adapter.uint(y))
+                    .mul(width)
+                    .add(adapter.uint(x));
+                  const reserved = adapter.atomicAdd(
+                    counts.element(cellIndex),
+                    adapter.uint(1),
+                    true,
+                  );
+                  adapter.branch(
+                    reserved.lessThan(definition.cellCapacity),
+                    () => {
+                      slots
+                        .element(cellIndex.mul(definition.cellCapacity).add(reserved))
+                        .assign(particleIndex);
+                    },
+                    () => {
+                      adapter.atomicAdd(stats.element(adapter.uint(0)), adapter.uint(1));
+                    },
+                  );
+                },
+                () => {
+                  adapter.atomicAdd(stats.element(adapter.uint(1)), adapter.uint(1));
+                },
+              );
+            });
+          });
+        })
+        .compute(capacity, [program.kernels.update.workgroupSize])
+        .setName(`NachiNeighborGridBucket_${key}`);
+      neighborGrids[key] = {
+        bucket,
+        clear,
+        counts,
+        definition,
+        pbdIterations: [],
+        positionSnapshot,
+        slots,
+        stats,
+        velocitySnapshot,
+      };
+    }
+
+    const mutable = (value: KernelNode): KernelNode =>
+      (value as KernelNode & { toVar?(): KernelNode }).toVar?.() ?? value;
+    const forEachNeighbor = (
+      grid: MutableNeighborGrid,
+      particleIndex: KernelNode,
+      position: KernelNode,
+      radius: number,
+      callback: (
+        neighborIndex: KernelNode,
+        neighborPosition: KernelNode,
+        neighborVelocity: KernelNode,
+      ) => void,
+    ): void => {
+      const { definition } = grid;
+      const [width, height, depth] = definition.resolution;
+      const baseX = adapter.floor!(position.x.sub(definition.origin[0]).div(definition.cellSize));
+      const baseY = adapter.floor!(position.y.sub(definition.origin[1]).div(definition.cellSize));
+      const baseZ = adapter.floor!(position.z.sub(definition.origin[2]).div(definition.cellSize));
+      const zero = adapter.constant(0, 'f32');
+      const loop = adapter.loop!;
+      const offsetRange = { end: radius + 1, start: -radius, type: 'int' as const };
+      loop({ ...offsetRange, name: 'neighborZ' }, (dz) => {
+        loop({ ...offsetRange, name: 'neighborY' }, (dy) => {
+          loop({ ...offsetRange, name: 'neighborX' }, (dx) => {
+            // Keep signed offsets until the bounds branch. Explicit float conversion avoids
+            // TSL's left-operand type inheritance turning a negative offset into uint.
+            const x = baseX.add(dx.toFloat());
+            const y = baseY.add(dy.toFloat());
+            const z = baseZ.add(dz.toFloat());
+            const inside = x
+              .greaterThanEqual(zero)
+              .and(x.lessThan(width))
+              .and(y.greaterThanEqual(zero))
+              .and(y.lessThan(height))
+              .and(z.greaterThanEqual(zero))
+              .and(z.lessThan(depth));
+            adapter.branch(inside, () => {
+              // Conversion is emitted inside the guard, so negative/out-of-range coordinates
+              // never participate in an unsigned storage address.
+              const cellIndex = adapter
+                .uint(z)
+                .mul(height)
+                .add(adapter.uint(y))
+                .mul(width)
+                .add(adapter.uint(x));
+              const count = adapter.atomicLoad(grid.counts.element(cellIndex));
+              loop(
+                {
+                  end: definition.cellCapacity,
+                  name: 'neighborSlot',
+                  start: 0,
+                  type: 'uint',
+                },
+                (slot) => {
+                  adapter.branch(slot.lessThan(count), () => {
+                    const neighborIndex = grid.slots.element(
+                      cellIndex.mul(definition.cellCapacity).add(slot),
+                    );
+                    adapter.branch(neighborIndex.equal(particleIndex).not(), () => {
+                      callback(
+                        neighborIndex,
+                        grid.positionSnapshot.element(neighborIndex).xyz,
+                        grid.velocitySnapshot.element(neighborIndex).xyz,
+                      );
+                    });
+                  });
+                },
+              );
+            });
+          });
+        });
+      });
+    };
+
     const buildModule = (module: CompiledKernelModule, particleIndex: KernelNode): void => {
       if (module.type === 'core/tsl-module') {
         buildTslModule(module, particleIndex);
+        return;
+      }
+      if (module.type === 'core/boids') {
+        const config = module.config as BoidsOptions;
+        const grid = neighborGrids[config.grid];
+        if (!grid) throw new Error(`Boids NeighborGrid "${config.grid}" is missing.`);
+        const radius = config.radius ?? 1;
+        const position = attributeNode('position', particleIndex);
+        const velocity = attributeNode('velocity', particleIndex);
+        const alignment = mutable(adapter.vec3(0, 0, 0));
+        const cohesion = mutable(adapter.vec3(0, 0, 0));
+        const separation = mutable(adapter.vec3(0, 0, 0));
+        const count = mutable(adapter.constant(0, 'f32'));
+        const searchDistanceSquared = (radius * grid.definition.cellSize) ** 2;
+        const separationDistanceSquared =
+          ((config.separationRadius ?? 0.5) * grid.definition.cellSize) ** 2;
+        forEachNeighbor(
+          grid,
+          particleIndex,
+          position,
+          radius,
+          (_neighbor, otherPosition, otherVelocity) => {
+            const delta = position.sub(otherPosition);
+            const distanceSquared = dot3(delta, delta);
+            adapter.branch(distanceSquared.lessThanEqual(searchDistanceSquared), () => {
+              alignment.addAssign(otherVelocity);
+              cohesion.addAssign(otherPosition);
+              count.addAssign(1);
+              adapter.branch(distanceSquared.lessThan(separationDistanceSquared), () => {
+                separation.addAssign(delta.div(distanceSquared.add(1e-6)));
+              });
+            });
+          },
+        );
+        adapter.branch(adapter.constant(0, 'f32').lessThan(count), () => {
+          let acceleration = alignment
+            .div(count)
+            .sub(velocity)
+            .mul(config.alignment ?? 1)
+            .add(
+              cohesion
+                .div(count)
+                .sub(position)
+                .mul(config.cohesion ?? 1),
+            )
+            .add(separation.div(count).mul(config.separation ?? 1.5));
+          const magnitude = length3(acceleration);
+          const maximum = config.maxAcceleration ?? 10;
+          acceleration = adapter.select(
+            adapter.constant(maximum, 'f32').lessThan(magnitude),
+            acceleration.mul(maximum).div(magnitude.clamp(1e-6, 1e20)),
+            acceleration,
+          );
+          writeAttribute(
+            'velocity',
+            velocity.add(acceleration.mul(uniformNode('Emitter.deltaTime'))),
+            particleIndex,
+          );
+        });
+        return;
+      }
+      if (module.type === 'core/neighbor-grid-tsl') {
+        const config = module.config as { readonly grid: string; readonly radius: number };
+        const grid = neighborGrids[config.grid];
+        const factory = factories.get(module.path) as unknown as NeighborGridTslFactory | undefined;
+        if (!grid || !factory) {
+          throw new Error(`NeighborGrid TSL binding "${config.grid}" is missing.`);
+        }
+        const position = attributeNode('position', particleIndex);
+        const velocity = attributeNode('velocity', particleIndex);
+        const outputs = factory({
+          forEachNeighbor(visitor) {
+            forEachNeighbor(
+              grid,
+              particleIndex,
+              position,
+              config.radius,
+              (index, neighborPosition, neighborVelocity) => {
+                visitor({
+                  index: index as never,
+                  position: neighborPosition as never,
+                  velocity: neighborVelocity as never,
+                });
+              },
+            );
+          },
+          index: particleIndex as never,
+          position: position as never,
+          velocity: velocity as never,
+        });
+        for (const [name, value] of Object.entries(outputs)) {
+          writeAttribute(
+            name.startsWith('custom.') ? name.slice('custom.'.length) : name,
+            value as never,
+            particleIndex,
+          );
+        }
         return;
       }
       const implementation = registry.resolve(module.type, module.version);
@@ -3252,7 +3653,55 @@ function createBuildKernels(
 
     const initModules = program.kernels.init.modules;
     const ageModule = program.kernels.update.modules.find(({ type }) => type === 'core/age');
-    const updateModules = program.kernels.update.modules.filter(({ type }) => type !== 'core/age');
+    const updateModules = program.kernels.update.modules.filter(
+      ({ type }) => type !== 'core/age' && type !== 'core/pbd-distance-constraint',
+    );
+
+    for (const module of program.kernels.update.modules.filter(
+      ({ type }) => type === 'core/pbd-distance-constraint',
+    )) {
+      const config = module.config as PbdDistanceConstraintOptions;
+      const grid = neighborGrids[config.grid];
+      if (!grid) throw new Error(`PBD NeighborGrid "${config.grid}" is missing.`);
+      const radius = config.radius ?? Math.ceil(config.distance / grid.definition.cellSize);
+      const kernel = adapter
+        .fn(() => {
+          const particleIndex = adapter.uint(adapter.instanceIndex);
+          adapter.branch(
+            particleIndex
+              .lessThan(capacity)
+              .and(attributeNode('alive', particleIndex).equal(adapter.uint(1))),
+            () => {
+              const position = grid.positionSnapshot.element(particleIndex).xyz;
+              const correction = mutable(adapter.vec3(0, 0, 0));
+              const count = mutable(adapter.constant(0, 'f32'));
+              forEachNeighbor(grid, particleIndex, position, radius, (_neighbor, otherPosition) => {
+                const delta = position.sub(otherPosition);
+                const distance = length3(delta);
+                adapter.branch(distance.lessThan(config.distance), () => {
+                  correction.addAssign(
+                    delta.div(distance.clamp(1e-6, 1e20)).mul(config.distance).sub(delta).mul(0.5),
+                  );
+                  count.addAssign(1);
+                });
+              });
+              adapter.branch(adapter.constant(0, 'f32').lessThan(count), () => {
+                writeAttribute(
+                  'position',
+                  position.add(correction.div(count).mul(config.stiffness ?? 1)),
+                  particleIndex,
+                );
+              });
+            },
+          );
+        })
+        .compute(capacity, [program.kernels.update.workgroupSize])
+        .setName(`NachiNeighborGridPbd_${config.grid}`);
+      const iterations = config.iterations ?? 1;
+      for (let iteration = 0; iteration < iterations; iteration += 1) {
+        grid.pbdIterations.push(kernel);
+      }
+    }
 
     const initialize = adapter
       .fn(() => {
@@ -3807,6 +4256,7 @@ function createBuildKernels(
       init,
       initialize,
       luts: lutTextures,
+      neighborGrids,
       ...(prepareSpawn === undefined ? {} : { prepareSpawn }),
       ...(prepareSort === undefined ? {} : { prepareSort }),
       ...(resetAliveCount === undefined ? {} : { resetAliveCount }),
@@ -3841,6 +4291,133 @@ export function compileEmitter<
   diagnostics.push(...validateRenderModuleLimit(untypedDefinition));
   const normalized = normalizeModules(untypedDefinition, options);
   diagnostics.push(...normalized.diagnostics);
+  for (const [index, module] of normalized.update.entries()) {
+    if (
+      module.type !== 'core/boids' &&
+      module.type !== 'core/pbd-distance-constraint' &&
+      module.type !== 'core/neighbor-grid-tsl'
+    )
+      continue;
+    const config = module.config as Partial<BoidsOptions & PbdDistanceConstraintOptions>;
+    if (typeof config.grid !== 'string' || options.neighborGrids?.[config.grid] === undefined) {
+      diagnostics.push({
+        code: 'NACHI_NEIGHBOR_GRID_TARGET_UNKNOWN',
+        message: `Neighbor module targets missing NeighborGrid "${String(config.grid)}".`,
+        path: `update[${index}].config.grid`,
+        phase: 'compile',
+        severity: 'error',
+      });
+    }
+    if (
+      config.radius !== undefined &&
+      (!Number.isSafeInteger(config.radius) || config.radius < 0)
+    ) {
+      diagnostics.push({
+        code: 'NACHI_NEIGHBOR_GRID_RADIUS_INVALID',
+        message: 'NeighborGrid search radius must be a non-negative safe integer in cell units.',
+        path: `update[${index}].config.radius`,
+        phase: 'compile',
+        severity: 'error',
+      });
+    }
+    if (module.type === 'core/boids') {
+      const flock = module.config as BoidsOptions;
+      for (const field of ['alignment', 'cohesion', 'maxAcceleration', 'separation'] as const) {
+        if (flock[field] !== undefined && !Number.isFinite(flock[field])) {
+          diagnostics.push({
+            code: 'NACHI_BOIDS_VALUE_INVALID',
+            message: `Boids ${field} must be finite.`,
+            path: `update[${index}].config.${field}`,
+            phase: 'compile',
+            severity: 'error',
+          });
+        }
+      }
+      if (
+        flock.separationRadius !== undefined &&
+        (!Number.isFinite(flock.separationRadius) || flock.separationRadius < 0)
+      ) {
+        diagnostics.push({
+          code: 'NACHI_BOIDS_VALUE_INVALID',
+          message: 'Boids separationRadius must be finite and non-negative in cell units.',
+          path: `update[${index}].config.separationRadius`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      const searchRadius = flock.radius ?? 1;
+      if (
+        flock.separationRadius !== undefined &&
+        Number.isFinite(flock.separationRadius) &&
+        flock.separationRadius >= 0 &&
+        Number.isSafeInteger(searchRadius) &&
+        searchRadius >= 0 &&
+        flock.separationRadius > searchRadius
+      ) {
+        diagnostics.push({
+          code: 'NACHI_BOIDS_SEPARATION_RADIUS_EXCEEDS_SEARCH',
+          message: `Boids separationRadius ${flock.separationRadius} exceeds the search radius ${searchRadius}; separation is limited to neighbors inside the search radius.`,
+          path: `update[${index}].config.separationRadius`,
+          phase: 'compile',
+          severity: 'warning',
+        });
+      }
+    }
+    if (module.type === 'core/pbd-distance-constraint') {
+      const pbd = module.config as PbdDistanceConstraintOptions;
+      if (!Number.isFinite(pbd.distance) || pbd.distance <= 0) {
+        diagnostics.push({
+          code: 'NACHI_PBD_DISTANCE_INVALID',
+          message: 'PBD constraint distance must be positive and finite.',
+          path: `update[${index}].config.distance`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      if (!Number.isSafeInteger(pbd.iterations ?? 1) || (pbd.iterations ?? 1) <= 0) {
+        diagnostics.push({
+          code: 'NACHI_PBD_ITERATIONS_INVALID',
+          message: 'PBD iterations must be a positive safe integer.',
+          path: `update[${index}].config.iterations`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      if (
+        !Number.isFinite(pbd.stiffness ?? 1) ||
+        (pbd.stiffness ?? 1) < 0 ||
+        (pbd.stiffness ?? 1) > 1
+      ) {
+        diagnostics.push({
+          code: 'NACHI_PBD_STIFFNESS_INVALID',
+          message: 'PBD stiffness must be finite in [0, 1].',
+          path: `update[${index}].config.stiffness`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      const grid = typeof pbd.grid === 'string' ? options.neighborGrids?.[pbd.grid] : undefined;
+      if (
+        grid !== undefined &&
+        pbd.radius !== undefined &&
+        Number.isSafeInteger(pbd.radius) &&
+        pbd.radius >= 0 &&
+        Number.isFinite(pbd.distance) &&
+        pbd.distance > 0 &&
+        Number.isFinite(grid.cellSize) &&
+        grid.cellSize > 0 &&
+        pbd.radius < Math.ceil(pbd.distance / grid.cellSize)
+      ) {
+        diagnostics.push({
+          code: 'NACHI_PBD_RADIUS_MISSES_PAIRS',
+          message: `PBD radius ${pbd.radius} is smaller than ceil(distance / cellSize) ${Math.ceil(pbd.distance / grid.cellSize)}; qualifying pairs can be omitted.`,
+          path: `update[${index}].config.radius`,
+          phase: 'compile',
+          severity: 'warning',
+        });
+      }
+    }
+  }
 
   const authorDefinition = {
     ...definition,
@@ -4116,6 +4693,7 @@ export function compileEmitter<
       registry,
       normalized.factories,
       definition.lifecycle,
+      options.neighborGrids ?? {},
     ),
   };
 }
@@ -5218,6 +5796,37 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     version: 1,
   });
   registry.register({
+    access: {
+      reads: ['Emitter.deltaTime', 'Particles.alive', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    build() {
+      // Materialization intercepts this implementation to bind effect-owned NeighborGrid storage.
+    },
+    stage: 'update',
+    type: 'core/boids',
+    version: 1,
+  });
+  registry.register({
+    access: {
+      reads: ['Particles.alive', 'Particles.position'],
+      writes: ['Particles.position'],
+    },
+    build() {
+      // Materialized as submit-separated Jacobi kernels, not inside the ordinary update kernel.
+    },
+    stage: 'update',
+    type: 'core/pbd-distance-constraint',
+    version: 1,
+  });
+  registry.register({
+    access: { reads: [], writes: [] },
+    build() {},
+    stage: 'update',
+    type: 'core/neighbor-grid-tsl',
+    version: 1,
+  });
+  registry.register({
     access: INTEGRATE_ACCESS,
     build(context) {
       context.write(
@@ -5269,6 +5878,9 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/velocity-over-life',
       'core/kill-volume',
       'core/color-over-life',
+      'core/boids',
+      'core/pbd-distance-constraint',
+      'core/neighbor-grid-tsl',
       'core/integrate',
     ].map((type) => [type, registry.resolve(type, 1)?.access]),
   ) as Readonly<Record<string, ModuleAccess>>;

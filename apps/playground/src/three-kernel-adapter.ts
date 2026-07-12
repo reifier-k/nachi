@@ -509,6 +509,34 @@ export function createThreeKernelAdapter(
       return node;
     },
     inverse: (value) => asNode(inverse(value as never)),
+    loop: (range, body) => {
+      const visit = ((inputs: Readonly<Record<string, unknown>>) => {
+        body(asNode(inputs[range.name ?? 'i']));
+      }) as never;
+      if (range.type === 'int') {
+        Loop(
+          {
+            condition: '<',
+            end: int(range.end),
+            ...(range.name === undefined ? {} : { name: range.name }),
+            start: int(range.start),
+            type: 'int',
+          } as never,
+          visit,
+        );
+        return;
+      }
+      Loop(
+        {
+          condition: '<',
+          end: uint(range.end),
+          ...(range.name === undefined ? {} : { name: range.name }),
+          start: uint(range.start),
+          type: 'uint',
+        } as never,
+        visit,
+      );
+    },
     mod: (value, divisor) => asNode(mod(value as never, divisor as never)),
     sampleTexture: (value, uv) => asNode(texture(value as THREE.Texture, uv as never)),
     ...(options.sceneDepthTexture === undefined

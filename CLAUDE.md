@@ -67,6 +67,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgl
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
@@ -142,6 +144,14 @@ particle deposition, and density-to-particle sampling all retain invocation rang
 `estimateGrid3DMemory()` exposes cubic allocation cost; a binding exceeding `maxStorageBufferBindingSize` or `maxBufferSize` reports
 `NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED`. `/golden-fluid/` runs the 32³ Golden #7 reference and a
 separate tiny 600-frame stability gate. WebGL2 must report `NACHI_GRID3D_WEBGL2_UNSUPPORTED`.
+
+M12 NeighborGrid is an effect element consumed by exactly one emitter. It uses atomic u32 cell
+counts plus fixed cell-major particle-index slots and rebuilds before each particle update.
+`cellCapacity` defaults to 32; overflow drops later atomic reservations and is visible through
+`getNeighborGrid().capture()`. Keep radius in integer cell units and account for the
+`(2r+1)^3 * cellCapacity` scan. PBD iterations require clear/bucket/constraint submit separation;
+the Jacobi snapshot is position/velocity only in v1. WebGL2 must report
+`NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED`.
 
 ## Three-layer verification
 
