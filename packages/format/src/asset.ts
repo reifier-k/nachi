@@ -156,12 +156,118 @@ class AssetValidator {
     if (value.kind === 'emitter') this.emitter(value, path);
     else if (value.kind === 'visual-element') this.visualElement(value, path);
     else if (value.kind === 'emitter-extends') this.emitterExtension(value, path);
+    else if (value.kind === 'grid2d') this.grid2D(value, path);
+    else if (value.kind === 'sim-stage') this.simStage(value, path);
     else
       this.error(
         'NACHI_ASSET_ELEMENT_KIND_UNKNOWN',
-        'Effect elements must be emitter, emitter-extends, or visual-element definitions.',
+        'Effect elements must be emitter, Grid2D, simulation-stage, emitter-extends, or visual-element definitions.',
         `${path}.kind`,
       );
+  }
+
+  grid2D(value: UnknownRecord, path: string): void {
+    this.unknownFields(
+      value,
+      new Set(['boundary', 'channels', 'kind', 'resolution', 'version']),
+      path,
+    );
+    this.required(value, ['boundary', 'channels', 'kind', 'resolution', 'version'], path);
+    if (value.version !== 1) this.literal(value.version, '1', `${path}.version`);
+    if (value.boundary !== 'clamp') this.literal(value.boundary, 'clamp', `${path}.boundary`);
+    this.numberTuple(value.resolution, 2, `${path}.resolution`);
+    if (Array.isArray(value.resolution)) {
+      value.resolution.forEach((dimension, index) => {
+        if (!Number.isSafeInteger(dimension) || (dimension as number) <= 0)
+          this.type('positive integer', dimension, `${path}.resolution[${index}]`);
+      });
+    }
+    if (this.record(value.channels, `${path}.channels`)) {
+      if (Object.keys(value.channels).length === 0) {
+        this.error(
+          'NACHI_ASSET_VALUE_INVALID',
+          'Grid2D requires at least one channel.',
+          `${path}.channels`,
+        );
+      }
+      for (const [name, channel] of Object.entries(value.channels)) {
+        const itemPath = `${path}.channels.${name}`;
+        if (!this.record(channel, itemPath)) continue;
+        this.unknownFields(channel, new Set(['default', 'type']), itemPath);
+        this.required(channel, ['type'], itemPath);
+        if (channel.type !== 'f32' && channel.type !== 'vec2')
+          this.type('f32 or vec2', channel.type, `${itemPath}.type`);
+        if (channel.default !== undefined) {
+          if (channel.type === 'vec2') {
+            this.numberTuple(channel.default, 2, `${itemPath}.default`);
+          } else {
+            this.finiteNumber(channel.default, `${itemPath}.default`);
+          }
+        }
+      }
+    }
+  }
+
+  simStage(value: UnknownRecord, path: string): void {
+    this.unknownFields(
+      value,
+      new Set(['iterations', 'kind', 'phase', 'target', 'update', 'version']),
+      path,
+    );
+    this.required(value, ['iterations', 'kind', 'phase', 'target', 'update', 'version'], path);
+    if (value.version !== 1) this.literal(value.version, '1', `${path}.version`);
+    if (!Number.isSafeInteger(value.iterations) || (value.iterations as number) <= 0)
+      this.type('positive integer', value.iterations, `${path}.iterations`);
+    if (value.phase !== 'before-particles' && value.phase !== 'after-particles')
+      this.type('simulation-stage phase', value.phase, `${path}.phase`);
+    if (typeof value.target !== 'string' || value.target.length === 0)
+      this.type('non-empty string', value.target, `${path}.target`);
+    if (!this.record(value.update, `${path}.update`)) return;
+    this.unknownFields(
+      value.update,
+      new Set(['config', 'kind', 'source', 'version']),
+      `${path}.update`,
+    );
+    this.required(value.update, ['config', 'kind', 'source', 'version'], `${path}.update`);
+    if (value.update.kind !== 'grid2d-stage-module')
+      this.literal(value.update.kind, 'grid2d-stage-module', `${path}.update.kind`);
+    if (value.update.version !== 1)
+      this.literal(value.update.version, '1', `${path}.update.version`);
+    if (value.update.source === 'inline') {
+      this.error(
+        'NACHI_ASSET_INLINE_FUNCTION',
+        'Inline Grid2D TSL factories are authoring-only.',
+        `${path}.update.source`,
+        'Use defineGrid2DStageFunction() and serialize its grid2d-function-ref.',
+      );
+    } else if (typeof value.update.source !== 'string') {
+      if (this.record(value.update.source, `${path}.update.source`)) {
+        this.unknownFields(
+          value.update.source,
+          new Set(['id', 'kind', 'version']),
+          `${path}.update.source`,
+        );
+        if (value.update.source.kind !== 'grid2d-function-ref')
+          this.literal(
+            value.update.source.kind,
+            'grid2d-function-ref',
+            `${path}.update.source.kind`,
+          );
+        if (typeof value.update.source.id !== 'string' || value.update.source.id.length === 0)
+          this.type('non-empty string', value.update.source.id, `${path}.update.source.id`);
+        if (
+          !Number.isSafeInteger(value.update.source.version) ||
+          (value.update.source.version as number) < 1
+        )
+          this.type(
+            'positive integer',
+            value.update.source.version,
+            `${path}.update.source.version`,
+          );
+      }
+    }
+    if (this.record(value.update.config, `${path}.update.config`))
+      this.json(value.update.config, `${path}.update.config`);
   }
 
   emitter(value: UnknownRecord, path: string): void {
@@ -976,6 +1082,22 @@ function collectSerializableDiagnostics(value: unknown, phase: DiagnosticPhase):
           'value' in descriptor &&
           typeof descriptor.value === 'function'
         ) {
+          continue;
+        }
+        if (
+          key === 'factory' &&
+          item.kind === 'grid2d-stage-module' &&
+          item.source === 'inline' &&
+          descriptor?.enumerable === false
+        ) {
+          pushDiagnostic(
+            diagnostics,
+            phase,
+            'NACHI_ASSET_INLINE_FUNCTION',
+            'Inline Grid2D TSL factories are authoring-only.',
+            `${path}.source`,
+            'Use defineGrid2DStageFunction() and a registered grid2d-function-ref.',
+          );
           continue;
         }
         if (!descriptor?.enumerable || !('value' in descriptor)) {

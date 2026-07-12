@@ -490,6 +490,7 @@ export function createThreeKernelAdapter(
     cos: (value) => asNode(cos(value as never)),
     dataTexture: (lut) => createDataTexture(lut, options.linearFloat32Filtering ?? false),
     fn: (callback) => Fn(callback)() as unknown as ReturnType<KernelTslAdapter['fn']>,
+    floor: (value) => asNode(floor(value as never)),
     instancedArray: materializeInstancedArray,
     indirectArray: (values) => {
       const attribute = new THREE.IndirectStorageBufferAttribute(values, 1);
@@ -506,6 +507,7 @@ export function createThreeKernelAdapter(
       return node;
     },
     inverse: (value) => asNode(inverse(value as never)),
+    mod: (value, divisor) => asNode(mod(value as never, divisor as never)),
     sampleTexture: (value, uv) => asNode(texture(value as THREE.Texture, uv as never)),
     ...(options.sceneDepthTexture === undefined
       ? {}

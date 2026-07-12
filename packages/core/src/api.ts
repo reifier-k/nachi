@@ -83,7 +83,41 @@ import type {
   VelocityMeshNormalOptions,
   VortexOptions,
   ComposedEffectParameterSchema,
+  Grid2DDefinition,
+  Grid2DChannelSchema,
+  Grid2DStageModuleDefinition,
+  SimStageDefinition,
 } from './types.js';
+
+export function defineGrid2D<const Channels extends Grid2DChannelSchema>(config: {
+  readonly boundary?: 'clamp';
+  readonly channels: Channels;
+  readonly resolution: readonly [number, number];
+}): Grid2DDefinition<Channels> {
+  return {
+    boundary: config.boundary ?? 'clamp',
+    channels: config.channels,
+    kind: 'grid2d',
+    resolution: config.resolution,
+    version: 1,
+  };
+}
+
+export function defineSimStage(config: {
+  readonly iterations?: number;
+  readonly phase?: 'after-particles' | 'before-particles';
+  readonly target: string;
+  readonly update: Grid2DStageModuleDefinition;
+}): SimStageDefinition {
+  return {
+    iterations: config.iterations ?? 1,
+    kind: 'sim-stage',
+    phase: config.phase ?? 'after-particles',
+    target: config.target,
+    update: config.update,
+    version: 1,
+  };
+}
 
 function createModule<Stage extends ModuleStage, Config extends object>(
   stage: Stage,

@@ -11,7 +11,96 @@ export const effectAssetSchemaV1 = {
         { $ref: '#/$defs/emitter' },
         { $ref: '#/$defs/visualElement' },
         { $ref: '#/$defs/emitterExtension' },
+        { $ref: '#/$defs/grid2d' },
+        { $ref: '#/$defs/simStage' },
       ],
+    },
+    grid2d: {
+      additionalProperties: false,
+      properties: {
+        boundary: { const: 'clamp' },
+        channels: {
+          additionalProperties: { $ref: '#/$defs/grid2dChannel' },
+          minProperties: 1,
+          type: 'object',
+        },
+        kind: { const: 'grid2d' },
+        resolution: {
+          items: { minimum: 1, type: 'integer' },
+          maxItems: 2,
+          minItems: 2,
+          type: 'array',
+        },
+        version: { const: 1 },
+      },
+      required: ['kind', 'version', 'resolution', 'channels', 'boundary'],
+      type: 'object',
+    },
+    grid2dChannel: {
+      oneOf: [
+        {
+          additionalProperties: false,
+          properties: {
+            default: { type: 'number' },
+            type: { const: 'f32' },
+          },
+          required: ['type'],
+          type: 'object',
+        },
+        {
+          additionalProperties: false,
+          properties: {
+            default: {
+              items: { type: 'number' },
+              maxItems: 2,
+              minItems: 2,
+              type: 'array',
+            },
+            type: { const: 'vec2' },
+          },
+          required: ['type'],
+          type: 'object',
+        },
+      ],
+    },
+    grid2dStageFunctionRef: {
+      additionalProperties: false,
+      properties: {
+        id: { minLength: 1, type: 'string' },
+        kind: { const: 'grid2d-function-ref' },
+        version: { minimum: 1, type: 'integer' },
+      },
+      required: ['id', 'kind', 'version'],
+      type: 'object',
+    },
+    grid2dStageModule: {
+      additionalProperties: false,
+      properties: {
+        config: { type: 'object' },
+        kind: { const: 'grid2d-stage-module' },
+        source: {
+          oneOf: [
+            { minLength: 1, not: { const: 'inline' }, type: 'string' },
+            { $ref: '#/$defs/grid2dStageFunctionRef' },
+          ],
+        },
+        version: { const: 1 },
+      },
+      required: ['config', 'kind', 'source', 'version'],
+      type: 'object',
+    },
+    simStage: {
+      additionalProperties: false,
+      properties: {
+        iterations: { minimum: 1, type: 'integer' },
+        kind: { const: 'sim-stage' },
+        phase: { enum: ['before-particles', 'after-particles'] },
+        target: { minLength: 1, type: 'string' },
+        update: { $ref: '#/$defs/grid2dStageModule' },
+        version: { const: 1 },
+      },
+      required: ['kind', 'version', 'target', 'phase', 'iterations', 'update'],
+      type: 'object',
     },
     emitter: {
       additionalProperties: false,

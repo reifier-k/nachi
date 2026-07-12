@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi M12 Grid2D smoke and fire</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">M12 / simulation stages</p>
+        <h1>Grid2D smoke &amp; fire</h1>
+        <p>Semi-Lagrangian advection, buoyancy, dissipation, and Jacobi pressure projection.</p>
+      </header>
+      <canvas id="grid-visual" width="384" height="384"></canvas>
+      <dl class="status">
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Contract</dt>
+          <dd id="status-value">running</dd>
+        </div>
+        <div>
+          <dt>Submissions</dt>
+          <dd id="submission-value">pending</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/m12-grid.ts"></script>
+  </body>
+</html>

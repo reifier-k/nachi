@@ -45,6 +45,7 @@ export default defineConfig({
         m11Scale: 'm11-scale/index.html',
         m11Cache: 'm11-cache/index.html',
         m11Debug: 'm11-debug/index.html',
+        m12Grid: 'm12-grid/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
       },

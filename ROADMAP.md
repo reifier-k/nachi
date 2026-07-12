@@ -35,6 +35,7 @@
 
 | Niagara機能 | 対応マイルストーン | 状態 |
 |---|---|---|
+| 2026-07-12 | **M12バッチ2 検収・レビュー・裁定: 受入(コミット)**。Grid2D流体+sim stages基盤: `defineGrid2D()`(packed vec4 storage、current+scratch 2バッファ)+effect要素`defineSimStage()`(before/after-particles、iterations毎submit分割)+半ラグランジュ移流・浮力・散逸・Jacobi 8反復圧力射影+fixed-point atomic raster(scale 4096)/バイリニアsample+`/m12-grid/`8検証+format往復+WebGL2は`NACHI_GRID2D_WEBGL2_UNSUPPORTED`明示拒否。①Claudeレビュー: **PASS(BLOCKER 0/SHOULD 4/NIT 6)** — 流体数学は全検算一致(移流バックトレース0.99厳密/散逸e^-k誤差2.5e-8/JacobiはGPU Gems標準形/y鏡像・転置プローブ0)、submit計数745厳密一致、ping-pongハザードなし、スケジューラ統合はpause/カリング/プール/spawn失敗の全経路でgrid解放を確認、8検証の弁別性を偽実装5種の棄却で確認 ②SHOULD全4+NIT全6をCodexで消化: [S1]**全gridカーネルへinvocation範囲ガード**(three r185はceil(cells/64) dispatchのみでガード非生成。WebGPU仕様上OOB書込は破棄or同一バインディング内任意位置が許容され、Tintクランプ実装=Metal系では余剰スレッドが最終セルを競合上書きし得る移植性リスク。SwiftShaderでは破棄実装と実測済みだが3層検証はMetalを踏まないため予防) [S2]custom stage factory戻り値の宣言チャネル照合+成分数診断 [S3]custom stage実行経路+未解決診断2種のruntimeテスト [S4]grid含む定義のbakeに`NACHI_SIM_CACHE_GRID2D_NOT_RECORDED`警告+RFC規定(v1キャッシュはgrid状態を記録しない) [N1]RFC dispatch同期記述をthree実測知見帰属へ修正 [N2]rasterize負値・非有限のCPU拒否 [N3]grid内部exportの公開面過大(M11監査B3の再発形)→明示export化 [N4]単位系明記 [N5]schema詳細化 [N6]dt=0初期化文書化 ③最終: /m12-grid/両バックエンド全緑(数値回帰なし)、golden-ultimate/m11-cache回帰緑、テスト490本、全静的ゲート緑。視覚基準m12-grid.png(注入源+上昇プルーム、非対称位置)は取得時目視確認済み |
 | System/Emitter階層・エミッタ継承 | M9 | ✅ 2026-07-12監査確認(defineEmitter(base,overrides)のキー指定マージ、JSON往復保証。アセット参照継承・親変更伝播はM12=§16記録、System-stageモジュールなしは差分記録) |
 | 動的パーティクル属性(カスタム属性→バッファコンパイル) | M1 | ✅ 2026-07-11監査確認 |
 | 名前空間パラメータ (System/Emitter/Particles/User) | M1 | ✅ 2026-07-11監査確認(User.*のGPU反映まで実証。Emitter時間系uniformはM2) |
@@ -66,7 +67,7 @@
 | sim caching(ベイク&リプレイ) | M11 | ✅ 残差分: Texture/Volume系Baker出力/全属性キャッシュ/Sequencerスクラブ統合/world-space rebase/velocity外挿/WebGL2 replayなし |
 | デバッガ(属性スプレッドシート・プロファイラ) | M11 | ✅ 残差分: 連続ストリーミング表示/System名前空間値/式フィルタ/FX Outliner/remote Session Browser/モジュール別・エミッタ別GPU時間配賦なし |
 | アセットフォーマット&ローダ | M12 | ⬜ |
-| Grid2D/3D流体(Niagara Fluids相当) | M12 | ⬜ |
+| Grid2D/3D流体(Niagara Fluids相当) | M12 | 🟨 Grid2Dバッチ2実装済み(sim stages、packed storage DI、半ラグランジュ煙/炎、粒子双方向、WebGL2明示診断)。Grid3D/volume rendererは未実装 |
 | Neighbor grid / boids / PBD | M12 | ⬜ |
 
 ## M0 — 基盤とスパイク ✅(条件付きPASS)
@@ -201,7 +202,7 @@
 - [ ] R3Fバインディング(@nachi/react)
 - [ ] ドキュメントサイト+デモギャラリー公開
 - [ ] npm公開(changesets等でリリース自動化)
-- [ ] Grid2Dスモーク/炎シミュレーション(sim stages基盤)
+- [x] Grid2Dスモーク/炎シミュレーション(sim stages基盤) — バッチ2受入済み(2026-07-12): `defineGrid2D()`+effect-element `defineSimStage()`、iterationごとのsubmit分割、packed vec4 storage、cell read/write+bilinear、fixed-point atomic particle raster/sample、移流+浮力+散逸+Jacobi圧力、`/m12-grid/`、format往復、WebGL2診断
 - [ ] Grid3D流体(Niagara Fluids相当、ストレッチ)
 - [ ] neighbor grid(boids)、PBD的拘束(ストレッチ)
 - [ ] Effekseerインポータ調査(実装判断はここで)
@@ -227,6 +228,7 @@
 
 | 日付 | セッション成果 |
 |---|---|
+| 2026-07-12 | **M12バッチ2実装(静的検収完了、GPU実測待ち)**: coreへGrid2D DIとeffect-element sim stagesを追加。密度/温度/速度/圧力をvec4セルレコードへ詰め、状態+scratchの2 storage bufferで上限を節約。before/after particle境界、反復ごとのstage+commit独立submit、inline/registered Grid TSL、GPU fixed-point atomic particle→gridとGPU bilinear grid→particleを実装。参照流体は半ラグランジュ移流+指数散逸+浮力+Jacobi圧力/射影。`/m12-grid/`は解析注入/散逸、非対称移流、1 vs N反復、独立粒子サンプル、live submit、単一画像/console/perfを公開し、WebGL2は`NACHI_GRID2D_WEBGL2_UNSUPPORTED`のみを検証。format v1へgrid/stage閉構造とinline拒否を追加。静的ゲートとGPU実測結果は本バッチ最終報告へ記録。 |
 | 2026-07-12 | **M12バッチ1 検収・レビュー・裁定: 受入(コミット)**。`@nachi/format`+**🎯ゴールデン#5のJSONロード再生達成**(jsonGpuEquivalent=timeline action列+GPU属性byte等価をGPU実測緑、偽陽性なしをレビューが経路確認)。①Claudeレビュー: **FAIL(BLOCKER 1)** — [B1]M9継承`defineEmitter(base,overrides)`が`init:`/`update:`キーを無条件own代入し、base/override双方に該当ステージが無いと`update: undefined`を持つ定義を生成→serialize不能。**有効なv1文書のloadEffect出力すら再serialize不能=round-trip契約違反**(vitest `toEqual`はundefined値プロパティを無視するためテストをすり抜けていた)→coreの条件付きスプレッド化+own-key存在検証+「loadEffect出力の再serialize恒等」テスト常設 [S1]200k深ネストでRangeError生落ち→深度上限256+`NACHI_ASSET_MAX_DEPTH_EXCEEDED` [S2]registration形`tslModule(defineTslFunction(...))`がserialize不能+inline拒否hint到達不能→function-refとしてJSON化+登録誘導hint実装 [S3]要素キー`#`と参照構文`lastIndexOf('#')`の衝突(`#a#b`が外部resolverへ誤ルーティング)→`#`禁止+「ちょうど1個の#」構文RFC明記 [N1]入力部分木共有→全体clone統一 [N2]range/curve/gradient値型検証 [N3]疎配列診断化。レビューは敵対的プローブでprototype汚染3経路クリーン・封筒厳格性・extends意味論のM9一致・npm境界(format→coreのみ、three非依存)も確認 ②最終: golden-ultimate(JSON主経路)+M9系(継承変更波及先)+m11-cache回帰全緑、テスト475本、全静的ゲート+format ESMゲート緑。**確定知見: round-trip検証は「ローダ出力の再serialize恒等」まで確認する**(片方向toEqualはundefined own-keyを見逃す)。M12残: R3F/ドキュメント/npm公開/Grid流体/boids・PBD/Effekseer調査/ゴールデン#7/監査 |
 | 2026-07-12 | **M12バッチ1実装(統括検収待ち)**: `@nachi/format`を新設し、`{format:'nachi-effect',version:1,effect}`封筒、公開JSON schema、`serializeEffect()`/`loadEffect()`、閉構造+拡張module configのNACHI_ASSET_*診断、非JSON/inline TSL拒否、明示migration registryを実装。asset `emitter-extends`は`#element`/`asset-id#element`を同期resolverで解決後、M9 `defineEmitter(base,overrides)`へ委譲し循環を拒否。timeline mesh-fxは参照IDだけをJSONに保持し`bindMeshFxResources()`で外部解決。`/golden-ultimate/`の主再生をJSONロード定義へ切替え、同seedコード定義とのtimeline action列+GPU particle byte等価を追加、既存スクショ構成は不変。typecheck/lint/test(468)/prettier/build+format Node ESM gateは全緑。listener不要GPU runnerもChromiumが`setsockopt EPERM`→`SIGTRAP`で起動不能のため、GPU実測+既存基準スクショ照合は統括検収へ。 |
 | 2026-07-12 | **M11マイルストーン監査・裁定: 通過(条件付きPASS→指摘全件処理→全緑)**。①独立監査2本: Codex=条件付きPASS(0B/7S/4N、Epic公式ドキュメント突合のパリティ差分表付き)/Claude=条件付きPASS(0B/3S/6N、独立GPUプローブ3本)。相互裏付け2件(indirectDraws意味論・PLAN決定事項ログ欠落)、Claude独自=**GPU実測バグ3件**(未初期化readback生TypeError/culled bakeの無音凍結orクラッシュ/replay直後readbackの残骸値=遅延アップロード非整合)、Codex独自=静的・資産境界5件(外部キャッシュ構造検証不足/`export *`のAPI公開面過大/little-endian未保証/perf compute偽ゼロ/受入回帰不足) ②裁定: 採用15項目(A1-A3実バグ+B1-B6+C1-C6)を単一修正バッチでCodexへ、PLAN欠落は統括が補完。**却下2件と理由**: linear補間のslot再利用個体同一性=現行RFC準拠でM12 persistent ID検討へ/イベント出生のparticle予算対象外=挙動維持でRFC §10.4に明文化 ③修正検収で**監査修正バッチ自体の回帰・新露出を3ラウンド差し戻し**: (a)m11-cache視覚全黒=実は新設「render前即時replay readback検証」がコア実バグ(replay済み・GPU未実体化storageの`readStorage`直読が生TypeError=A1ガード未カバー経路)を露出→adapterでreadback前にGPU実体化保証 (b)profilerDrawSemantics位相矛盾→「直近完了フレーム実績(1フレーム遅延)」意味論へ確定+RFC修正 (c)three r185は初回renderでカメラへ`coordinateSystem`刻印時に`updateProjectionMatrix()`を呼ぶ=基底`THREE.Camera`をrenderに渡すと必ずTypeError(実カメラ必須) ④最終: 全域回帰20ページ+ゴールデン6本+両バックエンド全緑、テスト459本、typecheck/lint/build/prettier/ESMゲート緑。**パリティマトリクス30/62✅**(スケーラビリティ/sim caching/デバッガをNiagara残差分注記付きで確認済み化)。**確定知見: 監査修正で足した検証が新たな実バグを露出するのは正常な連鎖**(検証強化→露出→修正のループを恐れない)/**プロファイラ系の「そのフレーム」意味論はcapture位相(update直後・render前)と衝突する**→1フレーム遅延実績で定義するのが整合的 |

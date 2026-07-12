@@ -711,8 +711,52 @@ export interface VisualElementDefinition<Config extends object = object> {
   readonly version: number;
 }
 
+export type Grid2DChannelType = 'f32' | 'vec2';
+
+export interface Grid2DChannelDefinition<Type extends Grid2DChannelType = Grid2DChannelType> {
+  readonly default?: Type extends 'vec2' ? Vec2 : number;
+  readonly type: Type;
+}
+
+export type Grid2DChannelSchema = Readonly<Record<string, Grid2DChannelDefinition>>;
+
+/** Fixed-resolution storage-buffer data interface. Channels are packed into vec4 cell records. */
+export interface Grid2DDefinition<Channels extends Grid2DChannelSchema = Grid2DChannelSchema> {
+  readonly boundary: 'clamp';
+  readonly channels: Channels;
+  readonly kind: 'grid2d';
+  readonly resolution: readonly [width: number, height: number];
+  readonly version: 1;
+}
+
+export interface Grid2DStageFunctionRef {
+  readonly id: string;
+  readonly kind: 'grid2d-function-ref';
+  readonly version: number;
+}
+
+export interface Grid2DStageModuleDefinition<Config extends object = object> {
+  readonly config: Readonly<Config>;
+  readonly kind: 'grid2d-stage-module';
+  readonly source: string | Grid2DStageFunctionRef;
+  readonly version: 1;
+}
+
+export interface SimStageDefinition {
+  /** Relative to the ordinary emitter event/spawn/init/update schedule. */
+  readonly phase: 'after-particles' | 'before-particles';
+  readonly iterations: number;
+  readonly kind: 'sim-stage';
+  /** Effect element key of the Grid2D data interface. */
+  readonly target: string;
+  readonly update: Grid2DStageModuleDefinition;
+  readonly version: 1;
+}
+
 export type EffectElementDefinition =
   | EmitterDefinition<AttributeSchema, ParameterSchema>
+  | Grid2DDefinition
+  | SimStageDefinition
   | VisualElementDefinition;
 export type EffectElements = Readonly<Record<string, EffectElementDefinition>>;
 
@@ -977,6 +1021,7 @@ export interface EffectInstance<Definition = EffectDefinition> {
   readonly scalability: EffectScalabilityStatus;
   readonly state: EffectInstanceState;
   readonly timeScale: number;
+  getGrid2D(key: string): Grid2DRuntimeView | undefined;
   applyHitStop(durationMs: number, timeScale?: number): void;
   attachTo(source: EffectTransformSource): void;
   detach(): void;
@@ -990,6 +1035,31 @@ export interface EffectInstance<Definition = EffectDefinition> {
   setTransform(position: PositionInput, rotation?: RotationInput): void;
   /** Stops scheduling immediately. GPU resources remain owned until release(). */
   stop(): void;
+}
+
+export interface Grid2DChannelLayout {
+  readonly components: 1 | 2;
+  readonly group: number;
+  readonly name: string;
+  readonly offset: 0 | 1 | 2 | 3;
+  readonly type: Grid2DChannelType;
+}
+
+export interface Grid2DSnapshot {
+  readonly channels: readonly Grid2DChannelLayout[];
+  readonly data: Float32Array;
+  readonly resolution: readonly [number, number];
+}
+
+export interface Grid2DRuntimeView {
+  readonly definition: Grid2DDefinition;
+  readonly initialized: boolean;
+  readonly submissionCount: number;
+  capture(): Promise<Grid2DSnapshot>;
+  /** GPU fixed-point deposition from normalized positions; value must be finite/non-negative. */
+  rasterizeParticles(points: readonly Vec2[], channel: string, value?: number): Promise<void>;
+  /** GPU bilinear scalar sampling at normalized particle positions. */
+  sampleParticles(points: readonly Vec2[], channel: string): Promise<Float32Array>;
 }
 
 export type EffectScalabilityAction = 'culled' | 'full' | 'spawn-suppressed';

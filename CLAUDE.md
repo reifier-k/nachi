@@ -65,6 +65,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m11-cache/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-cache/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgl
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
@@ -122,6 +124,15 @@ must not pass through partial/unknown data. Inline functions and live engine res
 non-serializable. Asset emitter `extends` resolves before compilation through M9
 `defineEmitter(base, overrides)` semantics. JSON-loaded timeline mesh-fx placeholders require
 explicit `bindMeshFxResources()` resolution outside the document.
+
+M12 Grid2D uses `defineGrid2D()` and effect-element `defineSimStage()`. A Grid2D packs logical
+channels into one vec4-record storage buffer per state plus one scratch buffer; do not split smoke
+channels into SoA buffers and consume the device storage-binding budget. Every stage iteration and
+its scratch-to-state commit are separate `submitCompute()` calls because multiple dispatches in one
+compute pass do not provide a whole-grid barrier. Built-ins cover injection, semi-Lagrangian
+advection/dissipation, buoyancy, Jacobi pressure, and projection. `rasterizeParticles()` uses u32
+fixed-point atomics; `sampleParticles()` uses cell-centered bilinear sampling. WebGL2 must retain
+the `NACHI_GRID2D_WEBGL2_UNSUPPORTED` diagnostic.
 
 ## Three-layer verification
 

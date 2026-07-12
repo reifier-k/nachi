@@ -20,9 +20,16 @@ import {
   decalRenderer,
   defineEffect,
   defineEmitter,
+  defineGrid2D,
+  defineGrid2DStageFunction,
   defineParameter,
+  defineSimStage,
   emitTo,
   estimateSimulationCacheMemory,
+  gridAdvect,
+  gridPressureJacobi,
+  gridTslModule,
+  Grid2DStageRegistry,
   lifetime,
   killVolume,
   perDistance,
@@ -50,6 +57,278 @@ describe('M10 coarse transparency order', () => {
     ]);
     const reversedView = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1];
     expect(sortEmittersBackToFront(entries, reversedView)[0]?.stableKey).toBe('a');
+  });
+});
+
+describe('M12 Grid2D runtime scheduling', () => {
+  it('submits every stage iteration and commit on separate ordered boundaries', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const fluid = defineGrid2D({
+      channels: {
+        density: { type: 'f32' },
+        velocity: { default: [0, 0], type: 'vec2' },
+        pressure: { type: 'f32' },
+      },
+      resolution: [4, 3],
+    });
+    const effect = defineEffect({
+      elements: {
+        fluid,
+        before: defineSimStage({
+          phase: 'before-particles',
+          target: 'fluid',
+          update: gridAdvect(),
+        }),
+        after: defineSimStage({
+          iterations: 2,
+          target: 'fluid',
+          update: gridPressureJacobi(),
+        }),
+        particles: defineEmitter({
+          capacity: 1,
+          integration: 'none',
+          lifecycle: { duration: 1 },
+          render: {
+            access: { reads: [], writes: [] },
+            config: {},
+            kind: 'module',
+            stage: 'render',
+            type: 'test/runtime-compute-only',
+            version: 1,
+          },
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(effect);
+
+    await system.update(0.1);
+
+    const stageSubmissions = renderer.submissions
+      .map((name, index) => ({ index, name }))
+      .filter(({ name }) => name === 'NachiGrid2DStage')
+      .map(({ index }) => index);
+    expect(stageSubmissions).toHaveLength(6);
+    expect(stageSubmissions[0]!).toBeLessThan(
+      renderer.submissions.indexOf('NachiEmitterInitialize'),
+    );
+    expect(renderer.submissions.indexOf('NachiEmitterInitialize')).toBeLessThan(
+      stageSubmissions[1]!,
+    );
+    expect(stageSubmissions[3]!).toBeLessThan(
+      renderer.submissions.lastIndexOf('NachiEmitterUpdate'),
+    );
+    expect(renderer.submissions.lastIndexOf('NachiEmitterUpdate')).toBeLessThan(
+      stageSubmissions[4]!,
+    );
+    expect(instance.getGrid2D('fluid')?.submissionCount).toBe(13);
+    expect(instance.state).toBe('active');
+  });
+
+  it('diagnoses a missing Grid2D target before GPU submission', () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          orphan: defineSimStage({ target: 'missing', update: gridAdvect() }),
+        },
+      }),
+    );
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_SIM_STAGE_TARGET_UNKNOWN' }),
+    ]);
+    expect(renderer.submissions).toEqual([]);
+  });
+
+  it('uses an explicit WebGL2 unsupported diagnostic instead of a silent fallback', () => {
+    const renderer = new WebGlGridRenderer();
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          fluid: defineGrid2D({
+            channels: { density: { type: 'f32' } },
+            resolution: [4, 4],
+          }),
+        },
+      }),
+    );
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID2D_WEBGL2_UNSUPPORTED' }),
+    ]);
+    expect(renderer.submissions).toEqual([]);
+  });
+
+  it('materializes and executes inline and registered custom stage factories', async () => {
+    const inlineRenderer = new FakeRuntimeRenderer();
+    const fluid = defineGrid2D({
+      channels: { density: { type: 'f32' } },
+      resolution: [4, 3],
+    });
+    const inlineSystem = new VFXSystem(inlineRenderer);
+    const inline = inlineSystem.spawn(
+      defineEffect({
+        elements: {
+          fluid,
+          update: defineSimStage({
+            target: 'fluid',
+            update: gridTslModule(({ read }) => ({ density: read('density') })),
+          }),
+        },
+      }),
+    );
+    await inlineSystem.update(0.1);
+    expect(inlineRenderer.submissions).toContain('NachiGrid2DStage');
+    expect(inline.diagnostics).toEqual([]);
+
+    const registered = defineGrid2DStageFunction('test/grid-copy', ({ read }) => ({
+      density: read('density'),
+    }));
+    const registry = new Grid2DStageRegistry().register(registered);
+    const registeredRenderer = new FakeRuntimeRenderer();
+    const registeredSystem = new VFXSystem(registeredRenderer, undefined, {
+      grid2DStageRegistry: registry,
+    });
+    const registeredInstance = registeredSystem.spawn(
+      defineEffect({
+        elements: {
+          fluid,
+          update: defineSimStage({ target: 'fluid', update: gridTslModule(registered) }),
+        },
+      }),
+    );
+    await registeredSystem.update(0.1);
+    expect(registeredRenderer.submissions).toContain('NachiGrid2DStage');
+    expect(registeredInstance.diagnostics).toEqual([]);
+  });
+
+  it('diagnoses both unresolved custom-stage function paths', () => {
+    const fluid = defineGrid2D({
+      channels: { density: { type: 'f32' } },
+      resolution: [4, 3],
+    });
+    const unresolved = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          fluid,
+          update: defineSimStage({
+            target: 'fluid',
+            update: gridTslModule({
+              id: 'missing/grid-stage',
+              kind: 'grid2d-function-ref',
+              version: 1,
+            }),
+          }),
+        },
+      }),
+    );
+    expect(unresolved.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID2D_STAGE_FUNCTION_UNRESOLVED' }),
+    ]);
+
+    const missingInlineMetadata = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          fluid,
+          update: defineSimStage({
+            target: 'fluid',
+            update: {
+              config: {},
+              kind: 'grid2d-stage-module',
+              source: 'inline',
+              version: 1,
+            },
+          }),
+        },
+      }),
+    );
+    expect(missingInlineMetadata.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID2D_STAGE_FUNCTION_UNRESOLVED' }),
+    ]);
+  });
+
+  it('diagnoses undeclared and component-mismatched custom stage results', () => {
+    const scalarGrid = defineGrid2D({
+      channels: { density: { type: 'f32' } },
+      resolution: [4, 3],
+    });
+    const typo = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          fluid: scalarGrid,
+          update: defineSimStage({
+            target: 'fluid',
+            update: gridTslModule(({ read }) => ({ denisty: read('density') })),
+          }),
+        },
+      }),
+    );
+    expect(typo.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID2D_STAGE_WRITE_CHANNEL_UNDECLARED' }),
+    ]);
+
+    const vectorGrid = defineGrid2D({
+      channels: { density: { type: 'f32' }, velocity: { type: 'vec2' } },
+      resolution: [4, 3],
+    });
+    const mismatch = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          fluid: vectorGrid,
+          update: defineSimStage({
+            target: 'fluid',
+            update: gridTslModule(({ read }) => ({ velocity: read('density') })),
+          }),
+        },
+      }),
+    );
+    expect(mismatch.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID2D_STAGE_WRITE_COMPONENTS_INVALID' }),
+    ]);
+  });
+
+  it('annotates v1 bakes that execute but do not record Grid2D state', async () => {
+    const cache = await bakeSimulation(
+      new VFXSystem(new CacheRuntimeRenderer()),
+      defineEffect({
+        elements: {
+          fluid: defineGrid2D({
+            channels: { density: { type: 'f32' } },
+            resolution: [4, 3],
+          }),
+        },
+      }),
+      { frames: 1 },
+    );
+    expect(cache.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'NACHI_SIM_CACHE_GRID2D_NOT_RECORDED',
+        severity: 'warning',
+      }),
+    ]);
+  });
+
+  it('rejects negative and non-finite particle rasterization values before upload', async () => {
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          fluid: defineGrid2D({
+            channels: { density: { type: 'f32' } },
+            resolution: [4, 3],
+          }),
+        },
+      }),
+    );
+    const grid = instance.getGrid2D('fluid')!;
+    await expect(grid.rasterizeParticles([], 'density', -1)).rejects.toThrow(RangeError);
+    await expect(grid.rasterizeParticles([], 'density', Number.NaN)).rejects.toThrow(RangeError);
+    await expect(grid.rasterizeParticles([], 'density', Number.POSITIVE_INFINITY)).rejects.toThrow(
+      RangeError,
+    );
   });
 });
 import type {
@@ -211,9 +490,11 @@ function fakeAdapter(): KernelTslAdapter {
       callback();
       return new FakeCompute();
     },
+    floor: node,
     instancedArray: () => new FakeStorage(),
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     inverse: node,
+    mod: node,
     sampleTexture: node,
     sampleMeshSurface: () => ({ normal: node(), position: node() }),
     sampleSdf: () => ({ distance: node(), gradient: node() }),
@@ -250,6 +531,18 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
   submitComputeIndirect(kernel: KernelComputeNode): void {
     this.submitCompute(kernel);
   }
+}
+
+class WebGlGridRenderer extends FakeRuntimeRenderer {
+  override readonly kernelAdapter: KernelTslAdapter = {
+    ...fakeAdapter(),
+    capabilities: {
+      atomics: false,
+      backend: 'webgl2',
+      indirectDispatch: false,
+      indirectDraw: false,
+    },
+  };
 }
 
 class DrawTrackingRuntimeRenderer extends FakeRuntimeRenderer {
@@ -2508,7 +2801,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
       const metadata = JSON.parse(JSON.stringify(source.metadata)) as typeof floatCache.metadata;
       const data = source.data.slice(0);
       mutate(metadata, data);
-      return { data, kind: 'simulation-cache' as const, metadata };
+      return { data, diagnostics: source.diagnostics, kind: 'simulation-cache' as const, metadata };
     };
     const fixtures = [
       corrupt(floatCache, (metadata, data) => {

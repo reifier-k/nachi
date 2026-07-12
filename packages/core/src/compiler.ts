@@ -437,9 +437,12 @@ export interface KernelTslAdapter {
   cos(value: KernelNodeInput): KernelNode;
   dataTexture(lut: BakedLut): unknown;
   fn(callback: () => void): KernelComputeBuilder;
+  /** Optional grid-stage operations; core diagnoses adapters that omit them before submission. */
+  floor?(value: KernelNodeInput): KernelNode;
   instancedArray(length: number, type: TslStorageType): KernelStorageNode;
   indirectArray(values: Uint32Array): KernelIndirectStorageNode;
   inverse(value: KernelNode): KernelNode;
+  mod?(value: KernelNodeInput, divisor: KernelNodeInput): KernelNode;
   sampleTexture(texture: unknown, uv: KernelNode): KernelNode;
   sampleSceneDepth?(uv: KernelNode): KernelNode;
   sampleMeshSurface(

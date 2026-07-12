@@ -13,6 +13,7 @@ import type {
   ResolvedAttribute,
   ResolvedAttributeSchema,
   ResolvedAttributeStorage,
+  VfxDiagnostic,
 } from './types.js';
 import type { VFXSystem, VfxEmitterRuntimeView } from './system.js';
 
@@ -71,6 +72,8 @@ export interface SimulationCacheMetadata {
 
 export interface SimulationCache {
   readonly data: ArrayBuffer;
+  /** Non-fatal limitations observed while baking this cache. */
+  readonly diagnostics: readonly VfxDiagnostic[];
   readonly kind: 'simulation-cache';
   readonly metadata: SimulationCacheMetadata;
 }
@@ -675,7 +678,11 @@ function buildCache(
       | 'loopTolerance'
       | 'sampleStartFrame'
     >
-  > & { readonly qualityTier: QualityTier; readonly sourceBackend: 'webgl2' | 'webgpu' },
+  > & {
+    readonly diagnostics: readonly VfxDiagnostic[];
+    readonly qualityTier: QualityTier;
+    readonly sourceBackend: 'webgl2' | 'webgpu';
+  },
 ): SimulationCache {
   let offset = 0;
   let uploadBytesPerFrame = 0;
@@ -798,6 +805,7 @@ function buildCache(
   }
   return {
     data,
+    diagnostics: options.diagnostics,
     kind: 'simulation-cache',
     metadata: {
       compression: options.compression,
@@ -870,6 +878,15 @@ export async function bakeSimulation<
     );
   }
   const renderer = runtimeRenderer(system);
+  const diagnostics: VfxDiagnostic[] = Object.entries(definition.elements)
+    .filter(([, element]) => element.kind === 'grid2d')
+    .map(([key]) => ({
+      code: 'NACHI_SIM_CACHE_GRID2D_NOT_RECORDED',
+      message: `Simulation cache v1 does not record Grid2D state for element "${key}"; baking executes its stages, while replay neither restores nor advances that state.`,
+      path: `elements.${key}`,
+      phase: 'runtime',
+      severity: 'warning',
+    }));
   const instance = system.spawn(definition, options.spawn);
   if (instance.state === 'error') {
     const diagnostics = instance.diagnostics;
@@ -943,6 +960,7 @@ export async function bakeSimulation<
     qualityTier: system.qualitySelection.tier,
     sampleStartFrame,
     sourceBackend: renderer.kernelAdapter.capabilities.backend,
+    diagnostics,
   });
 }
 

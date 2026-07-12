@@ -2,10 +2,12 @@
 
 Niagara parity through a code-first, TSL/WebGPU-native VFX library for Three.js.
 
-**Status:** M12 asset batch 1 implemented: `@nachi/format` provides the strict `nachi-effect` v1
+**Status:** M12 batches 1–2 implemented. `@nachi/format` provides the strict `nachi-effect` v1
 JSON envelope, schema, serializer/loader, explicit migrations, and asset-reference emitter
 inheritance. Golden #5 now runs from a JSON-loaded definition and compares its timeline actions and
-GPU particle bytes with the code-authored control. M12 integration review remains a pre-alpha gate.
+GPU particle bytes with the code-authored control. Core now also provides effect-element
+`defineGrid2D()` data interfaces and repeated `defineSimStage()` compute stages, including the
+`/m12-grid/` smoke/fire reference. M12 integration review remains a pre-alpha gate.
 
 ```ts
 import { loadEffect, serializeEffect } from '@nachi/format';
@@ -18,6 +20,28 @@ Only the declarative subset is accepted. Inline `tslModule()` callbacks, raw Thr
 class instances, functions, and cyclic graphs fail with path-specific `NACHI_ASSET_*` diagnostics;
 registered function/resource references—including `tslModule(defineTslFunction(...))`—remain JSON
 data.
+
+```ts
+const fluid = defineGrid2D({
+  resolution: [64, 64],
+  channels: {
+    density: { type: 'f32' },
+    temperature: { type: 'f32' },
+    velocity: { type: 'vec2' },
+    pressure: { type: 'f32' },
+  },
+});
+
+const pressure = defineSimStage({
+  target: 'fluid',
+  iterations: 8,
+  update: gridPressureJacobi(),
+});
+```
+
+Grid stages run before or after the ordinary particle schedule and use separate backend submissions
+for every update/commit iteration. WebGL2 reports `NACHI_GRID2D_WEBGL2_UNSUPPORTED`; it does not
+pretend transform feedback supplies arbitrary grid addressing or atomics.
 
 Simulation caches use `bakeSimulation(system, effect, { frames, frameRate, compression, loop })` and
 `replaySimulation(system, effect, cache)`. Assets stay loader-friendly as metadata JSON plus an

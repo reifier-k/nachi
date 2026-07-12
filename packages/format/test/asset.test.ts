@@ -10,12 +10,18 @@ import {
   curlNoise,
   defineEffect,
   defineEmitter,
+  defineGrid2D,
+  defineGrid2DStageFunction,
+  defineSimStage,
   defineParameter,
   defineTslFunction,
   drag,
   emitTo,
   gradient,
   gravity,
+  gridAdvect,
+  gridInject,
+  gridTslModule,
   hitStop,
   lifetime,
   lightIntensity,
@@ -560,5 +566,48 @@ describe('asset-reference emitter inheritance', () => {
       version: 1,
     };
     expect(diagnosticCodes(() => loadEffect(cyclic))).toContain('NACHI_ASSET_EXTENDS_CYCLE');
+  });
+
+  it('round-trips declarative Grid2D data interfaces and simulation stages', () => {
+    const fluid = defineGrid2D({
+      channels: {
+        density: { default: 0, type: 'f32' },
+        temperature: { default: 0, type: 'f32' },
+        velocity: { default: [0, 0], type: 'vec2' },
+        pressure: { default: 0, type: 'f32' },
+      },
+      resolution: [24, 16],
+    });
+    const registered = defineGrid2DStageFunction('test/grid-decay', ({ read }) => ({
+      density: read('density') as never,
+    }));
+    const effect = defineEffect({
+      elements: {
+        fluid,
+        inject: defineSimStage({
+          phase: 'before-particles',
+          target: 'fluid',
+          update: gridInject({ center: [0.3, 0.2], radius: 0.1, values: { density: 2 } }),
+        }),
+        advect: defineSimStage({ iterations: 3, target: 'fluid', update: gridAdvect() }),
+        registered: defineSimStage({ target: 'fluid', update: gridTslModule(registered) }),
+      },
+    });
+    const document = serializeEffect(effect);
+    expect(serializeEffect(loadEffect(document))).toEqual(document);
+  });
+
+  it('rejects inline Grid2D TSL while preserving the registered declarative subset', () => {
+    const fluid = defineGrid2D({ channels: { density: { type: 'f32' } }, resolution: [4, 4] });
+    const effect = defineEffect({
+      elements: {
+        fluid,
+        custom: defineSimStage({
+          target: 'fluid',
+          update: gridTslModule(({ read }) => ({ density: read('density') as never })),
+        }),
+      },
+    });
+    expect(diagnosticCodes(() => serializeEffect(effect))).toContain('NACHI_ASSET_INLINE_FUNCTION');
   });
 });

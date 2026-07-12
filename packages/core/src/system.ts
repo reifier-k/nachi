@@ -22,6 +22,7 @@ import {
   type VfxSystemDebug,
 } from './debug.js';
 import { collectEmitterModules } from './emitter-modules.js';
+import { Grid2DRuntime, type Grid2DStageRegistry } from './grid2d.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
 import {
   applyEmitterQualityTier,
@@ -61,6 +62,9 @@ import type {
   AttributeSnapshot,
   UserParameterKeys,
   VfxDiagnostic,
+  Grid2DDefinition,
+  Grid2DRuntimeView,
+  SimStageDefinition,
 } from './types.js';
 
 const DEFAULT_MAX_SUB_STEPS = 8;
@@ -141,6 +145,8 @@ export interface VfxSystemOptions {
   readonly significanceBudget?: VfxSignificanceBudget;
   /** Module/render compiler registrations supplied by optional packages. */
   readonly registry?: KernelModuleRegistry;
+  /** Registered serializable custom Grid2D stage functions. */
+  readonly grid2DStageRegistry?: Grid2DStageRegistry;
 }
 
 export interface VfxSignificanceBudget {
@@ -489,6 +495,11 @@ type CompiledEmitterEntry = {
 
 type CompiledEffect = {
   readonly emitters: readonly CompiledEmitterEntry[];
+  readonly grids: readonly {
+    readonly definition: Grid2DDefinition;
+    readonly key: string;
+    readonly stages: readonly SimStageDefinition[];
+  }[];
   readonly eventDrainFrames: number;
   readonly eventLinks: readonly {
     readonly handler: CompiledEmitterProgram['events'][number]['handlers'][number];
@@ -1468,6 +1479,7 @@ type ReleasableEffectInstance = {
   recordReleaseDiagnostic(diagnostic: VfxDiagnostic): void;
   releaseEmitterKernels(): void;
   takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels>;
+  releaseGrid2D(): void;
 };
 
 type CaptureScheduler = <Value>(capture: () => Promise<Value> | Value) => Promise<Value>;
@@ -1480,6 +1492,7 @@ export class VfxEffectInstance<
   readonly #diagnostics: VfxDiagnostic[] = [];
   readonly #diagnosticKeys = new Set<string>();
   readonly #emitters = new Map<string, RuntimeEmitter>();
+  readonly #grids = new Map<string, Grid2DRuntime>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
   readonly #now: () => number;
@@ -1556,6 +1569,15 @@ export class VfxEffectInstance<
 
   addEmitter(key: string, emitter: RuntimeEmitter): void {
     this.#emitters.set(key, emitter);
+  }
+
+  addGrid2D(key: string, grid: Grid2DRuntime): void {
+    this.#grids.set(key, grid);
+  }
+
+  getGrid2D(key: string): Grid2DRuntimeView | undefined {
+    this.#assertNotReleased();
+    return this.#grids.get(key);
   }
 
   get boundingSphere(): BoundingSphere {
@@ -1739,6 +1761,12 @@ export class VfxEffectInstance<
   releaseEmitterKernels(): void {
     for (const emitter of this.#emitters.values()) emitter.release();
     this.#emitters.clear();
+    this.releaseGrid2D();
+  }
+
+  releaseGrid2D(): void {
+    for (const grid of this.#grids.values()) grid.release();
+    this.#grids.clear();
   }
 
   setParameter<Path extends UserParameterKeys<Definition>>(
@@ -1809,6 +1837,7 @@ export class VfxEffectInstance<
       systemDelta: 0,
       systemTime,
     };
+    for (const grid of this.#grids.values()) await grid.run('before-particles', 0);
     // Initialization/prewarm is itself an event-producing frame. Preserve its bank so the first
     // externally advanced frame consumes it instead of clearing it.
     for (const emitter of this.#emitters.values()) {
@@ -1818,6 +1847,7 @@ export class VfxEffectInstance<
     for (const emitter of this.#emitters.values()) {
       await this.#measureEmitter(emitter, () => emitter.advance(0, context));
     }
+    for (const grid of this.#grids.values()) await grid.run('after-particles', 0);
     this.#initialized = true;
     this.#completeIfFinished();
     if (this.#state === 'active') {
@@ -1834,6 +1864,9 @@ export class VfxEffectInstance<
       systemTime,
     };
     const writeBank = (this.#eventFrame & 1) as 0 | 1;
+    if (localDelta > TIME_EPSILON) {
+      for (const grid of this.#grids.values()) await grid.run('before-particles', localDelta);
+    }
     this.#eventFrame += 1;
     for (const emitter of this.#emitters.values()) {
       await this.#measureEmitter(emitter, () => emitter.prepareEventFrame(writeBank));
@@ -1843,6 +1876,9 @@ export class VfxEffectInstance<
     }
     for (const emitter of this.#emitters.values()) {
       await this.#measureEmitter(emitter, () => emitter.advance(localDelta, context));
+    }
+    if (localDelta > TIME_EPSILON) {
+      for (const grid of this.#grids.values()) await grid.run('after-particles', localDelta);
     }
     this.#completeIfFinished();
     for (const emitter of this.#emitters.values()) {
@@ -1854,6 +1890,7 @@ export class VfxEffectInstance<
   #completeIfFinished(): void {
     if (this.#state !== 'active') return;
     const emitters = [...this.#emitters.values()];
+    if (emitters.length === 0 && this.#grids.size > 0) return;
     if (!emitters.every((emitter) => emitter.complete)) {
       this.#completionCandidateFrame = undefined;
       return;
@@ -1907,6 +1944,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #maxPoolSize: number;
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
+  readonly #grid2DStageRegistry: Grid2DStageRegistry | undefined;
   readonly #significanceBudget: Required<VfxSignificanceBudget>;
   readonly #budgetAdmittedInstances = new Set<string>();
   #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
@@ -1928,6 +1966,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   ) {
     this.#aliveCountReadbackInterval = options.aliveCountReadbackInterval;
     this.#registry = options.registry;
+    this.#grid2DStageRegistry = options.grid2DStageRegistry;
     const runtimeRenderer = asRuntimeRenderer(renderer);
     const automaticSelection = selectDeviceQualityTier(
       options.deviceProfile ?? {
@@ -2121,6 +2160,17 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       }
       const materializationRenderer = runtimeRenderer;
       const compiled = this.#compile(definition, this.#qualitySelection.tier);
+      for (const grid of compiled.grids) {
+        instance.addGrid2D(
+          grid.key,
+          new Grid2DRuntime(
+            grid.definition,
+            materializationRenderer,
+            grid.stages,
+            this.#grid2DStageRegistry,
+          ),
+        );
+      }
       pooled = this.#takePooledResources(definition, poolKey);
       const usesSceneDepth = compiled.emitters.some(({ program }) =>
         program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth'),
@@ -2194,6 +2244,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       for (const kernels of instance.detachEmitterKernels().values()) {
         kernelsToRelease.add(kernels);
       }
+      instance.releaseGrid2D();
       for (const kernels of kernelsToRelease) runtimeRenderer?.releaseKernels?.(kernels);
       const diagnostics =
         error instanceof VfxDiagnosticError
@@ -2391,6 +2442,32 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const emitterDefinitions = Object.entries(definition.elements).filter(
       (entry): entry is [string, EmitterDefinition] => entry[1].kind === 'emitter',
     );
+    const gridDefinitions = new Map(
+      Object.entries(definition.elements).filter(
+        (entry): entry is [string, Grid2DDefinition] => entry[1].kind === 'grid2d',
+      ),
+    );
+    const simStages = Object.entries(definition.elements).filter(
+      (entry): entry is [string, SimStageDefinition] => entry[1].kind === 'sim-stage',
+    );
+    const gridDiagnostics: VfxDiagnostic[] = [];
+    for (const [key, stage] of simStages) {
+      if (!gridDefinitions.has(stage.target)) {
+        gridDiagnostics.push({
+          code: 'NACHI_SIM_STAGE_TARGET_UNKNOWN',
+          message: `Simulation stage "${key}" targets missing Grid2D element "${stage.target}".`,
+          path: `elements.${key}.target`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+    }
+    if (gridDiagnostics.length > 0) throw new VfxDiagnosticError(gridDiagnostics);
+    const grids = [...gridDefinitions].map(([key, grid]) => ({
+      definition: grid,
+      key,
+      stages: simStages.filter(([, stage]) => stage.target === key).map(([, stage]) => stage),
+    }));
     const eventPayloadFields = new Map<string, Set<string>>();
     for (const [, emitter] of emitterDefinitions) {
       for (const value of Object.values(emitter.events ?? {})) {
@@ -2493,7 +2570,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       0,
       ...emitters.map(({ key }) => eventDepth(key, new Set([key]))),
     );
-    const compiled = { emitters, eventDrainFrames, eventLinks };
+    const compiled = { emitters, eventDrainFrames, eventLinks, grids };
     const nextCache = cache ?? new Map<string, CompiledEffect>();
     nextCache.set(cacheKey, compiled);
     this.#compiledEffects.set(definition, nextCache);
@@ -2529,6 +2606,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   }
 
   #retainOrReleaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
+    instance.releaseGrid2D();
     const definition = instance.definition;
     const pools = this.#effectPools.get(definition) ?? new Map<string, EffectResourcePool>();
     const pool = pools.get(instance.poolKey) ?? { resources: [] };
