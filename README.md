@@ -1,8 +1,8 @@
 # nachi
 
 Code-first, TSL/WebGPU-native VFX for Three.js, designed around Niagara's staged simulation model.
-Nachi is pre-1.0; M12 now includes JSON assets, advanced simulation, React Three Fiber bindings,
-release automation, and a buildable documentation gallery.
+Nachi is preparing its 1.0 release candidate; M12 includes JSON assets, advanced simulation, React
+Three Fiber bindings, release automation, and a buildable documentation gallery.
 
 ## Packages
 
@@ -31,8 +31,19 @@ pnpm add @nachi/core three@0.185.1
 React Three Fiber usage keeps React, R3F, and Three as peers:
 
 ```sh
-pnpm add @nachi/core @nachi/react react @react-three/fiber three@0.185.1
+pnpm add @nachi/core @nachi/react react@^19 @react-three/fiber@^9 three@0.185.1
 ```
+
+Packages that expose Three.js types (`@nachi/tsl-kit`, `@nachi/mesh-fx`, `@nachi/trails`,
+`@nachi/timeline`, `@nachi/post`, and `@nachi/react`) also expect the separately published matching
+declarations in TypeScript projects:
+
+```sh
+pnpm add -D @types/three@0.185.0
+```
+
+`three@0.185.1` is the supported and tested runtime. Do not deduplicate these integrations onto a
+different Three minor version.
 
 `VFXSystemProvider` synchronizes the active R3F camera and pixel viewport with core before each
 update by default. Pass `syncCamera={false}` only when the application calls `system.setCamera()`
@@ -111,7 +122,10 @@ pnpm test
 pnpm prettier
 pnpm build
 pnpm docs:build
-pnpm release:dry  # build + every package ESM import gate + npm publish --dry-run
+pnpm esm-all
+pnpm release:dry  # build + every package ESM import gate + publish-shaped pnpm pack checks
+node tools/bundle-size.mjs
+node tools/license-report.mjs
 ```
 
 Changesets are independently versioned: run `pnpm changeset`, then `pnpm version-packages` when a
@@ -119,4 +133,7 @@ release versioning pass is intended. `release:dry` never publishes.
 
 Design and status: [PLAN.md](./PLAN.md), [ROADMAP.md](./ROADMAP.md), normative
 [API RFC](./docs/rfc/001-api.md), and the
-[Effekseer compatibility study](./docs/rfc/002-effekseer-compatibility.md).
+[Effekseer compatibility study](./docs/rfc/002-effekseer-compatibility.md). Release compatibility is
+defined by [RFC 003](./docs/rfc/003-versioning.md); FA evidence is summarized by the
+[parity](./docs/parity-report.md), [bundle](./docs/bundle-report.md), and
+[license](./docs/license-report.md) reports.

@@ -299,9 +299,6 @@ async function measurePerformance(): Promise<void> {
     mode: headless ? 'headless' : 'visual',
     page: 'golden-charge',
   });
-  await system.update(0);
-  await monitor.resolveGpuTimestamps();
-  await system.update(STEP);
   const target = new THREE.RenderTarget(64, 64);
   const scene = new THREE.Scene();
   const view = emitter(instance, 'particles');
@@ -309,10 +306,15 @@ async function measurePerformance(): Promise<void> {
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10);
   camera.position.z = 4;
   renderer.setRenderTarget(target);
+  await system.update(0);
   renderer.render(scene, camera);
   await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  await renderer.resolveTimestampsAsync('compute');
+  await renderer.resolveTimestampsAsync('render');
+  await monitor.captureGpuSamples(async () => {
+    await system.update(STEP);
+    renderer.render(scene, camera);
+  });
   target.dispose();
   renderer.dispose();
 }

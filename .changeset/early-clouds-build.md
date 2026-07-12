@@ -1,13 +1,18 @@
 ---
-'@nachi/core': patch
-'@nachi/format': patch
-'@nachi/mesh-fx': patch
-'@nachi/post': patch
+'@nachi/core': minor
+'@nachi/format': minor
+'@nachi/mesh-fx': minor
+'@nachi/post': minor
 '@nachi/react': minor
-'@nachi/timeline': patch
-'@nachi/trails': patch
-'@nachi/tsl-kit': patch
+'@nachi/timeline': minor
+'@nachi/trails': minor
+'@nachi/tsl-kit': minor
 ---
 
-Prepare the independently versioned nachi package set for its first dry-run release and add the
-React Three Fiber lifecycle binding.
+Prepare the complete independently versioned nachi package set for the 1.0 release gate. This
+initial public surface includes the staged GPU particle runtime, strict versioned assets,
+simulation caches and data interfaces, timeline and trail composition, TSL/mesh/post rendering
+tools, and the React Three Fiber lifecycle binding. It also establishes explicit diagnostics,
+backend residuals, package ESM/dry-run gates, and FA compatibility/reporting contracts. The
+changeset intentionally records user-facing minor releases without applying the final 1.0 version
+bump; release ownership remains with the FA coordinator.

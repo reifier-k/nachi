@@ -24,6 +24,7 @@
     "changeset": "changeset",
     "version-packages": "changeset version",
     "esm:check": "node tools/check-all-package-esm.mjs",
+    "esm-all": "node tools/check-all-package-esm.mjs",
     "release:dry": "pnpm build && pnpm esm:check && node tools/release-dry.mjs"
   },
   "devDependencies": {

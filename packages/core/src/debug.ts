@@ -72,7 +72,7 @@ export interface VfxProfileSnapshot {
 }
 
 export interface CaptureProfileOptions {
-  /** Cached pass timing from the nachi.perf-baseline v1 owner. No timestamp query is issued here. */
+  /** Cached pass timing from the nachi.perf-baseline v1/v2 owner. No query is issued here. */
   readonly gpuTiming?: DebugGpuPassTiming;
 }
 
@@ -387,7 +387,7 @@ function gpuMetric(
   if (!timing) {
     return unavailable(
       'NACHI_PROFILE_GPU_TIMESTAMP_UNAVAILABLE',
-      'No nachi.perf-baseline v1 timestamp sample was supplied.',
+      'No nachi.perf-baseline v1/v2 timestamp sample was supplied.',
     );
   }
   const value = timing[path];

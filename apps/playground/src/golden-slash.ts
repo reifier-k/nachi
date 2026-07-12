@@ -315,12 +315,26 @@ async function run(): Promise<void> {
     performanceSystem.spawn(defineEffect({ elements: { flash: lightDefinition } }), {
       seed: 7199,
     });
+    const performanceScene = new THREE.Scene();
+    const performanceMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ color: 0x88ccff }),
+    );
+    performanceScene.add(performanceMesh);
+    const performanceTarget = new THREE.RenderTarget(32, 32);
+    performanceRenderer.setRenderTarget(performanceTarget);
     await performanceSystem.update(0);
-    await performanceMonitor.resolveGpuTimestamps();
-    await performanceSystem.update(STEP);
-    await performanceMonitor.resolveGpuTimestamps();
+    performanceRenderer.render(performanceScene, camera);
+    await performanceRenderer.resolveTimestampsAsync('compute');
+    await performanceRenderer.resolveTimestampsAsync('render');
+    await performanceMonitor.captureGpuSamples(async () => {
+      await performanceSystem.update(STEP);
+      performanceRenderer.render(performanceScene, camera);
+    });
     const pointLightProbe = await probePointLights(performanceRenderer, camera);
-    performanceMonitor.publish();
+    performanceTarget.dispose();
+    performanceMesh.geometry.dispose();
+    performanceMesh.material.dispose();
     return pointLightProbe;
   };
   const trailSystem = new VFXSystem(runtime, undefined, {

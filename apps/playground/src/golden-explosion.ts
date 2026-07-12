@@ -372,11 +372,12 @@ async function measurePerformance(): Promise<void> {
   renderer.setRenderTarget(target);
   await system.update(0);
   renderer.render(scene, camera);
-  await monitor.resolveGpuTimestamps();
-  await system.update(STEP);
-  renderer.render(scene, camera);
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  await renderer.resolveTimestampsAsync('compute');
+  await renderer.resolveTimestampsAsync('render');
+  await monitor.captureGpuSamples(async () => {
+    await system.update(STEP);
+    renderer.render(scene, camera);
+  });
   target.dispose();
   atlas.dispose();
   motion.dispose();

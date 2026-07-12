@@ -552,8 +552,17 @@ async function run(): Promise<void> {
     tierDrawingDifference:
       tierDrawingDifference.changed > 80 && tierDrawingDifference.meanLinearByteDifference > 0.5,
   };
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  // Discard correctness-probe work before the dedicated warmed measurement window. Baseline
+  // pixels are already painted, so advancing this sample does not alter screenshots.
+  await renderer.resolveTimestampsAsync('compute');
+  await renderer.resolveTimestampsAsync('render');
+  litScene.add(epicMesh);
+  await monitor.captureGpuSamples(async () => {
+    await qualitySystem.update(1 / 60);
+    renderer.setRenderTarget(target);
+    renderer.render(litScene, visualCamera);
+  });
+  litScene.remove(epicMesh);
   validation.consoleClean = messages.length === 0;
   const result = {
     activeBackend,

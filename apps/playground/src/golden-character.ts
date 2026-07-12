@@ -429,10 +429,10 @@ async function run(): Promise<void> {
   const performanceSystem = new VFXSystem(performanceRuntime);
   performanceSystem.spawn(orbitDefinition, { seed: 74 });
   await performanceSystem.update(0);
-  await performanceMonitor.resolveGpuTimestamps();
-  await performanceSystem.update(STEP);
-  await performanceMonitor.resolveGpuTimestamps();
-  performanceMonitor.publish();
+  await performanceRenderer.resolveTimestampsAsync('compute');
+  await performanceMonitor.captureGpuSamples(async () => {
+    await performanceSystem.update(STEP);
+  });
 
   const validation = {
     bonePoseFollow: maximumPoseDelta > 0.03,

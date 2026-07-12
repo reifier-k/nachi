@@ -196,8 +196,71 @@ function byteEqual(left: ArrayBufferView, right: ArrayBufferView): boolean {
   return a.every((value, index) => value === b[index]);
 }
 
-async function run(): Promise<void> {
+async function measurePerformance(): Promise<void> {
   const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: true });
+  renderer.setSize(64, 64);
+  await renderer.init();
+  const backend = renderer.backend as BackendLike;
+  if (!backend.isWebGPUBackend) {
+    throw new Error('Golden ambient performance capture requires WebGPU.');
+  }
+  const adapter = createThreeKernelAdapter({
+    backend: 'webgpu',
+    linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
+    ...(backend.device?.limits?.maxStorageBuffersPerShaderStage === undefined
+      ? {}
+      : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
+  });
+  const runtimeRenderer = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
+  const system = new VFXSystem(runtimeRenderer, undefined, {
+    fixedTimeStep: { maxSubSteps: 32, stepSeconds: STEP },
+  });
+  const instance = system.spawn(goldenAmbient, {
+    position: [0, 1.15, 0],
+    seed: 404,
+  }) as RuntimeInstance;
+  const fireflyView = instance.getEmitter('fireflies');
+  const leafView = instance.getEmitter('leaves');
+  if (!fireflyView || !leafView) {
+    throw new Error('Golden ambient performance emitters are missing.');
+  }
+  const glow = glowTexture();
+  const leaf = leafGeometry();
+  const resolveTexture = createThreeTextureResolver(new Map([[glowRef.uri, glow]]));
+  const resolveGeometry = createThreeGeometryResolver(new Map([[leafRef.uri, leaf]]));
+  const scene = new THREE.Scene();
+  scene.add(
+    materializeThreeSpriteDraw(fireflyView.program, fireflyView.kernels, 0, { resolveTexture }),
+    materializeThreeMeshDraw(leafView.program, leafView.kernels, 0, { resolveGeometry }),
+  );
+  const camera = new THREE.OrthographicCamera(-3.4, 3.4, 2.55, -2.55, 0.1, 20);
+  camera.position.set(0, 0.55, 6);
+  camera.lookAt(0, 0.45, 0);
+  const target = new THREE.RenderTarget(64, 64, { depthBuffer: true });
+  const monitor = createPerformanceMonitor(renderer, {
+    gpuScopes: ['compute', 'render'],
+    mode: headless ? 'headless' : 'visual',
+    page: 'golden-ambient',
+  });
+  renderer.setRenderTarget(target);
+  await system.update(0);
+  renderer.render(scene, camera);
+  await renderer.resolveTimestampsAsync('compute');
+  await renderer.resolveTimestampsAsync('render');
+  await monitor.captureGpuSamples(async () => {
+    await system.update(STEP);
+    renderer.render(scene, camera);
+  });
+  target.dispose();
+  glow.dispose();
+  leaf.dispose();
+  renderer.dispose();
+}
+
+async function run(): Promise<void> {
+  // Validation advances many substeps and stress instances; keep its renderer timestamp-free so
+  // correctness work cannot fill Three's query pool. FA timing uses the short renderer above.
+  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: false });
   renderer.setPixelRatio(1);
   renderer.setSize(headless ? WIDTH : innerWidth, headless ? HEIGHT : innerHeight);
   if (!headless) sceneHost.append(renderer.domElement);
@@ -218,11 +281,6 @@ async function run(): Promise<void> {
       : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
   });
   const runtimeRenderer = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
-  const performanceMonitor = createPerformanceMonitor(renderer, {
-    gpuScopes: ['compute', 'render'],
-    mode: headless ? 'headless' : 'visual',
-    page: 'golden-ambient',
-  });
   const resolveTexture = createThreeTextureResolver(new Map([[glowRef.uri, glowTexture()]]));
   const resolveGeometry = createThreeGeometryResolver(new Map([[leafRef.uri, leafGeometry()]]));
   const scene = new THREE.Scene();
@@ -325,7 +383,6 @@ async function run(): Promise<void> {
   let deterministicReference: Awaited<ReturnType<typeof snapshot>> | undefined;
   for (let sample = 0; sample < 24; sample += 1) {
     await primary.system.update(0.5);
-    await performanceMonitor.resolveGpuTimestamps();
     fireflyAliveHistory.push(primary.fireflyView.aliveCount ?? -1);
     leafAliveHistory.push(primary.leafView.aliveCount ?? -1);
     const state = await snapshot(primary);
@@ -387,7 +444,6 @@ async function run(): Promise<void> {
   const duplicate = await createRuntime(404);
   for (let sample = 0; sample < 12; sample += 1) {
     await duplicate.system.update(0.5);
-    await performanceMonitor.resolveGpuTimestamps();
   }
   const duplicateState = await snapshot(duplicate);
   const deterministic =
@@ -450,6 +506,7 @@ async function run(): Promise<void> {
     ) > 0.01;
   const leavesFallAndRotate =
     eligibleLeafTracks.length > 0 && eligibleLeafTracks.every(trackFallsAndRotates);
+  await measurePerformance();
   const validation = {
     consoleClean: consoleMessages.length === 0,
     deterministic,
@@ -497,8 +554,6 @@ async function run(): Promise<void> {
     { filename: 'golden-ambient-fireflies.png', selector: '#ambient-fireflies' },
     { filename: 'golden-ambient-leaves.png', selector: '#ambient-leaves' },
   ]);
-  await performanceMonitor.resolveGpuTimestamps();
-  performanceMonitor.publish();
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = result.ok ? 'complete' : 'error';
@@ -528,7 +583,6 @@ async function run(): Promise<void> {
         .update(delta)
         .then(() => {
           renderer.render(scene, camera);
-          performanceMonitor.recordFrame(timestamp);
         })
         .finally(() => {
           updating = false;

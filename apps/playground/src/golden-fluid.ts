@@ -255,10 +255,11 @@ async function measurePerformance(forceWebGL: boolean) {
     system.spawn(fluidEffect([16, 16, 16], 2));
     await system.update(1 / 30);
     await renderer.resolveTimestampsAsync('compute');
-    await system.update(1 / 30);
-    await monitor.resolveGpuTimestamps();
+    await monitor.captureGpuSamples(async () => {
+      await system.update(1 / 30);
+    });
   }
-  monitor.publish();
+  if (!backend.isWebGPUBackend) monitor.publish();
   renderer.dispose();
 }
 

@@ -1,0 +1,85 @@
+{
+  "methodologyVersion": 1,
+  "packages": [
+    {
+      "files": 34,
+      "gzipBytes": 138901,
+      "name": "@nachi/core",
+      "rawBytes": 648693,
+      "runtimeJsRawBytes": 516867,
+      "version": "0.0.0"
+    },
+    {
+      "files": 10,
+      "gzipBytes": 17763,
+      "name": "@nachi/format",
+      "rawBytes": 118444,
+      "runtimeJsRawBytes": 82217,
+      "version": "0.0.0"
+    },
+    {
+      "files": 10,
+      "gzipBytes": 11826,
+      "name": "@nachi/mesh-fx",
+      "rawBytes": 43132,
+      "runtimeJsRawBytes": 33052,
+      "version": "0.0.0"
+    },
+    {
+      "files": 16,
+      "gzipBytes": 12357,
+      "name": "@nachi/post",
+      "rawBytes": 41924,
+      "runtimeJsRawBytes": 32697,
+      "version": "0.0.0"
+    },
+    {
+      "files": 4,
+      "gzipBytes": 2869,
+      "name": "@nachi/react",
+      "rawBytes": 9953,
+      "runtimeJsRawBytes": 7339,
+      "version": "0.0.0"
+    },
+    {
+      "files": 6,
+      "gzipBytes": 12514,
+      "name": "@nachi/timeline",
+      "rawBytes": 49662,
+      "runtimeJsRawBytes": 40402,
+      "version": "0.0.0"
+    },
+    {
+      "files": 4,
+      "gzipBytes": 6161,
+      "name": "@nachi/trails",
+      "rawBytes": 21714,
+      "runtimeJsRawBytes": 18252,
+      "version": "0.0.0"
+    },
+    {
+      "files": 16,
+      "gzipBytes": 7108,
+      "name": "@nachi/tsl-kit",
+      "rawBytes": 18469,
+      "runtimeJsRawBytes": 12537,
+      "version": "0.0.0"
+    }
+  ],
+  "totals": {
+    "files": 100,
+    "gzipBytes": 209499,
+    "rawBytes": 951991
+  },
+  "treeShaking": {
+    "bundler": "rollup@4.62.2",
+    "entryImports": ["defineEffect", "billboard"],
+    "gzipBytes": 2126,
+    "passed": true,
+    "rawBytes": 6982,
+    "referenceCoreRuntimeJsRawBytes": 516867,
+    "reductionPercent": 98.6,
+    "symbolMatches": [],
+    "warnings": []
+  }
+}

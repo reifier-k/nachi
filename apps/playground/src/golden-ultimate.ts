@@ -396,13 +396,13 @@ async function measurePerformance(
     mode: 'headless',
     page: 'golden-ultimate',
   });
-  await system.update(STEP);
-  await trailDraw.prepare(renderer);
-  await lightDraw.update(renderer);
-  renderer.setRenderTarget(target);
-  post.render();
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  await monitor.captureGpuSamples(async () => {
+    await system.update(STEP);
+    await trailDraw.prepare(renderer);
+    await lightDraw.update(renderer);
+    renderer.setRenderTarget(target);
+    post.render();
+  });
   post.dispose();
   lightDraw.dispose();
   target.dispose();

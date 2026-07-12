@@ -1,3 +1,4 @@
+import { TimestampQuery } from 'three/webgpu';
 import type * as THREE from 'three/webgpu';
 
 type MetricStatus = 'available' | 'unavailable';
@@ -17,11 +18,27 @@ type GpuMetric = {
   computeMs: number | null;
   totalMs: number | null;
   reason: string | null;
+  sampleWindow: {
+    warmup: { completed: number; target: number };
+    targetSamples: number;
+    compute: GpuSampleAggregate;
+    render: GpuSampleAggregate;
+    total: GpuSampleAggregate;
+  };
+};
+
+export type GpuSampleAggregate = {
+  status: GpuMetricStatus;
+  samples: number;
+  complete: boolean;
+  medianMs: number | null;
+  p95Ms: number | null;
+  reason: string | null;
 };
 
 export type PerformanceSnapshot = {
   schema: 'nachi.perf-baseline';
-  schemaVersion: 1;
+  schemaVersion: 2;
   page: string;
   backend: 'WebGL2' | 'WebGPU' | 'unknown';
   mode: 'headless' | 'visual';
@@ -69,10 +86,12 @@ export type PerformanceMonitorOptions = {
   page: string;
   mode: 'headless' | 'visual';
   gpuScopes?: readonly TimestampScope[];
+  gpuSampleSize?: number;
+  gpuWarmupSamples?: number;
   windowSize?: number;
 };
 
-// Stable baseline record schema (v1):
+// Stable baseline record schema (v2, backward-compatible extension of v1):
 // { schema, schemaVersion, page, backend, mode, capturedAt,
 //   window:{capacity,samples},
 //   frame:{fps,averageMs,p95Ms},
@@ -81,9 +100,9 @@ export type PerformanceMonitorOptions = {
 //   renderer:{drawCalls,renderCalls,computeCalls,computeCallsStatus,computeCallsReason,
 //             triangles,points,lines} }
 // Numeric metrics always carry {status,value,reason}; unavailable values are null, never silent 0.
-// GPU fields retain only the latest resolved timestamp per scope. They have no warm-up window,
-// sample count, or median, so this v1 record is a smoke/baseline observation rather than a final
-// performance-budget statistic. FA performs the budget decision with multiple warmed samples.
+// The v1 gpu renderMs/computeMs/totalMs fields remain the latest resolved values. v2 adds a warmed
+// bounded sample window with median/p95 per scope and total. Timestamp resolution stays outside
+// long-running verification loops; pages explicitly run a short captureGpuSamples window.
 // renderer.computeCalls is Three.js's current-frame counter. Three resets it at frame boundaries,
 // so headless spike-compute can publish 0 after submitted compute work has already been reset.
 export class PerformanceMonitor {
@@ -94,13 +113,21 @@ export class PerformanceMonitor {
   #previousTimestamp: number | undefined;
   #frameCount = 0;
   #lastPublishTimestamp = 0;
-  #timestampResolutionInFlight = false;
+  #timestampResolutionInFlight: Promise<void> | null = null;
   #gpu: GpuMetric;
+  readonly #gpuSamples: Record<TimestampScope | 'total', number[]> = {
+    compute: [],
+    render: [],
+    total: [],
+  };
+  #gpuWarmupCompleted = 0;
 
   constructor(renderer: THREE.WebGPURenderer, options: PerformanceMonitorOptions) {
     this.#renderer = renderer;
     this.#options = {
       gpuScopes: options.gpuScopes ?? ['render'],
+      gpuSampleSize: options.gpuSampleSize ?? 16,
+      gpuWarmupSamples: options.gpuWarmupSamples ?? 4,
       windowSize: options.windowSize ?? 120,
       ...options,
     };
@@ -129,16 +156,42 @@ export class PerformanceMonitor {
     }
   }
 
-  async resolveGpuTimestamps(): Promise<void> {
-    if (this.#gpu.status === 'unavailable' || this.#timestampResolutionInFlight) return;
-    this.#timestampResolutionInFlight = true;
+  resolveGpuTimestamps(): Promise<void> {
+    return this.#scheduleGpuTimestampResolution(false);
+  }
 
+  async #scheduleGpuTimestampResolution(requireFreshResolution: boolean): Promise<void> {
+    if (this.#gpu.status === 'unavailable') return;
+    while (this.#timestampResolutionInFlight !== null) {
+      await this.#timestampResolutionInFlight;
+      if (!requireFreshResolution) return;
+    }
+
+    const resolution = this.#resolveGpuTimestampsAndPublish();
+    this.#timestampResolutionInFlight = resolution;
+    await resolution;
+  }
+
+  async #resolveGpuTimestampsAndPublish(): Promise<void> {
+    try {
+      await this.#resolveGpuTimestamps();
+    } finally {
+      this.#timestampResolutionInFlight = null;
+      this.publish();
+    }
+  }
+
+  async #resolveGpuTimestamps(): Promise<void> {
     try {
       let resolvedAny = false;
+      const resolvedFrame: Partial<Record<TimestampScope, number>> = {};
       for (const scope of this.#options.gpuScopes) {
-        const duration = await this.#renderer.resolveTimestampsAsync(scope);
+        const timestampQuery = scope === 'compute' ? TimestampQuery.COMPUTE : TimestampQuery.RENDER;
+        const duration = await this.#renderer.resolveTimestampsAsync(timestampQuery);
         if (duration !== undefined && Number.isFinite(duration)) {
-          this.#gpu[scope === 'render' ? 'renderMs' : 'computeMs'] = round(duration);
+          const value = round(duration);
+          this.#gpu[scope === 'render' ? 'renderMs' : 'computeMs'] = value;
+          resolvedFrame[scope] = value;
           resolvedAny = true;
         }
       }
@@ -147,6 +200,7 @@ export class PerformanceMonitor {
         (value): value is number => value !== null,
       );
       this.#gpu.totalMs = durations.length > 0 ? round(sum(durations)) : null;
+      if (resolvedAny) this.#recordGpuFrame(resolvedFrame);
       this.#gpu.status = resolvedAny ? 'available' : 'pending';
       this.#gpu.reason = resolvedAny
         ? null
@@ -157,10 +211,18 @@ export class PerformanceMonitor {
       this.#gpu.renderMs = null;
       this.#gpu.computeMs = null;
       this.#gpu.totalMs = null;
-    } finally {
-      this.#timestampResolutionInFlight = false;
-      this.publish();
     }
+  }
+
+  async captureGpuSamples(runFrame: (sample: number) => Promise<void> | void): Promise<void> {
+    const targetFrames = this.#options.gpuWarmupSamples + this.#options.gpuSampleSize;
+    const maximumAttempts = Math.max(targetFrames, this.#options.gpuSampleSize * 4);
+    for (let sample = 0; sample < maximumAttempts; sample += 1) {
+      await runFrame(sample);
+      await this.#scheduleGpuTimestampResolution(true);
+      if (this.#gpuSamplingComplete() || this.#gpu.status === 'unavailable') break;
+    }
+    this.publish();
   }
 
   publish(): PerformanceSnapshot {
@@ -188,7 +250,7 @@ export class PerformanceMonitor {
         triangles: info.render.triangles,
       },
       schema: 'nachi.perf-baseline',
-      schemaVersion: 1,
+      schemaVersion: 2,
       window: { capacity: this.#options.windowSize, samples: this.#frameSamples.length },
     };
 
@@ -205,6 +267,13 @@ export class PerformanceMonitor {
       renderMs: null,
       source: 'three.resolveTimestampsAsync' as const,
       totalMs: null,
+      sampleWindow: {
+        compute: emptyGpuAggregate('pending', this.#options.gpuSampleSize),
+        render: emptyGpuAggregate('pending', this.#options.gpuSampleSize),
+        targetSamples: this.#options.gpuSampleSize,
+        total: emptyGpuAggregate('pending', this.#options.gpuSampleSize),
+        warmup: { completed: 0, target: this.#options.gpuWarmupSamples },
+      },
     };
 
     if (backend.isWebGPUBackend) {
@@ -237,6 +306,55 @@ export class PerformanceMonitor {
       reason: 'Timestamp queries are supported, but no completed GPU work has been resolved yet.',
       status: 'pending',
     };
+  }
+
+  #recordGpuFrame(resolvedFrame: Partial<Record<TimestampScope, number>>): void {
+    if (this.#gpuWarmupCompleted < this.#options.gpuWarmupSamples) {
+      this.#gpuWarmupCompleted += 1;
+    } else {
+      for (const scope of this.#options.gpuScopes) {
+        const value = resolvedFrame[scope];
+        if (value !== undefined) this.#pushGpuSample(scope, value);
+      }
+      const frameValues = this.#options.gpuScopes.map((scope) => resolvedFrame[scope]);
+      if (frameValues.every((value): value is number => value !== undefined)) {
+        this.#pushGpuSample('total', round(sum(frameValues)));
+      }
+    }
+    this.#gpu.sampleWindow = {
+      compute: summarizeGpuSamples(
+        this.#gpuSamples.compute,
+        this.#options.gpuSampleSize,
+        this.#options.gpuScopes.includes('compute'),
+      ),
+      render: summarizeGpuSamples(
+        this.#gpuSamples.render,
+        this.#options.gpuSampleSize,
+        this.#options.gpuScopes.includes('render'),
+      ),
+      targetSamples: this.#options.gpuSampleSize,
+      total: summarizeGpuSamples(this.#gpuSamples.total, this.#options.gpuSampleSize, true),
+      warmup: {
+        completed: this.#gpuWarmupCompleted,
+        target: this.#options.gpuWarmupSamples,
+      },
+    };
+  }
+
+  #pushGpuSample(scope: TimestampScope | 'total', value: number): void {
+    const samples = this.#gpuSamples[scope];
+    samples.push(value);
+    if (samples.length > this.#options.gpuSampleSize) samples.shift();
+  }
+
+  #gpuSamplingComplete(): boolean {
+    return (
+      this.#gpuWarmupCompleted >= this.#options.gpuWarmupSamples &&
+      this.#options.gpuScopes.every(
+        (scope) => this.#gpuSamples[scope].length >= this.#options.gpuSampleSize,
+      ) &&
+      this.#gpuSamples.total.length >= this.#options.gpuSampleSize
+    );
   }
 
   #frameMetrics(): PerformanceSnapshot['frame'] {
@@ -294,7 +412,7 @@ export class PerformanceMonitor {
     const p95 = formatMetric(snapshot.frame.p95Ms, 2, ' ms');
     const gpu =
       snapshot.gpu.status === 'available'
-        ? `${snapshot.gpu.totalMs?.toFixed(3) ?? 'N/A'} ms`
+        ? `${snapshot.gpu.sampleWindow.total.medianMs?.toFixed(3) ?? snapshot.gpu.totalMs?.toFixed(3) ?? 'N/A'} ms`
         : `N/A (${snapshot.gpu.status})`;
     const heap =
       snapshot.heap.status === 'available' && snapshot.heap.usedBytes !== null
@@ -303,6 +421,52 @@ export class PerformanceMonitor {
     this.#hud.textContent = `FPS ${fps}  frame ${average}  p95 ${p95}\nGPU ${gpu}  heap ${heap}  draws ${snapshot.renderer.drawCalls}`;
     this.#hud.title = snapshot.gpu.reason ?? 'GPU timestamp query active';
   }
+}
+
+function emptyGpuAggregate(
+  status: GpuMetricStatus,
+  targetSamples: number,
+  reason = 'Waiting for warmed GPU timestamp samples.',
+): GpuSampleAggregate {
+  return {
+    complete: false,
+    medianMs: null,
+    p95Ms: null,
+    reason: targetSamples > 0 ? reason : null,
+    samples: 0,
+    status,
+  };
+}
+
+export function summarizeGpuSamples(
+  values: readonly number[],
+  targetSamples: number,
+  requested: boolean,
+): GpuSampleAggregate {
+  if (!requested) {
+    return emptyGpuAggregate(
+      'unavailable',
+      targetSamples,
+      'This timestamp scope was not requested.',
+    );
+  }
+  if (values.length === 0) return emptyGpuAggregate('pending', targetSamples);
+  const sorted = [...values].sort((left, right) => left - right);
+  const medianIndex = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 === 0
+      ? ((sorted[medianIndex - 1] ?? 0) + (sorted[medianIndex] ?? 0)) / 2
+      : (sorted[medianIndex] ?? 0);
+  const p95Index = Math.min(Math.ceil(sorted.length * 0.95) - 1, sorted.length - 1);
+  const complete = values.length >= targetSamples;
+  return {
+    complete,
+    medianMs: round(median),
+    p95Ms: round(sorted[p95Index] ?? median),
+    reason: complete ? null : `Collected ${values.length} of ${targetSamples} target samples.`,
+    samples: values.length,
+    status: 'available',
+  };
 }
 
 export function createPerformanceMonitor(
