@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi Glacial Requiem</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">Showcase · ultimate freeze magic</p>
+        <h1>Glacial Requiem</h1>
+        <p>
+          An icicle-glyph magic circle blooms on the floor, a staggered forest of thick ice spikes
+          erupts around it, the great center pillar lands with hit stop and a cold flash, then the
+          frozen tableau glitters and crumbles into snow — authored end to end with @nachi.
+        </p>
+      </header>
+      <section class="stage" id="stage">
+        <canvas id="ice-visual" width="1920" height="720"></canvas>
+      </section>
+      <div class="labels" id="frame-labels"></div>
+      <dl>
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Mode</dt>
+          <dd id="mode-value">detecting</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd id="status-value">running</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/showcase-ice.ts"></script>
+  </body>
+</html>
