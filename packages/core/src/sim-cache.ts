@@ -879,10 +879,13 @@ export async function bakeSimulation<
   }
   const renderer = runtimeRenderer(system);
   const diagnostics: VfxDiagnostic[] = Object.entries(definition.elements)
-    .filter(([, element]) => element.kind === 'grid2d')
-    .map(([key]) => ({
-      code: 'NACHI_SIM_CACHE_GRID2D_NOT_RECORDED',
-      message: `Simulation cache v1 does not record Grid2D state for element "${key}"; baking executes its stages, while replay neither restores nor advances that state.`,
+    .filter(([, element]) => element.kind === 'grid2d' || element.kind === 'grid3d')
+    .map(([key, element]) => ({
+      code:
+        element.kind === 'grid3d'
+          ? 'NACHI_SIM_CACHE_GRID3D_NOT_RECORDED'
+          : 'NACHI_SIM_CACHE_GRID2D_NOT_RECORDED',
+      message: `Simulation cache v1 does not record ${element.kind === 'grid3d' ? 'Grid3D' : 'Grid2D'} state for element "${key}"; baking executes its stages, while replay neither restores nor advances that state.`,
       path: `elements.${key}`,
       phase: 'runtime',
       severity: 'warning',

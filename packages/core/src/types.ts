@@ -742,20 +742,54 @@ export interface Grid2DStageModuleDefinition<Config extends object = object> {
   readonly version: 1;
 }
 
+export type Grid3DChannelType = 'f32' | 'vec3';
+
+export interface Grid3DChannelDefinition<Type extends Grid3DChannelType = Grid3DChannelType> {
+  readonly default?: Type extends 'vec3' ? Vec3 : number;
+  readonly type: Type;
+}
+
+export type Grid3DChannelSchema = Readonly<Record<string, Grid3DChannelDefinition>>;
+
+/** Fixed-resolution volume data interface. Channels are packed into vec4 cell records. */
+export interface Grid3DDefinition<Channels extends Grid3DChannelSchema = Grid3DChannelSchema> {
+  readonly boundary: 'clamp';
+  readonly channels: Channels;
+  readonly kind: 'grid3d';
+  readonly resolution: readonly [width: number, height: number, depth: number];
+  readonly version: 1;
+}
+
+export interface Grid3DStageFunctionRef {
+  readonly id: string;
+  readonly kind: 'grid3d-function-ref';
+  readonly version: number;
+}
+
+export interface Grid3DStageModuleDefinition<Config extends object = object> {
+  readonly config: Readonly<Config>;
+  readonly kind: 'grid3d-stage-module';
+  readonly source: string | Grid3DStageFunctionRef;
+  readonly version: 1;
+}
+
+export type GridStageModuleDefinition = Grid2DStageModuleDefinition | Grid3DStageModuleDefinition;
+
 export interface SimStageDefinition {
   /** Relative to the ordinary emitter event/spawn/init/update schedule. */
   readonly phase: 'after-particles' | 'before-particles';
   readonly iterations: number;
   readonly kind: 'sim-stage';
-  /** Effect element key of the Grid2D data interface. */
+  /** Effect element key of a Grid2D or Grid3D data interface. */
   readonly target: string;
-  readonly update: Grid2DStageModuleDefinition;
+  readonly update: GridStageModuleDefinition;
   readonly version: 1;
 }
 
 export type EffectElementDefinition =
   | EmitterDefinition<AttributeSchema, ParameterSchema>
   | Grid2DDefinition
+  | Grid3DDefinition
   | SimStageDefinition
   | VisualElementDefinition;
 export type EffectElements = Readonly<Record<string, EffectElementDefinition>>;
@@ -1022,6 +1056,7 @@ export interface EffectInstance<Definition = EffectDefinition> {
   readonly state: EffectInstanceState;
   readonly timeScale: number;
   getGrid2D(key: string): Grid2DRuntimeView | undefined;
+  getGrid3D(key: string): Grid3DRuntimeView | undefined;
   applyHitStop(durationMs: number, timeScale?: number): void;
   attachTo(source: EffectTransformSource): void;
   detach(): void;
@@ -1060,6 +1095,43 @@ export interface Grid2DRuntimeView {
   rasterizeParticles(points: readonly Vec2[], channel: string, value?: number): Promise<void>;
   /** GPU bilinear scalar sampling at normalized particle positions. */
   sampleParticles(points: readonly Vec2[], channel: string): Promise<Float32Array>;
+}
+
+export interface Grid3DChannelLayout {
+  readonly components: 1 | 3;
+  readonly group: number;
+  readonly name: string;
+  readonly offset: 0 | 1 | 2 | 3;
+  readonly type: Grid3DChannelType;
+}
+
+export interface Grid3DSnapshot {
+  readonly channels: readonly Grid3DChannelLayout[];
+  readonly data: Float32Array;
+  readonly resolution: readonly [number, number, number];
+}
+
+export interface Grid3DMemoryEstimate {
+  readonly cellCount: number;
+  readonly channelGroups: number;
+  readonly particleAtomicBytes: number;
+  readonly particlePositionBytes: number;
+  readonly particleSampleBytes: number;
+  readonly scratchBufferBytes: number;
+  readonly stateBufferBytes: number;
+  readonly totalBytes: number;
+}
+
+export interface Grid3DRuntimeView {
+  readonly definition: Grid3DDefinition;
+  readonly initialized: boolean;
+  readonly memoryEstimate: Grid3DMemoryEstimate;
+  readonly submissionCount: number;
+  capture(): Promise<Grid3DSnapshot>;
+  /** GPU fixed-point deposition from normalized positions; value must be finite/non-negative. */
+  rasterizeParticles(points: readonly Vec3[], channel: string, value?: number): Promise<void>;
+  /** GPU cell-centered trilinear scalar sampling at normalized particle positions. */
+  sampleParticles(points: readonly Vec3[], channel: string): Promise<Float32Array>;
 }
 
 export type EffectScalabilityAction = 'culled' | 'full' | 'spawn-suppressed';

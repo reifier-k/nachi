@@ -424,6 +424,8 @@ export interface KernelAdapterCapabilities {
 export interface KernelTslAdapter {
   readonly capabilities: KernelAdapterCapabilities;
   readonly deviceLimits?: {
+    readonly maxBufferSize?: number;
+    readonly maxStorageBufferBindingSize?: number;
     readonly maxStorageBuffersPerShaderStage?: number;
     readonly maxTransformFeedbackSeparateAttribs?: number;
   };

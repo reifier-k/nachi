@@ -31,6 +31,31 @@ export {
   simStageExecutionOrder,
   simStageSubmissionCount,
 } from './grid2d.js';
+export {
+  Grid3DStageRegistry,
+  defineGrid3DStageFunction,
+  estimateGrid3DMemory,
+  grid3DAdvect,
+  grid3DBuoyancy,
+  grid3DCellIndex,
+  grid3DInject,
+  grid3DPressureJacobi,
+  grid3DProjectVelocity,
+  grid3DSnapshotChannel,
+  grid3DTslModule,
+  rasterizeGrid3DPoints,
+  resolveGrid3DChannelLayout,
+  sampleGrid3DTrilinear,
+} from './grid3d.js';
+export type {
+  Grid3DAdvectOptions,
+  Grid3DBuoyancyOptions,
+  Grid3DPressureOptions,
+  Grid3DSourceOptions,
+  Grid3DStageContext,
+  Grid3DStageFactory,
+  Grid3DStageFunctionRegistration,
+} from './grid3d.js';
 export type {
   Grid2DStageContext,
   Grid2DStageFactory,

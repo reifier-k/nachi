@@ -23,6 +23,7 @@ import {
 } from './debug.js';
 import { collectEmitterModules } from './emitter-modules.js';
 import { Grid2DRuntime, type Grid2DStageRegistry } from './grid2d.js';
+import { Grid3DRuntime, type Grid3DStageRegistry } from './grid3d.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
 import {
   applyEmitterQualityTier,
@@ -64,6 +65,8 @@ import type {
   VfxDiagnostic,
   Grid2DDefinition,
   Grid2DRuntimeView,
+  Grid3DDefinition,
+  Grid3DRuntimeView,
   SimStageDefinition,
 } from './types.js';
 
@@ -147,6 +150,8 @@ export interface VfxSystemOptions {
   readonly registry?: KernelModuleRegistry;
   /** Registered serializable custom Grid2D stage functions. */
   readonly grid2DStageRegistry?: Grid2DStageRegistry;
+  /** Registered serializable custom Grid3D stage functions. */
+  readonly grid3DStageRegistry?: Grid3DStageRegistry;
 }
 
 export interface VfxSignificanceBudget {
@@ -496,7 +501,7 @@ type CompiledEmitterEntry = {
 type CompiledEffect = {
   readonly emitters: readonly CompiledEmitterEntry[];
   readonly grids: readonly {
-    readonly definition: Grid2DDefinition;
+    readonly definition: Grid2DDefinition | Grid3DDefinition;
     readonly key: string;
     readonly stages: readonly SimStageDefinition[];
   }[];
@@ -1493,6 +1498,7 @@ export class VfxEffectInstance<
   readonly #diagnosticKeys = new Set<string>();
   readonly #emitters = new Map<string, RuntimeEmitter>();
   readonly #grids = new Map<string, Grid2DRuntime>();
+  readonly #grids3D = new Map<string, Grid3DRuntime>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
   readonly #now: () => number;
@@ -1575,9 +1581,18 @@ export class VfxEffectInstance<
     this.#grids.set(key, grid);
   }
 
+  addGrid3D(key: string, grid: Grid3DRuntime): void {
+    this.#grids3D.set(key, grid);
+  }
+
   getGrid2D(key: string): Grid2DRuntimeView | undefined {
     this.#assertNotReleased();
     return this.#grids.get(key);
+  }
+
+  getGrid3D(key: string): Grid3DRuntimeView | undefined {
+    this.#assertNotReleased();
+    return this.#grids3D.get(key);
   }
 
   get boundingSphere(): BoundingSphere {
@@ -1767,6 +1782,8 @@ export class VfxEffectInstance<
   releaseGrid2D(): void {
     for (const grid of this.#grids.values()) grid.release();
     this.#grids.clear();
+    for (const grid of this.#grids3D.values()) grid.release();
+    this.#grids3D.clear();
   }
 
   setParameter<Path extends UserParameterKeys<Definition>>(
@@ -1838,6 +1855,7 @@ export class VfxEffectInstance<
       systemTime,
     };
     for (const grid of this.#grids.values()) await grid.run('before-particles', 0);
+    for (const grid of this.#grids3D.values()) await grid.run('before-particles', 0);
     // Initialization/prewarm is itself an event-producing frame. Preserve its bank so the first
     // externally advanced frame consumes it instead of clearing it.
     for (const emitter of this.#emitters.values()) {
@@ -1848,6 +1866,7 @@ export class VfxEffectInstance<
       await this.#measureEmitter(emitter, () => emitter.advance(0, context));
     }
     for (const grid of this.#grids.values()) await grid.run('after-particles', 0);
+    for (const grid of this.#grids3D.values()) await grid.run('after-particles', 0);
     this.#initialized = true;
     this.#completeIfFinished();
     if (this.#state === 'active') {
@@ -1866,6 +1885,7 @@ export class VfxEffectInstance<
     const writeBank = (this.#eventFrame & 1) as 0 | 1;
     if (localDelta > TIME_EPSILON) {
       for (const grid of this.#grids.values()) await grid.run('before-particles', localDelta);
+      for (const grid of this.#grids3D.values()) await grid.run('before-particles', localDelta);
     }
     this.#eventFrame += 1;
     for (const emitter of this.#emitters.values()) {
@@ -1879,6 +1899,7 @@ export class VfxEffectInstance<
     }
     if (localDelta > TIME_EPSILON) {
       for (const grid of this.#grids.values()) await grid.run('after-particles', localDelta);
+      for (const grid of this.#grids3D.values()) await grid.run('after-particles', localDelta);
     }
     this.#completeIfFinished();
     for (const emitter of this.#emitters.values()) {
@@ -1890,7 +1911,7 @@ export class VfxEffectInstance<
   #completeIfFinished(): void {
     if (this.#state !== 'active') return;
     const emitters = [...this.#emitters.values()];
-    if (emitters.length === 0 && this.#grids.size > 0) return;
+    if (emitters.length === 0 && (this.#grids.size > 0 || this.#grids3D.size > 0)) return;
     if (!emitters.every((emitter) => emitter.complete)) {
       this.#completionCandidateFrame = undefined;
       return;
@@ -1945,6 +1966,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
   readonly #grid2DStageRegistry: Grid2DStageRegistry | undefined;
+  readonly #grid3DStageRegistry: Grid3DStageRegistry | undefined;
   readonly #significanceBudget: Required<VfxSignificanceBudget>;
   readonly #budgetAdmittedInstances = new Set<string>();
   #cameraState: VfxCameraState = DEFAULT_CAMERA_STATE;
@@ -1967,6 +1989,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     this.#aliveCountReadbackInterval = options.aliveCountReadbackInterval;
     this.#registry = options.registry;
     this.#grid2DStageRegistry = options.grid2DStageRegistry;
+    this.#grid3DStageRegistry = options.grid3DStageRegistry;
     const runtimeRenderer = asRuntimeRenderer(renderer);
     const automaticSelection = selectDeviceQualityTier(
       options.deviceProfile ?? {
@@ -2161,15 +2184,27 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       const materializationRenderer = runtimeRenderer;
       const compiled = this.#compile(definition, this.#qualitySelection.tier);
       for (const grid of compiled.grids) {
-        instance.addGrid2D(
-          grid.key,
-          new Grid2DRuntime(
-            grid.definition,
-            materializationRenderer,
-            grid.stages,
-            this.#grid2DStageRegistry,
-          ),
-        );
+        if (grid.definition.kind === 'grid2d') {
+          instance.addGrid2D(
+            grid.key,
+            new Grid2DRuntime(
+              grid.definition,
+              materializationRenderer,
+              grid.stages,
+              this.#grid2DStageRegistry,
+            ),
+          );
+        } else {
+          instance.addGrid3D(
+            grid.key,
+            new Grid3DRuntime(
+              grid.definition,
+              materializationRenderer,
+              grid.stages,
+              this.#grid3DStageRegistry,
+            ),
+          );
+        }
       }
       pooled = this.#takePooledResources(definition, poolKey);
       const usesSceneDepth = compiled.emitters.some(({ program }) =>
@@ -2444,7 +2479,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     );
     const gridDefinitions = new Map(
       Object.entries(definition.elements).filter(
-        (entry): entry is [string, Grid2DDefinition] => entry[1].kind === 'grid2d',
+        (entry): entry is [string, Grid2DDefinition | Grid3DDefinition] =>
+          entry[1].kind === 'grid2d' || entry[1].kind === 'grid3d',
       ),
     );
     const simStages = Object.entries(definition.elements).filter(
@@ -2455,8 +2491,20 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       if (!gridDefinitions.has(stage.target)) {
         gridDiagnostics.push({
           code: 'NACHI_SIM_STAGE_TARGET_UNKNOWN',
-          message: `Simulation stage "${key}" targets missing Grid2D element "${stage.target}".`,
+          message: `Simulation stage "${key}" targets missing Grid2D/Grid3D element "${stage.target}".`,
           path: `elements.${key}.target`,
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
+      const target = gridDefinitions.get(stage.target);
+      const expectedKind =
+        target?.kind === 'grid3d' ? 'grid3d-stage-module' : 'grid2d-stage-module';
+      if (target && stage.update.kind !== expectedKind) {
+        gridDiagnostics.push({
+          code: 'NACHI_SIM_STAGE_TARGET_KIND_MISMATCH',
+          message: `Simulation stage "${key}" uses ${stage.update.kind} for ${target.kind} target "${stage.target}".`,
+          path: `elements.${key}.update.kind`,
           phase: 'compile',
           severity: 'error',
         });

@@ -12,6 +12,7 @@ export const effectAssetSchemaV1 = {
         { $ref: '#/$defs/visualElement' },
         { $ref: '#/$defs/emitterExtension' },
         { $ref: '#/$defs/grid2d' },
+        { $ref: '#/$defs/grid3d' },
         { $ref: '#/$defs/simStage' },
       ],
     },
@@ -89,6 +90,77 @@ export const effectAssetSchemaV1 = {
       required: ['config', 'kind', 'source', 'version'],
       type: 'object',
     },
+    grid3d: {
+      additionalProperties: false,
+      properties: {
+        boundary: { const: 'clamp' },
+        channels: {
+          additionalProperties: { $ref: '#/$defs/grid3dChannel' },
+          minProperties: 1,
+          type: 'object',
+        },
+        kind: { const: 'grid3d' },
+        resolution: {
+          items: { minimum: 1, type: 'integer' },
+          maxItems: 3,
+          minItems: 3,
+          type: 'array',
+        },
+        version: { const: 1 },
+      },
+      required: ['kind', 'version', 'resolution', 'channels', 'boundary'],
+      type: 'object',
+    },
+    grid3dChannel: {
+      oneOf: [
+        {
+          additionalProperties: false,
+          properties: { default: { type: 'number' }, type: { const: 'f32' } },
+          required: ['type'],
+          type: 'object',
+        },
+        {
+          additionalProperties: false,
+          properties: {
+            default: {
+              items: { type: 'number' },
+              maxItems: 3,
+              minItems: 3,
+              type: 'array',
+            },
+            type: { const: 'vec3' },
+          },
+          required: ['type'],
+          type: 'object',
+        },
+      ],
+    },
+    grid3dStageFunctionRef: {
+      additionalProperties: false,
+      properties: {
+        id: { minLength: 1, type: 'string' },
+        kind: { const: 'grid3d-function-ref' },
+        version: { minimum: 1, type: 'integer' },
+      },
+      required: ['id', 'kind', 'version'],
+      type: 'object',
+    },
+    grid3dStageModule: {
+      additionalProperties: false,
+      properties: {
+        config: { type: 'object' },
+        kind: { const: 'grid3d-stage-module' },
+        source: {
+          oneOf: [
+            { minLength: 1, not: { const: 'inline' }, type: 'string' },
+            { $ref: '#/$defs/grid3dStageFunctionRef' },
+          ],
+        },
+        version: { const: 1 },
+      },
+      required: ['config', 'kind', 'source', 'version'],
+      type: 'object',
+    },
     simStage: {
       additionalProperties: false,
       properties: {
@@ -96,7 +168,9 @@ export const effectAssetSchemaV1 = {
         kind: { const: 'sim-stage' },
         phase: { enum: ['before-particles', 'after-particles'] },
         target: { minLength: 1, type: 'string' },
-        update: { $ref: '#/$defs/grid2dStageModule' },
+        update: {
+          oneOf: [{ $ref: '#/$defs/grid2dStageModule' }, { $ref: '#/$defs/grid3dStageModule' }],
+        },
         version: { const: 1 },
       },
       required: ['kind', 'version', 'target', 'phase', 'iterations', 'update'],

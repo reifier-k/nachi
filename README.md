@@ -2,12 +2,13 @@
 
 Niagara parity through a code-first, TSL/WebGPU-native VFX library for Three.js.
 
-**Status:** M12 batches 1–2 implemented. `@nachi/format` provides the strict `nachi-effect` v1
+**Status:** M12 batches 1–3 implemented. `@nachi/format` provides the strict `nachi-effect` v1
 JSON envelope, schema, serializer/loader, explicit migrations, and asset-reference emitter
 inheritance. Golden #5 now runs from a JSON-loaded definition and compares its timeline actions and
 GPU particle bytes with the code-authored control. Core now also provides effect-element
-`defineGrid2D()` data interfaces and repeated `defineSimStage()` compute stages, including the
-`/m12-grid/` smoke/fire reference. M12 integration review remains a pre-alpha gate.
+`defineGrid2D()`/`defineGrid3D()` data interfaces and repeated `defineSimStage()` compute stages,
+including `/m12-grid/` and Golden #7 `/golden-fluid/`. M12 integration review remains a pre-alpha
+gate.
 
 ```ts
 import { loadEffect, serializeEffect } from '@nachi/format';
@@ -42,6 +43,25 @@ const pressure = defineSimStage({
 Grid stages run before or after the ordinary particle schedule and use separate backend submissions
 for every update/commit iteration. WebGL2 reports `NACHI_GRID2D_WEBGL2_UNSUPPORTED`; it does not
 pretend transform feedback supplies arbitrary grid addressing or atomics.
+
+```ts
+const smoke = defineGrid3D({
+  resolution: [32, 32, 32],
+  channels: {
+    density: { type: 'f32' },
+    velocity: { type: 'vec3', default: [0, 0, 0] },
+    temperature: { type: 'f32' },
+    pressure: { type: 'f32' },
+  },
+});
+
+const advect = defineSimStage({ target: 'smoke', update: grid3DAdvect() });
+const memory = estimateGrid3DMemory(smoke);
+```
+
+Grid3D uses the same packed current/scratch buffers and submit-separated ping-pong contract,
+with trilinear sampling and explicit cubic memory estimates. Grid-to-particle density sampling feeds
+the minimal slice/billboard volume path. WebGL2 reports `NACHI_GRID3D_WEBGL2_UNSUPPORTED`.
 
 Simulation caches use `bakeSimulation(system, effect, { frames, frameRate, compression, loop })` and
 `replaySimulation(system, effect, cache)`. Assets stay loader-friendly as metadata JSON plus an

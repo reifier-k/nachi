@@ -67,6 +67,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m11-debug/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgpu
+node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgl
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade
@@ -133,6 +135,13 @@ compute pass do not provide a whole-grid barrier. Built-ins cover injection, sem
 advection/dissipation, buoyancy, Jacobi pressure, and projection. `rasterizeParticles()` uses u32
 fixed-point atomics; `sampleParticles()` uses cell-centered bilinear sampling. WebGL2 must retain
 the `NACHI_GRID2D_WEBGL2_UNSUPPORTED` diagnostic.
+
+M12 Grid3D uses `defineGrid3D()` plus `grid3D*` stages under the same scheduler and independent
+stage/commit submissions. Packed vec4 current/scratch storage, trilinear sampling, fixed-point
+particle deposition, and density-to-particle sampling all retain invocation range guards.
+`estimateGrid3DMemory()` exposes cubic allocation cost; a binding exceeding `maxStorageBufferBindingSize` or `maxBufferSize` reports
+`NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED`. `/golden-fluid/` runs the 32³ Golden #7 reference and a
+separate tiny 600-frame stability gate. WebGL2 must report `NACHI_GRID3D_WEBGL2_UNSUPPORTED`.
 
 ## Three-layer verification
 

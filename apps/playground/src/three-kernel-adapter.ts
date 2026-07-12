@@ -72,6 +72,8 @@ import {
 import { snoise } from 'three/examples/jsm/tsl/math/curlNoise.js';
 
 export interface ThreeKernelAdapterOptions {
+  readonly maxBufferSize?: number;
+  readonly maxStorageBufferBindingSize?: number;
   readonly backend?: 'webgl2' | 'webgpu';
   readonly linearFloat32Filtering?: boolean;
   readonly maxStorageBuffersPerShaderStage?: number;
@@ -632,6 +634,10 @@ export function createThreeKernelAdapter(
     vec4: (x, y, z, w) => asNode(vec4(x as never, y as never, z as never, w as never)),
   };
   const deviceLimits = {
+    ...(options.maxBufferSize === undefined ? {} : { maxBufferSize: options.maxBufferSize }),
+    ...(options.maxStorageBufferBindingSize === undefined
+      ? {}
+      : { maxStorageBufferBindingSize: options.maxStorageBufferBindingSize }),
     ...(options.maxStorageBuffersPerShaderStage === undefined
       ? {}
       : { maxStorageBuffersPerShaderStage: options.maxStorageBuffersPerShaderStage }),

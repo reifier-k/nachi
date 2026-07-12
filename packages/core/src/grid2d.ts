@@ -349,13 +349,19 @@ function stageFactory(
     .factory;
 }
 
+function isGrid2DStage(
+  stage: SimStageDefinition,
+): stage is SimStageDefinition & { readonly update: Grid2DStageModuleDefinition } {
+  return stage.update.kind === 'grid2d-stage-module';
+}
+
 function buildStage(
   adapter: KernelTslAdapter,
   definition: Grid2DDefinition,
   layouts: readonly Grid2DChannelLayout[],
   state: KernelStorageNode,
   scratch: KernelStorageNode,
-  declaration: SimStageDefinition,
+  declaration: SimStageDefinition & { readonly update: Grid2DStageModuleDefinition },
   registry: Grid2DStageRegistry | undefined,
   stageIndex: number,
 ): BuiltGridStage {
@@ -661,6 +667,16 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
       });
     }
     for (const [index, stage] of stages.entries()) {
+      if (!isGrid2DStage(stage)) {
+        diagnostics.push({
+          code: 'NACHI_SIM_STAGE_TARGET_KIND_MISMATCH',
+          message: 'A Grid2D target requires a grid2d-stage-module update.',
+          path: `stages[${index}].update.kind`,
+          phase: 'compile',
+          severity: 'error',
+        });
+        continue;
+      }
       if (!Number.isSafeInteger(stage.iterations) || stage.iterations <= 0) {
         diagnostics.push({
           code: 'NACHI_SIM_STAGE_ITERATIONS_INVALID',
@@ -846,7 +862,7 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
           .setName(`NachiGrid2DParticleSample_${layout.name}`),
       );
     }
-    this.#stages = stages.map((declaration, stageIndex) => ({
+    this.#stages = stages.filter(isGrid2DStage).map((declaration, stageIndex) => ({
       declaration,
       kernels: buildStage(
         renderer.kernelAdapter,

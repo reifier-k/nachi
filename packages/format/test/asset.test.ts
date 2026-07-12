@@ -12,6 +12,8 @@ import {
   defineEmitter,
   defineGrid2D,
   defineGrid2DStageFunction,
+  defineGrid3D,
+  defineGrid3DStageFunction,
   defineSimStage,
   defineParameter,
   defineTslFunction,
@@ -22,6 +24,9 @@ import {
   gridAdvect,
   gridInject,
   gridTslModule,
+  grid3DAdvect,
+  grid3DInject,
+  grid3DTslModule,
   hitStop,
   lifetime,
   lightIntensity,
@@ -605,6 +610,56 @@ describe('asset-reference emitter inheritance', () => {
         custom: defineSimStage({
           target: 'fluid',
           update: gridTslModule(({ read }) => ({ density: read('density') as never })),
+        }),
+      },
+    });
+    expect(diagnosticCodes(() => serializeEffect(effect))).toContain('NACHI_ASSET_INLINE_FUNCTION');
+  });
+
+  it('round-trips declarative Grid3D data interfaces and registered simulation stages', () => {
+    const volume = defineGrid3D({
+      channels: {
+        density: { default: 0, type: 'f32' },
+        velocity: { default: [0, 0.4, 0], type: 'vec3' },
+        temperature: { default: 0, type: 'f32' },
+        pressure: { default: 0, type: 'f32' },
+      },
+      resolution: [32, 40, 24],
+    });
+    const registered = defineGrid3DStageFunction('test/volume-decay', ({ read }) => ({
+      density: read('density') as never,
+    }));
+    const effect = defineEffect({
+      elements: {
+        volume,
+        inject: defineSimStage({
+          phase: 'before-particles',
+          target: 'volume',
+          update: grid3DInject({
+            center: [0.4, 0.1, 0.55],
+            radius: 0.08,
+            values: { density: 2, velocity: [0.2, 1, -0.1] },
+          }),
+        }),
+        advect: defineSimStage({ target: 'volume', update: grid3DAdvect() }),
+        registered: defineSimStage({ target: 'volume', update: grid3DTslModule(registered) }),
+      },
+    });
+    const document = serializeEffect(effect);
+    expect(serializeEffect(loadEffect(document))).toEqual(document);
+  });
+
+  it('rejects inline Grid3D TSL', () => {
+    const volume = defineGrid3D({
+      channels: { density: { type: 'f32' } },
+      resolution: [4, 4, 4],
+    });
+    const effect = defineEffect({
+      elements: {
+        volume,
+        custom: defineSimStage({
+          target: 'volume',
+          update: grid3DTslModule(({ read }) => ({ density: read('density') as never })),
         }),
       },
     });

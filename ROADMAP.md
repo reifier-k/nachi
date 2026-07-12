@@ -35,6 +35,7 @@
 
 | Niagara機能 | 対応マイルストーン | 状態 |
 |---|---|---|
+| 2026-07-12 | **M12バッチ3 検収・レビュー・裁定: 受入(コミット)。🎯ゴールデン#7「流体風の煙」達成=ゴールデンエフェクト7/7全達成**。Grid3D流体(x-fast添字、8-tapトライリニア、3D移流/浮力/散逸/注入/6近傍Jacobi/射影、estimateGrid3DMemory+`NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED`、defineSimStageのGrid2D/3D両対応+kind mismatch診断)+`/golden-fluid/`(32³煙108フレーム、渦形成対向速度注入)。①検収差し戻し2件(統括プローブで真因確定): (a)longRun600Stable=検証オブジェクト構築が`renderer.dispose()`の後にあり、device lostラッチが積む`NACHI_DEVICE_LOST`を読んでいた順序バグ(dispose前=診断0・安定を実測)→dispose前スナップショット化 (b)drawn閾値35が実測31で未達=実GPU無し校正 ②品質差し戻し1件: 視覚がパフ止まり→108フレーム+浮力/注入強化+渦注入で「立ち上る煙柱+頭部の膨らみ」へ(重心0.094→0.493、drawn 465、スパン0.94=CPUレプリカ校正とGPU実測一致、基準再記録+統括目視合格) ③Claudeレビュー: **PASS(BLOCKER 0/SHOULD 2/NIT 3)** — 3D添字の5経路一貫(CPU/デコード/エンコード/raster/snapshot)を非対称格子GPU実測で確認、トライリニア手計算一致、Jacobi係数正、上限診断の境界条件(ちょうど上限=非発火)実測、バッチ2指摘(範囲ガード/戻り値検証/単位系/export面)の踏襲確認、弁別性(移流なし→drawn13で棄却等)確認 ④SHOULD 2件消化: rasterizeGrid3DPoints CPUミラー+GPU rasterize検証(第2グループ)追加、上限診断の境界フィクスチャ追加、診断集約順序修正 ⑤最終: golden-fluid両バックエンド+m12-grid+ゴールデン回帰全緑、テスト499本、全静的ゲート緑。**確定知見: 検証オブジェクトの構築はGPUリソースdispose前に値を確定する**(device lostラッチが遅延で診断を汚染する)/**閾値校正はCPUレプリカ+GPU実測の突合で行う** |
 | 2026-07-12 | **M12バッチ2 検収・レビュー・裁定: 受入(コミット)**。Grid2D流体+sim stages基盤: `defineGrid2D()`(packed vec4 storage、current+scratch 2バッファ)+effect要素`defineSimStage()`(before/after-particles、iterations毎submit分割)+半ラグランジュ移流・浮力・散逸・Jacobi 8反復圧力射影+fixed-point atomic raster(scale 4096)/バイリニアsample+`/m12-grid/`8検証+format往復+WebGL2は`NACHI_GRID2D_WEBGL2_UNSUPPORTED`明示拒否。①Claudeレビュー: **PASS(BLOCKER 0/SHOULD 4/NIT 6)** — 流体数学は全検算一致(移流バックトレース0.99厳密/散逸e^-k誤差2.5e-8/JacobiはGPU Gems標準形/y鏡像・転置プローブ0)、submit計数745厳密一致、ping-pongハザードなし、スケジューラ統合はpause/カリング/プール/spawn失敗の全経路でgrid解放を確認、8検証の弁別性を偽実装5種の棄却で確認 ②SHOULD全4+NIT全6をCodexで消化: [S1]**全gridカーネルへinvocation範囲ガード**(three r185はceil(cells/64) dispatchのみでガード非生成。WebGPU仕様上OOB書込は破棄or同一バインディング内任意位置が許容され、Tintクランプ実装=Metal系では余剰スレッドが最終セルを競合上書きし得る移植性リスク。SwiftShaderでは破棄実装と実測済みだが3層検証はMetalを踏まないため予防) [S2]custom stage factory戻り値の宣言チャネル照合+成分数診断 [S3]custom stage実行経路+未解決診断2種のruntimeテスト [S4]grid含む定義のbakeに`NACHI_SIM_CACHE_GRID2D_NOT_RECORDED`警告+RFC規定(v1キャッシュはgrid状態を記録しない) [N1]RFC dispatch同期記述をthree実測知見帰属へ修正 [N2]rasterize負値・非有限のCPU拒否 [N3]grid内部exportの公開面過大(M11監査B3の再発形)→明示export化 [N4]単位系明記 [N5]schema詳細化 [N6]dt=0初期化文書化 ③最終: /m12-grid/両バックエンド全緑(数値回帰なし)、golden-ultimate/m11-cache回帰緑、テスト490本、全静的ゲート緑。視覚基準m12-grid.png(注入源+上昇プルーム、非対称位置)は取得時目視確認済み |
 | System/Emitter階層・エミッタ継承 | M9 | ✅ 2026-07-12監査確認(defineEmitter(base,overrides)のキー指定マージ、JSON往復保証。アセット参照継承・親変更伝播はM12=§16記録、System-stageモジュールなしは差分記録) |
 | 動的パーティクル属性(カスタム属性→バッファコンパイル) | M1 | ✅ 2026-07-11監査確認 |
@@ -67,7 +68,7 @@
 | sim caching(ベイク&リプレイ) | M11 | ✅ 残差分: Texture/Volume系Baker出力/全属性キャッシュ/Sequencerスクラブ統合/world-space rebase/velocity外挿/WebGL2 replayなし |
 | デバッガ(属性スプレッドシート・プロファイラ) | M11 | ✅ 残差分: 連続ストリーミング表示/System名前空間値/式フィルタ/FX Outliner/remote Session Browser/モジュール別・エミッタ別GPU時間配賦なし |
 | アセットフォーマット&ローダ | M12 | ⬜ |
-| Grid2D/3D流体(Niagara Fluids相当) | M12 | 🟨 Grid2Dバッチ2実装済み(sim stages、packed storage DI、半ラグランジュ煙/炎、粒子双方向、WebGL2明示診断)。Grid3D/volume rendererは未実装 |
+| Grid2D/3D流体(Niagara Fluids相当) | M12 | ✅ Grid2Dバッチ2+Grid3Dバッチ3(packed DI、半ラグランジュ流体、trilinear、粒子sample volume、WebGL2明示診断) |
 | Neighbor grid / boids / PBD | M12 | ⬜ |
 
 ## M0 — 基盤とスパイク ✅(条件付きPASS)
@@ -203,10 +204,10 @@
 - [ ] ドキュメントサイト+デモギャラリー公開
 - [ ] npm公開(changesets等でリリース自動化)
 - [x] Grid2Dスモーク/炎シミュレーション(sim stages基盤) — バッチ2受入済み(2026-07-12): `defineGrid2D()`+effect-element `defineSimStage()`、iterationごとのsubmit分割、packed vec4 storage、cell read/write+bilinear、fixed-point atomic particle raster/sample、移流+浮力+散逸+Jacobi圧力、`/m12-grid/`、format往復、WebGL2診断
-- [ ] Grid3D流体(Niagara Fluids相当、ストレッチ)
+- [x] Grid3D流体(Niagara Fluids相当、ストレッチ) — バッチ3受入済み(2026-07-12): packed vec4 current/scratch、trilinear、3D移流/浮力/散逸/注入/Jacobi射影、メモリ見積り+device limit診断、粒子sample billboard volume
 - [ ] neighbor grid(boids)、PBD的拘束(ストレッチ)
 - [ ] Effekseerインポータ調査(実装判断はここで)
-- [ ] 🎯 ゴールデン#7「流体風の煙」が動く
+- [x] 🎯 ゴールデン#7「流体風の煙」が動く — バッチ3受入済み(2026-07-12)、**ゴールデン7/7全達成**。`/golden-fluid/`: 32³煙、密度sample粒子、重心上昇/3軸非対称/圧力反復/600f安定/飽和上限/console/perf、WebGL2拒否スモーク
 - [ ] 🔍 **マイルストーン監査**(別セッションで監査プロトコルを実施し、結果をセッションログに記録)
 
 ## FA — 最終監査(1.0リリースゲート)
@@ -228,6 +229,7 @@
 
 | 日付 | セッション成果 |
 |---|---|
+| 2026-07-12 | **M12バッチ3実装(静的検収完了、GPU実測待ち)**: Grid2D契約をGrid3Dへ拡張。`defineGrid3D()`、x-fast 3D添字、f32/vec3 packed vec4 current+scratch、8-tap trilinear、全kernel invocation guard、fixed-point particle rasterとdensity sample、3D注入/半ラグランジュ移流+散逸/浮力/6近傍Jacobi/3軸射影を追加。`defineSimStage()`はtarget実体の2D/3D kindを検証し同じbefore/after・submit分割・ping-pongを共有。`estimateGrid3DMemory()`は`32*C*G+24*C` byte内訳を公開し`maxStorageBufferBindingSize`/`maxBufferSize`超過を`NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED`で事前拒否。`/golden-fluid/`は32³密度をGPU sampleした粒子billboard、重心上昇/3軸非対称/圧力反復/600f安定/飽和上限/console/perfを検証し、WebGL2は`NACHI_GRID3D_WEBGL2_UNSUPPORTED`。format v1閉構造+登録参照round-trip、RFC§10.7/README/CLAUDEを更新。GPU実測と`golden-fluid.png`取得時目視は統括検収へ。 |
 | 2026-07-12 | **M12バッチ2実装(静的検収完了、GPU実測待ち)**: coreへGrid2D DIとeffect-element sim stagesを追加。密度/温度/速度/圧力をvec4セルレコードへ詰め、状態+scratchの2 storage bufferで上限を節約。before/after particle境界、反復ごとのstage+commit独立submit、inline/registered Grid TSL、GPU fixed-point atomic particle→gridとGPU bilinear grid→particleを実装。参照流体は半ラグランジュ移流+指数散逸+浮力+Jacobi圧力/射影。`/m12-grid/`は解析注入/散逸、非対称移流、1 vs N反復、独立粒子サンプル、live submit、単一画像/console/perfを公開し、WebGL2は`NACHI_GRID2D_WEBGL2_UNSUPPORTED`のみを検証。format v1へgrid/stage閉構造とinline拒否を追加。静的ゲートとGPU実測結果は本バッチ最終報告へ記録。 |
 | 2026-07-12 | **M12バッチ1 検収・レビュー・裁定: 受入(コミット)**。`@nachi/format`+**🎯ゴールデン#5のJSONロード再生達成**(jsonGpuEquivalent=timeline action列+GPU属性byte等価をGPU実測緑、偽陽性なしをレビューが経路確認)。①Claudeレビュー: **FAIL(BLOCKER 1)** — [B1]M9継承`defineEmitter(base,overrides)`が`init:`/`update:`キーを無条件own代入し、base/override双方に該当ステージが無いと`update: undefined`を持つ定義を生成→serialize不能。**有効なv1文書のloadEffect出力すら再serialize不能=round-trip契約違反**(vitest `toEqual`はundefined値プロパティを無視するためテストをすり抜けていた)→coreの条件付きスプレッド化+own-key存在検証+「loadEffect出力の再serialize恒等」テスト常設 [S1]200k深ネストでRangeError生落ち→深度上限256+`NACHI_ASSET_MAX_DEPTH_EXCEEDED` [S2]registration形`tslModule(defineTslFunction(...))`がserialize不能+inline拒否hint到達不能→function-refとしてJSON化+登録誘導hint実装 [S3]要素キー`#`と参照構文`lastIndexOf('#')`の衝突(`#a#b`が外部resolverへ誤ルーティング)→`#`禁止+「ちょうど1個の#」構文RFC明記 [N1]入力部分木共有→全体clone統一 [N2]range/curve/gradient値型検証 [N3]疎配列診断化。レビューは敵対的プローブでprototype汚染3経路クリーン・封筒厳格性・extends意味論のM9一致・npm境界(format→coreのみ、three非依存)も確認 ②最終: golden-ultimate(JSON主経路)+M9系(継承変更波及先)+m11-cache回帰全緑、テスト475本、全静的ゲート+format ESMゲート緑。**確定知見: round-trip検証は「ローダ出力の再serialize恒等」まで確認する**(片方向toEqualはundefined own-keyを見逃す)。M12残: R3F/ドキュメント/npm公開/Grid流体/boids・PBD/Effekseer調査/ゴールデン#7/監査 |
 | 2026-07-12 | **M12バッチ1実装(統括検収待ち)**: `@nachi/format`を新設し、`{format:'nachi-effect',version:1,effect}`封筒、公開JSON schema、`serializeEffect()`/`loadEffect()`、閉構造+拡張module configのNACHI_ASSET_*診断、非JSON/inline TSL拒否、明示migration registryを実装。asset `emitter-extends`は`#element`/`asset-id#element`を同期resolverで解決後、M9 `defineEmitter(base,overrides)`へ委譲し循環を拒否。timeline mesh-fxは参照IDだけをJSONに保持し`bindMeshFxResources()`で外部解決。`/golden-ultimate/`の主再生をJSONロード定義へ切替え、同seedコード定義とのtimeline action列+GPU particle byte等価を追加、既存スクショ構成は不変。typecheck/lint/test(468)/prettier/build+format Node ESM gateは全緑。listener不要GPU runnerもChromiumが`setsockopt EPERM`→`SIGTRAP`で起動不能のため、GPU実測+既存基準スクショ照合は統括検収へ。 |

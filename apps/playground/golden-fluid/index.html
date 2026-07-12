@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi Golden #7 — fluid-like smoke</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">Golden #7 / Grid3D</p>
+        <h1>Fluid-like smoke</h1>
+        <p>
+          Volume density sampled into layered particles, driven by buoyancy and pressure projection.
+        </p>
+      </header>
+      <canvas id="fluid-visual" width="512" height="512"></canvas>
+      <dl class="status">
+        <div>
+          <dt>Backend</dt>
+          <dd id="backend-value">initializing</dd>
+        </div>
+        <div>
+          <dt>Contract</dt>
+          <dd id="status-value">running</dd>
+        </div>
+        <div>
+          <dt>Grid</dt>
+          <dd id="grid-value">32³</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="/src/golden-fluid.ts"></script>
+  </body>
+</html>

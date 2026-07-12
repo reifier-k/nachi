@@ -22,6 +22,7 @@ import {
   defineEmitter,
   defineGrid2D,
   defineGrid2DStageFunction,
+  defineGrid3D,
   defineParameter,
   defineSimStage,
   emitTo,
@@ -30,6 +31,7 @@ import {
   gridPressureJacobi,
   gridTslModule,
   Grid2DStageRegistry,
+  estimateGrid3DMemory,
   lifetime,
   killVolume,
   perDistance,
@@ -331,6 +333,45 @@ describe('M12 Grid2D runtime scheduling', () => {
     );
   });
 });
+
+describe('M12 Grid3D runtime diagnostics', () => {
+  it('rejects a storage binding above the device limit and accepts the exact boundary', () => {
+    const volume = defineGrid3D({
+      channels: { density: { type: 'f32' } },
+      resolution: [64, 64, 64],
+    });
+    const memory = estimateGrid3DMemory(volume);
+    const largestBuffer = Math.max(memory.stateBufferBytes, memory.particlePositionBytes);
+
+    const exceeded = new VFXSystem(new StorageLimitGridRenderer(largestBuffer - 1)).spawn(
+      defineEffect({ elements: { volume } }),
+    );
+    expect(exceeded.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED' }),
+    ]);
+
+    const exact = new VFXSystem(new StorageLimitGridRenderer(largestBuffer)).spawn(
+      defineEffect({ elements: { volume } }),
+    );
+    expect(exact.state).toBe('active');
+    expect(exact.diagnostics).toEqual([]);
+  });
+
+  it('aggregates definition and backend diagnostics before throwing', () => {
+    const instance = new VFXSystem(new WebGlGridRenderer()).spawn(
+      defineEffect({
+        elements: {
+          volume: defineGrid3D({ channels: {}, resolution: [0, 4, 4] }),
+        },
+      }),
+    );
+    expect(instance.diagnostics.map(({ code }) => code)).toEqual([
+      'NACHI_GRID3D_RESOLUTION_INVALID',
+      'NACHI_GRID3D_CHANNEL_INVALID',
+      'NACHI_GRID3D_WEBGL2_UNSUPPORTED',
+    ]);
+  });
+});
 import type {
   KernelComputeBuilder,
   KernelComputeNode,
@@ -543,6 +584,18 @@ class WebGlGridRenderer extends FakeRuntimeRenderer {
       indirectDraw: false,
     },
   };
+}
+
+class StorageLimitGridRenderer extends FakeRuntimeRenderer {
+  override readonly kernelAdapter: KernelTslAdapter;
+
+  constructor(maxStorageBufferBindingSize: number) {
+    super();
+    this.kernelAdapter = {
+      ...fakeAdapter(),
+      deviceLimits: { maxStorageBufferBindingSize },
+    };
+  }
 }
 
 class DrawTrackingRuntimeRenderer extends FakeRuntimeRenderer {

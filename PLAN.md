@@ -211,9 +211,11 @@ apps/
 - 2026-07-10: **スパイク3/4の実証結果**:①WebGL2実測サポートマトリクス — TSLコンピュート=可(transform feedback、WebGPUとreadback値完全一致=決定論の実証も兼ねる)、readback=可(getBufferSubData)、**アトミクス=不可**(GLSLに降下されずコンパイル失敗)、**間接描画/間接ディスパッチ=不可**(CPU count直接描画にフォールバック)→ **政策含意: WebGL2の生存数駆動はCPUカウント経由に限定、GPUフリーリスト/コンパクションはWebGPU専用。capabilityゲート必須** ②dispatchIndirect実証(WebGPU、dispatch X=ceil(alive/64)をreadback検証)③深度+ポスト共存実証 — `linearDepth(viewportDepthTexture(screenUV))`が両バックエンドで動作、WebGL2でピクセル実証(fade on/off差分30.2%+二重目視)、ポスト統合点は**RenderPipeline**(PostProcessingはr183で非推奨改名)。残: 深度規約(reverse-z/MSAA)、フォールバック方針の形式化(WebGPUピクセル検証はreadRenderTargetPixelsAsyncでヘッドレス化済み・M0監査で合格)
 - 2026-07-10: **スパイク1/2の実証結果(three 0.185.1、SwiftShaderヘッドレス)**:①TSLコンピュートで10万粒子シミュレーションが公開APIで成立(`instancedArray`(SoA)+`Fn().compute()`+複数カーネル順序投入)②アトミクス動作確認(`.toAtomic()`+atomicAdd、91,327並行加算の完全一致)③間接描画引数のGPU駆動を実証(`IndirectStorageBufferAttribute`+`geometry.setIndirect`、readbackで引数内容確認。**描画実行自体の確認はWindows実GPU目視待ち**)④`renderer.getArrayBufferAsync`でreadback可。**未回答**: dispatchIndirect実証(APIは存在確認済み)、SoA vs interleaved比較、free-list vs compaction(スパイクは連続prefix生存で回避)、GPU timestamp計測(computeAsync壁時間はencodeのみで性能指標にならない)
 
+- 2026-07-12: **M12バッチ3(Grid3D流体)設計確定**。Grid3DはGrid2Dと同じpacked vec4 current/scratch、before/after particle境界、iterationごとのstage/commit独立submitを共有する。3D添字はx-fast、sampleは8-tap trilinear、全kernelにinvocation範囲guard。メモリは`C=WHD`・vec4 group数`G`に対しstate+scratch=`32CG` byte、transfer=`24C` byteを公開し、device buffer上限を割当前に診断。v1 volume描画はGPU grid→particle density sample+slice/billboardまで、full ray marchingは将来段階。WebGL2はCPU/texture fallbackせず`NACHI_GRID3D_WEBGL2_UNSUPPORTED`。
+
 ## 未決事項
 
 - [x] ライブラリ名(**nachi** に決定、2026-07-10。那智の滝由来=Niagaraへのオマージュ。npm空き確認済み)
 - [x] ライセンス(MIT、LICENSE作成済み。holder: nachi contributors)
 - [x] WebGL2フォールバックの実測範囲はスパイク3で確定(コンピュート/readback可、アトミクス/間接不可)。capability宣言の形式化はM1以降の設計事項として決定事項ログに記載
-- [ ] Grid流体(M12)の実装深度:Niagara Fluids完全互換は目標としつつ、Grid2Dスモーク/炎を先行
+- [x] Grid流体(M12)の実装深度:Grid2Dスモーク/炎+Grid3D流体+sampled particle volumeまで実装。full ray marching/障害物/vorticity confinementは将来段階

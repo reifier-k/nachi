@@ -157,11 +157,12 @@ class AssetValidator {
     else if (value.kind === 'visual-element') this.visualElement(value, path);
     else if (value.kind === 'emitter-extends') this.emitterExtension(value, path);
     else if (value.kind === 'grid2d') this.grid2D(value, path);
+    else if (value.kind === 'grid3d') this.grid3D(value, path);
     else if (value.kind === 'sim-stage') this.simStage(value, path);
     else
       this.error(
         'NACHI_ASSET_ELEMENT_KIND_UNKNOWN',
-        'Effect elements must be emitter, Grid2D, simulation-stage, emitter-extends, or visual-element definitions.',
+        'Effect elements must be emitter, Grid2D, Grid3D, simulation-stage, emitter-extends, or visual-element definitions.',
         `${path}.kind`,
       );
   }
@@ -208,6 +209,48 @@ class AssetValidator {
     }
   }
 
+  grid3D(value: UnknownRecord, path: string): void {
+    this.unknownFields(
+      value,
+      new Set(['boundary', 'channels', 'kind', 'resolution', 'version']),
+      path,
+    );
+    this.required(value, ['boundary', 'channels', 'kind', 'resolution', 'version'], path);
+    if (value.version !== 1) this.literal(value.version, '1', `${path}.version`);
+    if (value.boundary !== 'clamp') this.literal(value.boundary, 'clamp', `${path}.boundary`);
+    this.numberTuple(value.resolution, 3, `${path}.resolution`);
+    if (Array.isArray(value.resolution)) {
+      value.resolution.forEach((dimension, index) => {
+        if (!Number.isSafeInteger(dimension) || (dimension as number) <= 0)
+          this.type('positive integer', dimension, `${path}.resolution[${index}]`);
+      });
+    }
+    if (this.record(value.channels, `${path}.channels`)) {
+      if (Object.keys(value.channels).length === 0) {
+        this.error(
+          'NACHI_ASSET_VALUE_INVALID',
+          'Grid3D requires at least one channel.',
+          `${path}.channels`,
+        );
+      }
+      for (const [name, channel] of Object.entries(value.channels)) {
+        const itemPath = `${path}.channels.${name}`;
+        if (!this.record(channel, itemPath)) continue;
+        this.unknownFields(channel, new Set(['default', 'type']), itemPath);
+        this.required(channel, ['type'], itemPath);
+        if (channel.type !== 'f32' && channel.type !== 'vec3')
+          this.type('f32 or vec3', channel.type, `${itemPath}.type`);
+        if (channel.default !== undefined) {
+          if (channel.type === 'vec3') {
+            this.numberTuple(channel.default, 3, `${itemPath}.default`);
+          } else {
+            this.finiteNumber(channel.default, `${itemPath}.default`);
+          }
+        }
+      }
+    }
+  }
+
   simStage(value: UnknownRecord, path: string): void {
     this.unknownFields(
       value,
@@ -229,16 +272,22 @@ class AssetValidator {
       `${path}.update`,
     );
     this.required(value.update, ['config', 'kind', 'source', 'version'], `${path}.update`);
-    if (value.update.kind !== 'grid2d-stage-module')
-      this.literal(value.update.kind, 'grid2d-stage-module', `${path}.update.kind`);
+    const isGrid2D = value.update.kind === 'grid2d-stage-module';
+    const isGrid3D = value.update.kind === 'grid3d-stage-module';
+    if (!isGrid2D && !isGrid3D)
+      this.type(
+        'grid2d-stage-module or grid3d-stage-module',
+        value.update.kind,
+        `${path}.update.kind`,
+      );
     if (value.update.version !== 1)
       this.literal(value.update.version, '1', `${path}.update.version`);
     if (value.update.source === 'inline') {
       this.error(
         'NACHI_ASSET_INLINE_FUNCTION',
-        'Inline Grid2D TSL factories are authoring-only.',
+        'Inline grid TSL factories are authoring-only.',
         `${path}.update.source`,
-        'Use defineGrid2DStageFunction() and serialize its grid2d-function-ref.',
+        'Use the matching defineGrid2DStageFunction()/defineGrid3DStageFunction() registration.',
       );
     } else if (typeof value.update.source !== 'string') {
       if (this.record(value.update.source, `${path}.update.source`)) {
@@ -247,12 +296,9 @@ class AssetValidator {
           new Set(['id', 'kind', 'version']),
           `${path}.update.source`,
         );
-        if (value.update.source.kind !== 'grid2d-function-ref')
-          this.literal(
-            value.update.source.kind,
-            'grid2d-function-ref',
-            `${path}.update.source.kind`,
-          );
+        const expectedRefKind = isGrid3D ? 'grid3d-function-ref' : 'grid2d-function-ref';
+        if (value.update.source.kind !== expectedRefKind)
+          this.literal(value.update.source.kind, expectedRefKind, `${path}.update.source.kind`);
         if (typeof value.update.source.id !== 'string' || value.update.source.id.length === 0)
           this.type('non-empty string', value.update.source.id, `${path}.update.source.id`);
         if (
@@ -1086,7 +1132,7 @@ function collectSerializableDiagnostics(value: unknown, phase: DiagnosticPhase):
         }
         if (
           key === 'factory' &&
-          item.kind === 'grid2d-stage-module' &&
+          (item.kind === 'grid2d-stage-module' || item.kind === 'grid3d-stage-module') &&
           item.source === 'inline' &&
           descriptor?.enumerable === false
         ) {
@@ -1094,9 +1140,9 @@ function collectSerializableDiagnostics(value: unknown, phase: DiagnosticPhase):
             diagnostics,
             phase,
             'NACHI_ASSET_INLINE_FUNCTION',
-            'Inline Grid2D TSL factories are authoring-only.',
+            'Inline grid TSL factories are authoring-only.',
             `${path}.source`,
-            'Use defineGrid2DStageFunction() and a registered grid2d-function-ref.',
+            'Use a matching registered Grid2D/Grid3D function reference.',
           );
           continue;
         }

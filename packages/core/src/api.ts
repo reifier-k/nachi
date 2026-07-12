@@ -85,7 +85,9 @@ import type {
   ComposedEffectParameterSchema,
   Grid2DDefinition,
   Grid2DChannelSchema,
-  Grid2DStageModuleDefinition,
+  Grid3DDefinition,
+  Grid3DChannelSchema,
+  GridStageModuleDefinition,
   SimStageDefinition,
 } from './types.js';
 
@@ -103,11 +105,25 @@ export function defineGrid2D<const Channels extends Grid2DChannelSchema>(config:
   };
 }
 
+export function defineGrid3D<const Channels extends Grid3DChannelSchema>(config: {
+  readonly boundary?: 'clamp';
+  readonly channels: Channels;
+  readonly resolution: readonly [number, number, number];
+}): Grid3DDefinition<Channels> {
+  return {
+    boundary: config.boundary ?? 'clamp',
+    channels: config.channels,
+    kind: 'grid3d',
+    resolution: config.resolution,
+    version: 1,
+  };
+}
+
 export function defineSimStage(config: {
   readonly iterations?: number;
   readonly phase?: 'after-particles' | 'before-particles';
   readonly target: string;
-  readonly update: Grid2DStageModuleDefinition;
+  readonly update: GridStageModuleDefinition;
 }): SimStageDefinition {
   return {
     iterations: config.iterations ?? 1,

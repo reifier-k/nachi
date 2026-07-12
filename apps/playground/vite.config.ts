@@ -21,6 +21,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         goldenExplosion: 'golden-explosion/index.html',
+        goldenFluid: 'golden-fluid/index.html',
         goldenUltimate: 'golden-ultimate/index.html',
         goldenAmbient: 'golden-ambient/index.html',
         goldenCharacter: 'golden-character/index.html',
