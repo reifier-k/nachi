@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  VfxDiagnosticError,
   defineGrid2D,
   defineSimStage,
   gridAdvect,
@@ -19,6 +20,36 @@ describe('M12 Grid2D mathematics', () => {
     expect(gridCellIndex(4, 0, [5, 3])).toBe(4);
     expect(gridCellIndex(1, 2, [5, 3])).toBe(11);
     expect(() => gridCellIndex(5, 0, [5, 3])).toThrow(RangeError);
+  });
+
+  it('rejects a resolution whose dimensions are safe but product is not', () => {
+    expect(() => gridCellIndex(0, 0, [Number.MAX_SAFE_INTEGER, 2])).toThrow(RangeError);
+    try {
+      resolveGrid2DChannelLayout(
+        defineGrid2D({
+          channels: { density: { type: 'f32' } },
+          resolution: [Number.MAX_SAFE_INTEGER, 2],
+        }),
+      );
+      throw new Error('expected Grid2D resolution validation to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(VfxDiagnosticError);
+      expect(error instanceof VfxDiagnosticError ? error.diagnostics : []).toContainEqual(
+        expect.objectContaining({ code: 'NACHI_GRID2D_RESOLUTION_INVALID' }),
+      );
+    }
+  });
+
+  it('asserts the Grid2D definition channel diagnostic code', () => {
+    try {
+      resolveGrid2DChannelLayout(defineGrid2D({ channels: {}, resolution: [2, 2] }));
+      throw new Error('expected Grid2D channel validation to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(VfxDiagnosticError);
+      expect(error instanceof VfxDiagnosticError ? error.diagnostics : []).toContainEqual(
+        expect.objectContaining({ code: 'NACHI_GRID2D_CHANNEL_INVALID' }),
+      );
+    }
   });
 
   it('bilinearly samples a deliberately asymmetric field without transpose or y-mirror aliases', () => {

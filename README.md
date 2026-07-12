@@ -34,6 +34,10 @@ React Three Fiber usage keeps React, R3F, and Three as peers:
 pnpm add @nachi/core @nachi/react react @react-three/fiber three@0.185.1
 ```
 
+`VFXSystemProvider` synchronizes the active R3F camera and pixel viewport with core before each
+update by default. Pass `syncCamera={false}` only when the application calls `system.setCamera()`
+itself.
+
 ## Quick start
 
 ```ts

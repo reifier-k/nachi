@@ -12,6 +12,7 @@ import {
   attributeStorageComponentIndex,
   bakeSimulation,
   billboard,
+  boids,
   burst,
   compileEmitter,
   collidePlane,
@@ -23,11 +24,13 @@ import {
   defineGrid2D,
   defineGrid2DStageFunction,
   defineGrid3D,
+  defineNeighborGrid,
   defineParameter,
   defineSimStage,
   emitTo,
   estimateSimulationCacheMemory,
   gridAdvect,
+  grid3DTslModule,
   gridPressureJacobi,
   gridTslModule,
   Grid2DStageRegistry,
@@ -165,6 +168,24 @@ describe('M12 Grid2D runtime scheduling', () => {
     expect(renderer.submissions).toEqual([]);
   });
 
+  it('rejects a Grid2D storage binding above the device limit and accepts the boundary', () => {
+    const fluid = defineGrid2D({
+      channels: { density: { type: 'f32' } },
+      resolution: [64, 64],
+    });
+    const largestBuffer = 64 * 64 * 16;
+    const exceeded = new VFXSystem(new StorageLimitGridRenderer(largestBuffer - 1)).spawn(
+      defineEffect({ elements: { fluid } }),
+    );
+    expect(exceeded.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID2D_STORAGE_LIMIT_EXCEEDED' }),
+    ]);
+    const exact = new VFXSystem(new StorageLimitGridRenderer(largestBuffer)).spawn(
+      defineEffect({ elements: { fluid } }),
+    );
+    expect(exact.state).toBe('active');
+  });
+
   it('materializes and executes inline and registered custom stage factories', async () => {
     const inlineRenderer = new FakeRuntimeRenderer();
     const fluid = defineGrid2D({
@@ -293,6 +314,50 @@ describe('M12 Grid2D runtime scheduling', () => {
     ]);
   });
 
+  it('diagnoses undeclared Grid2D and Grid3D channels before custom sample interpolation', () => {
+    const density2D = defineGrid2D({
+      channels: { density: { type: 'f32' } },
+      resolution: [4, 3],
+    });
+    const typo2D = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          density2D,
+          update: defineSimStage({
+            target: 'density2D',
+            update: gridTslModule(({ index, sample }) => ({
+              density: sample('unknown', [index, index]),
+            })),
+          }),
+        },
+      }),
+    );
+    expect(typo2D.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID2D_STAGE_CHANNEL_UNDECLARED' }),
+    ]);
+
+    const density3D = defineGrid3D({
+      channels: { density: { type: 'f32' } },
+      resolution: [4, 3, 2],
+    });
+    const typo3D = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          density3D,
+          update: defineSimStage({
+            target: 'density3D',
+            update: grid3DTslModule(({ index, sample }) => ({
+              density: sample('unknown', [index, index, index]),
+            })),
+          }),
+        },
+      }),
+    );
+    expect(typo3D.diagnostics).toEqual([
+      expect.objectContaining({ code: 'NACHI_GRID3D_STAGE_CHANNEL_UNDECLARED' }),
+    ]);
+  });
+
   it('annotates v1 bakes that execute but do not record Grid2D state', async () => {
     const cache = await bakeSimulation(
       new VFXSystem(new CacheRuntimeRenderer()),
@@ -331,10 +396,51 @@ describe('M12 Grid2D runtime scheduling', () => {
     await expect(grid.rasterizeParticles([], 'density', Number.POSITIVE_INFINITY)).rejects.toThrow(
       RangeError,
     );
+    await expect(grid.rasterizeParticles([], 'density', 0x1_0000_0000 / 4096)).rejects.toThrow(
+      RangeError,
+    );
+    await expect(grid.rasterizeParticles([[Number.NaN, 0]], 'density')).rejects.toThrow(RangeError);
+    await expect(grid.sampleParticles([[0, Number.POSITIVE_INFINITY]], 'density')).rejects.toThrow(
+      RangeError,
+    );
   });
 });
 
 describe('M12 Grid3D runtime diagnostics', () => {
+  it('asserts custom-stage read, write, and component diagnostic codes', () => {
+    const scalar = defineGrid3D({
+      channels: { density: { type: 'f32' } },
+      resolution: [3, 2, 2],
+    });
+    const spawnWith = (update: ReturnType<typeof grid3DTslModule>, volume = scalar) =>
+      new VFXSystem(new FakeRuntimeRenderer()).spawn(
+        defineEffect({
+          elements: {
+            volume,
+            update: defineSimStage({ target: 'volume', update }),
+          },
+        }),
+      );
+    const read = spawnWith(grid3DTslModule(({ read }) => ({ density: read('unknown') })));
+    const write = spawnWith(grid3DTslModule(({ read }) => ({ typo: read('density') })));
+    const components = spawnWith(
+      grid3DTslModule(({ read }) => ({ velocity: read('density') })),
+      defineGrid3D({
+        channels: { density: { type: 'f32' }, velocity: { type: 'vec3' } },
+        resolution: [3, 2, 2],
+      }),
+    );
+    expect(read.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_GRID3D_STAGE_CHANNEL_UNDECLARED' }),
+    );
+    expect(write.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_GRID3D_STAGE_WRITE_CHANNEL_UNDECLARED' }),
+    );
+    expect(components.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_GRID3D_STAGE_WRITE_COMPONENTS_INVALID' }),
+    );
+  });
+
   it('rejects a storage binding above the device limit and accepts the exact boundary', () => {
     const volume = defineGrid3D({
       channels: { density: { type: 'f32' } },
@@ -371,8 +477,120 @@ describe('M12 Grid3D runtime diagnostics', () => {
       'NACHI_GRID3D_WEBGL2_UNSUPPORTED',
     ]);
   });
+
+  it('rejects non-finite transfer points and a single fixed-point deposit above u32', async () => {
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+      defineEffect({
+        elements: {
+          volume: defineGrid3D({
+            channels: { density: { type: 'f32' } },
+            resolution: [4, 3, 2],
+          }),
+        },
+      }),
+    );
+    const grid = instance.getGrid3D('volume')!;
+    await expect(grid.rasterizeParticles([], 'density', 0x1_0000_0000 / 4096)).rejects.toThrow(
+      RangeError,
+    );
+    await expect(grid.rasterizeParticles([[0, Number.NaN, 0]], 'density')).rejects.toThrow(
+      RangeError,
+    );
+    await expect(
+      grid.sampleParticles([[0, 0, Number.NEGATIVE_INFINITY]], 'density'),
+    ).rejects.toThrow(RangeError);
+  });
 });
+
+describe('M12 data-interface capture FIFO', () => {
+  it.each(['grid2d', 'grid3d'] as const)(
+    'serializes %s capture, rasterization, and sampling after an in-flight update',
+    async (kind) => {
+      const renderer = new DeferredSubmissionRenderer();
+      const definition =
+        kind === 'grid2d'
+          ? defineEffect({
+              elements: {
+                grid: defineGrid2D({
+                  channels: { density: { type: 'f32' } },
+                  resolution: [3, 2],
+                }),
+              },
+            })
+          : defineEffect({
+              elements: {
+                grid: defineGrid3D({
+                  channels: { density: { type: 'f32' } },
+                  resolution: [3, 2, 2],
+                }),
+              },
+            });
+      const system = new VFXSystem(renderer);
+      const instance = system.spawn(definition as never);
+      const grid = kind === 'grid2d' ? instance.getGrid2D('grid')! : instance.getGrid3D('grid')!;
+      const update = system.update(0.1);
+      await Promise.resolve();
+      await Promise.resolve();
+      const capture = grid.capture();
+      const raster =
+        kind === 'grid2d'
+          ? (grid as Grid2DRuntimeView).rasterizeParticles([[0.25, 0.5]], 'density')
+          : (grid as Grid3DRuntimeView).rasterizeParticles([[0.25, 0.5, 0.75]], 'density');
+      const sample =
+        kind === 'grid2d'
+          ? (grid as Grid2DRuntimeView).sampleParticles([[0.25, 0.5]], 'density')
+          : (grid as Grid3DRuntimeView).sampleParticles([[0.25, 0.5, 0.75]], 'density');
+      expect(renderer.readCount).toBe(0);
+      expect(renderer.writeCount).toBe(0);
+      renderer.releaseFirstSubmission();
+      await Promise.all([update, capture, raster, sample]);
+      expect(renderer.readCount).toBe(2);
+      expect(renderer.writeCount).toBe(2);
+      expect(grid.initialized).toBe(true);
+      instance.release();
+      expect(grid.initialized).toBe(false);
+    },
+  );
+
+  it('captures one NeighborGrid rebuild after an in-flight update and resets on release', async () => {
+    const renderer = new DeferredSubmissionRenderer();
+    const neighbors = defineNeighborGrid({ cellCapacity: 2, resolution: [2, 2, 2] });
+    const particles = defineEmitter({
+      capacity: 2,
+      integration: 'none',
+      render: {
+        access: { reads: [], writes: [] },
+        config: {},
+        kind: 'module',
+        stage: 'render',
+        type: 'test/runtime-compute-only',
+        version: 1,
+      },
+      spawn: burst({ count: 1 }),
+      update: [boids({ grid: 'neighbors', radius: 0 })],
+    });
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(defineEffect({ elements: { neighbors, particles } }));
+    expect(instance.state).toBe('active');
+    const grid = instance.getNeighborGrid('neighbors')!;
+    const update = system.update(0.1);
+    for (let tick = 0; tick < 20 && renderer.submissions.length === 0; tick += 1) {
+      await Promise.resolve();
+    }
+    const capture = grid.capture();
+    expect(renderer.readCount).toBe(0);
+    renderer.releaseFirstSubmission();
+    await Promise.all([update, capture]);
+    expect(renderer.readCount).toBe(3);
+    expect(grid.initialized).toBe(true);
+    instance.release();
+    expect(grid.initialized).toBe(false);
+  });
+});
+
 import type {
+  Grid2DRuntimeView,
+  Grid3DRuntimeView,
   KernelComputeBuilder,
   KernelComputeNode,
   KernelNode,
@@ -535,6 +753,7 @@ function fakeAdapter(): KernelTslAdapter {
     instancedArray: () => new FakeStorage(),
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     inverse: node,
+    loop: (_parameters, callback) => callback(node()),
     mod: node,
     sampleTexture: node,
     sampleMeshSurface: () => ({ normal: node(), position: node() }),
@@ -595,6 +814,38 @@ class StorageLimitGridRenderer extends FakeRuntimeRenderer {
       ...fakeAdapter(),
       deviceLimits: { maxStorageBufferBindingSize },
     };
+  }
+}
+
+class DeferredSubmissionRenderer extends FakeRuntimeRenderer {
+  #releaseFirstSubmission: (() => void) | undefined;
+  #shouldBlock = true;
+  readCount = 0;
+  writeCount = 0;
+
+  override submitCompute(kernel: KernelComputeNode): Promise<void> | void {
+    super.submitCompute(kernel);
+    if (!this.#shouldBlock) return;
+    this.#shouldBlock = false;
+    return new Promise<void>((resolve) => {
+      this.#releaseFirstSubmission = resolve;
+    });
+  }
+
+  readStorage(): Promise<ArrayBuffer> {
+    this.readCount += 1;
+    return Promise.resolve(new Uint32Array(4096).buffer);
+  }
+
+  writeStorage(): void {
+    this.writeCount += 1;
+  }
+
+  releaseFirstSubmission(): void {
+    const release = this.#releaseFirstSubmission;
+    if (!release) throw new Error('No deferred submission is pending.');
+    this.#releaseFirstSubmission = undefined;
+    release();
   }
 }
 

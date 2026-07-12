@@ -81,6 +81,9 @@ export type PerformanceMonitorOptions = {
 //   renderer:{drawCalls,renderCalls,computeCalls,computeCallsStatus,computeCallsReason,
 //             triangles,points,lines} }
 // Numeric metrics always carry {status,value,reason}; unavailable values are null, never silent 0.
+// GPU fields retain only the latest resolved timestamp per scope. They have no warm-up window,
+// sample count, or median, so this v1 record is a smoke/baseline observation rather than a final
+// performance-budget statistic. FA performs the budget decision with multiple warmed samples.
 // renderer.computeCalls is Three.js's current-frame counter. Three resets it at frame boundaries,
 // so headless spike-compute can publish 0 after submitted compute work has already been reset.
 export class PerformanceMonitor {

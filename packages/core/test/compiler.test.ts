@@ -8,6 +8,7 @@ import {
   bakeGradientLut,
   bitonicSortPasses,
   billboard,
+  boids,
   burst,
   colorOverLife,
   collideBox,
@@ -22,6 +23,7 @@ import {
   curve,
   curlNoise,
   defineEmitter,
+  defineNeighborGrid,
   defineParameter,
   drag,
   emitTo,
@@ -42,6 +44,7 @@ import {
   meshRenderer,
   orientToVelocity,
   parameter,
+  pbdDistanceConstraint,
   perDistance,
   paddedSortCapacity,
   pointAttractor,
@@ -146,6 +149,51 @@ describe('M10 bitonic particle sort contract', () => {
     );
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_CAPACITY_EXCEEDED' }),
+    );
+  });
+});
+
+describe('M12 neighbor-module diagnostic coverage', () => {
+  const neighbors = defineNeighborGrid({ resolution: [4, 4, 4] });
+
+  it('asserts the boids value diagnostic code', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+        update: [boids({ alignment: Number.NaN, grid: 'neighbors' })],
+      }),
+      { neighborGrids: { neighbors } },
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_BOIDS_VALUE_INVALID' }),
+    );
+  });
+
+  it('asserts distance, iterations, and stiffness diagnostics for PBD', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        render: billboard({}),
+        spawn: burst({ count: 1 }),
+        update: [
+          pbdDistanceConstraint({
+            distance: 0,
+            grid: 'neighbors',
+            iterations: 0,
+            stiffness: 2,
+          }),
+        ],
+      }),
+      { neighborGrids: { neighbors } },
+    );
+    expect(program.diagnostics.map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'NACHI_PBD_DISTANCE_INVALID',
+        'NACHI_PBD_ITERATIONS_INVALID',
+        'NACHI_PBD_STIFFNESS_INVALID',
+      ]),
     );
   });
 });

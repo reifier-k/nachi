@@ -125,6 +125,10 @@ record; do not add another timestamp resolver or infer GPU time from CPU duratio
 correctness renderers timestamp-free and use a separate short perf capture when dispatch counts are
 large.
 
+The v1 perf record's GPU fields are a single latest timestamp per scope: there is no GPU warm-up
+window, sample count, or median. Treat them as smoke/baseline observations only. FA performance
+budgets must use multiple warmed samples and a robust aggregate such as the median.
+
 M12 effect JSON is owned by `@nachi/format`. The v1 envelope is exactly
 `{ format: 'nachi-effect', version: 1, effect }`. Keep format-owned structures strict and
 path-diagnostic, while leaving registered module `config` fields to their module-version validator.

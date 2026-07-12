@@ -57,6 +57,20 @@ const ATTRIBUTE_TYPES = new Set<AttributeType>([
 ]);
 const MODULE_STAGES = new Set(['event', 'init', 'render', 'spawn', 'update']);
 const MAX_JSON_DEPTH = 256;
+const GRID2D_BUILTIN_STAGE_SOURCES = new Set([
+  'core/grid2d-advect',
+  'core/grid2d-buoyancy',
+  'core/grid2d-inject',
+  'core/grid2d-pressure-jacobi',
+  'core/grid2d-project-velocity',
+]);
+const GRID3D_BUILTIN_STAGE_SOURCES = new Set([
+  'core/grid3d-advect',
+  'core/grid3d-buoyancy',
+  'core/grid3d-inject',
+  'core/grid3d-pressure-jacobi',
+  'core/grid3d-project-velocity',
+]);
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -1212,10 +1226,55 @@ function parseInput(input: unknown): unknown {
   }
 }
 
-export function validateEffectAsset(input: unknown): readonly VfxDiagnostic[] {
+function gridStageSourceDiagnostics(
+  input: unknown,
+  options: LoadEffectOptions,
+): readonly VfxDiagnostic[] {
+  if (!isRecord(input) || !isRecord(input.effect) || !isRecord(input.effect.elements)) return [];
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const [key, element] of Object.entries(input.effect.elements)) {
+    if (!isRecord(element) || element.kind !== 'sim-stage' || !isRecord(element.update)) continue;
+    const source = element.update.source;
+    const path = `$.effect.elements.${key}.update.source`;
+    const isGrid3D = element.update.kind === 'grid3d-stage-module';
+    if (typeof source === 'string') {
+      const builtins = isGrid3D ? GRID3D_BUILTIN_STAGE_SOURCES : GRID2D_BUILTIN_STAGE_SOURCES;
+      if (source !== 'inline' && !builtins.has(source)) {
+        pushDiagnostic(
+          diagnostics,
+          'deserialize',
+          'NACHI_ASSET_GRID_STAGE_SOURCE_UNKNOWN',
+          `Unknown ${isGrid3D ? 'Grid3D' : 'Grid2D'} built-in stage source "${source}".`,
+          path,
+        );
+      }
+      continue;
+    }
+    if (!isRecord(source)) continue;
+    const registry = isGrid3D ? options.grid3DStageRegistry : options.grid2DStageRegistry;
+    const resolved = isGrid3D
+      ? options.grid3DStageRegistry?.resolve(source as never)
+      : options.grid2DStageRegistry?.resolve(source as never);
+    if (!registry || resolved === undefined) {
+      pushDiagnostic(
+        diagnostics,
+        'deserialize',
+        'NACHI_ASSET_GRID_STAGE_FUNCTION_UNRESOLVED',
+        `${isGrid3D ? 'Grid3D' : 'Grid2D'} stage function "${String(source.id)}@${String(source.version)}" is not registered.`,
+        path,
+      );
+    }
+  }
+  return diagnostics;
+}
+
+export function validateEffectAsset(
+  input: unknown,
+  options: LoadEffectOptions = {},
+): readonly VfxDiagnostic[] {
   const validator = new AssetValidator('deserialize');
   validator.document(input);
-  return validator.diagnostics;
+  return [...validator.diagnostics, ...gridStageSourceDiagnostics(input, options)];
 }
 
 export function serializeEffect<
@@ -1243,7 +1302,8 @@ function migratedDocument(input: unknown, options: LoadEffectOptions): UnknownRe
   );
   const validator = new AssetValidator('deserialize');
   validator.document(migrated);
-  if (validator.diagnostics.length > 0) throw new VfxDiagnosticError(validator.diagnostics);
+  const diagnostics = [...validator.diagnostics, ...gridStageSourceDiagnostics(migrated, options)];
+  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   return jsonClone(migrated) as UnknownRecord;
 }
 

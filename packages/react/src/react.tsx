@@ -31,6 +31,8 @@ export interface VFXSystemProviderProps {
   readonly options?: VfxSystemOptions;
   readonly renderer: VfxRuntimeRenderer;
   readonly scene?: Object3D;
+  /** Copies the active R3F camera and pixel viewport into core before every update. */
+  readonly syncCamera?: boolean;
 }
 
 /**
@@ -42,6 +44,7 @@ export function VFXSystemProvider({
   options,
   renderer,
   scene: sceneOverride,
+  syncCamera = true,
 }: VFXSystemProviderProps): ReactNode {
   const r3fScene = useThree((state) => state.scene);
   const scene = sceneOverride ?? r3fScene;
@@ -51,7 +54,14 @@ export function VFXSystemProvider({
   );
   const [updateError, setUpdateError] = useState<unknown>();
 
-  useFrame((_state, delta) => {
+  useFrame((state, delta) => {
+    if (syncCamera) {
+      system.setCamera({
+        projectionMatrix: state.camera.projectionMatrix.elements,
+        viewMatrix: state.camera.matrixWorldInverse.elements,
+        viewportSize: [state.size.width, state.size.height],
+      });
+    }
     void system.update(delta).catch((error: unknown) => setUpdateError(error));
   });
 
@@ -147,7 +157,7 @@ export function useEffectInstance<
       ...(options.timeScale === undefined ? {} : { timeScale: options.timeScale }),
     } as EffectSpawnOptions<Definition>;
     const next = system.spawn(definition, spawnOptions);
-    if (attachment) next.attachTo(attachment);
+    if (attachment && next.state !== 'error') next.attachTo(attachment);
     instanceRef.current = next;
     committedParameters.current =
       next.state === 'error'
@@ -158,7 +168,7 @@ export function useEffectInstance<
           );
     setInstance(next);
     return () => {
-      if (next.state !== 'released') next.detach();
+      if (next.state !== 'error' && next.state !== 'released') next.detach();
       next.release();
       if (instanceRef.current === next) instanceRef.current = null;
     };
@@ -183,23 +193,29 @@ export function useEffectInstance<
 
   useEffect(() => {
     const current = instanceRef.current;
-    if (current && options.timeScale !== undefined) current.setTimeScale(options.timeScale);
+    if (current && current.state !== 'error' && options.timeScale !== undefined) {
+      current.setTimeScale(options.timeScale);
+    }
   }, [definition, options.priority, options.seed, options.timeScale, system]);
 
   useEffect(() => {
     const current = instanceRef.current;
-    if (current && (options.position !== undefined || options.rotation !== undefined)) {
+    if (
+      current &&
+      current.state !== 'error' &&
+      (options.position !== undefined || options.rotation !== undefined)
+    ) {
       current.setTransform(options.position ?? [0, 0, 0], options.rotation);
     }
   }, [definition, options.position, options.priority, options.rotation, options.seed, system]);
 
   useEffect(() => {
     const current = instanceRef.current;
-    if (!current) return;
+    if (!current || current.state === 'error') return;
     if (attachment) current.attachTo(attachment);
     else current.detach();
     return () => {
-      if (current.state !== 'released') current.detach();
+      if (current.state !== 'error' && current.state !== 'released') current.detach();
     };
   }, [attachment, definition, options.priority, options.seed, system]);
 

@@ -1,15 +1,35 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  VfxDiagnosticError,
   NEIGHBOR_GRID_EMPTY_SLOT,
   bucketNeighborGridPoints,
   defineNeighborGrid,
   enumerateNeighborGridCells,
   neighborGridCellIndex,
   neighborGridPositionCell,
+  validateNeighborGridDefinition,
 } from '../src/index.js';
 
 describe('M12 NeighborGrid CPU mirrors', () => {
+  it.each([
+    ['NACHI_NEIGHBOR_GRID_RESOLUTION_INVALID', { resolution: [0, 2, 2] }],
+    ['NACHI_NEIGHBOR_GRID_CELL_CAPACITY_INVALID', { cellCapacity: 0 }],
+    ['NACHI_NEIGHBOR_GRID_CELL_SIZE_INVALID', { cellSize: 0 }],
+    ['NACHI_NEIGHBOR_GRID_ORIGIN_INVALID', { origin: [0, Number.NaN, 0] }],
+  ] as const)('asserts %s for its invalid definition field', (code, override) => {
+    const definition = { ...defineNeighborGrid({ resolution: [2, 2, 2] }), ...override } as never;
+    try {
+      validateNeighborGridDefinition(definition);
+      throw new Error('expected NeighborGrid validation to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(VfxDiagnosticError);
+      expect(error instanceof VfxDiagnosticError ? error.diagnostics : []).toContainEqual(
+        expect.objectContaining({ code }),
+      );
+    }
+  });
+
   it('uses x-fast hashing and maps world positions through origin/cellSize', () => {
     const grid = defineNeighborGrid({
       cellSize: 0.5,

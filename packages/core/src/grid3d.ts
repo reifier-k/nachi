@@ -23,6 +23,7 @@ import type {
 
 export const GRID3D_WORKGROUP_SIZE = 64;
 export const GRID3D_FIXED_POINT_SCALE = 4096;
+const MAX_U32 = 0xffff_ffff;
 
 export interface Grid3DStageContext {
   readonly cell: readonly [KernelNode, KernelNode, KernelNode];
@@ -454,6 +455,14 @@ function buildStage(
         ];
   };
   const sample = (channel: string, cell: readonly [KernelNode, KernelNode, KernelNode]) => {
+    const layout = byName.get(channel);
+    if (!layout) {
+      return stageDiagnostic(
+        'NACHI_GRID3D_STAGE_CHANNEL_UNDECLARED',
+        `Grid3D channel "${channel}" is not declared.`,
+        `sample.${channel}`,
+      );
+    }
     const sx = cell[0].clamp(0, width - 1);
     const sy = cell[1].clamp(0, height - 1);
     const sz = cell[2].clamp(0, depth - 1);
@@ -479,9 +488,7 @@ function buildStage(
       const mixY = (cz: KernelNode) => mixX(y0, cz).mul(one.sub(ty)).add(mixX(y1, cz).mul(ty));
       return mixY(z0).mul(one.sub(tz)).add(mixY(z1).mul(tz));
     };
-    return byName.get(channel)!.components === 1
-      ? mixOne(0)
-      : ([mixOne(0), mixOne(1), mixOne(2)] as const);
+    return layout.components === 1 ? mixOne(0) : ([mixOne(0), mixOne(1), mixOne(2)] as const);
   };
   const customFactory = stageFactory(declaration.update, registry);
   const moduleConfig = declaration.update.config as Record<string, unknown>;
@@ -1052,6 +1059,11 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError('Particle rasterization value must be finite and non-negative.');
     }
+    if (value * GRID3D_FIXED_POINT_SCALE > MAX_U32) {
+      throw new RangeError(
+        'Particle rasterization value exceeds the Grid3D fixed-point u32 range.',
+      );
+    }
     this.#uploadParticles(points);
     this.#particleValue.value = value;
     await this.#renderer.flushStorageWrites?.();
@@ -1068,6 +1080,14 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
         `Particle sampling requires a scalar Grid3D channel; received "${channel}".`,
       );
     }
+    const invalidPoint = points.findIndex(
+      (point) => point.length !== 3 || point.some((component) => !Number.isFinite(component)),
+    );
+    if (invalidPoint >= 0) {
+      throw new RangeError(
+        `Grid3D particle point ${invalidPoint} must contain three finite coordinates.`,
+      );
+    }
     if (!this.#renderer.readStorage) {
       throw new Error('Grid3D particle sampling requires storage readback support.');
     }
@@ -1080,6 +1100,7 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
   }
 
   release(): void {
+    this.#initialized = false;
     this.#renderer.releaseStorage?.(this.#state);
     this.#renderer.releaseStorage?.(this.#scratch);
     this.#renderer.releaseStorage?.(this.#particleAtomic);
@@ -1093,6 +1114,13 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
       throw new RangeError(
         `Grid3D particle transfer supports at most ${capacity} points per call.`,
       );
+    }
+    for (const [index, point] of points.entries()) {
+      if (point.length !== 3 || point.some((component) => !Number.isFinite(component))) {
+        throw new RangeError(
+          `Grid3D particle point ${index} must contain three finite coordinates.`,
+        );
+      }
     }
     if (!this.#renderer.writeStorage) {
       throw new Error('Grid3D particle transfer requires renderer storage upload support.');

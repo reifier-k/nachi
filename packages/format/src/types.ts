@@ -2,6 +2,8 @@ import type {
   EffectDefinition,
   EffectElements,
   EmitterOverrideConfig,
+  Grid2DStageRegistry,
+  Grid3DStageRegistry,
   JsonValue,
   ParameterSchema,
   VfxAssetDocument,
@@ -31,6 +33,10 @@ export interface LoadEffectOptions {
   /** Stable identity used by local/external inheritance cycle diagnostics. Defaults to `$root`. */
   readonly assetId?: string;
   readonly migrations?: EffectAssetMigrationRegistryLike;
+  /** Registry used to resolve serialized Grid2D stage function references. */
+  readonly grid2DStageRegistry?: Pick<Grid2DStageRegistry, 'resolve'>;
+  /** Registry used to resolve serialized Grid3D stage function references. */
+  readonly grid3DStageRegistry?: Pick<Grid3DStageRegistry, 'resolve'>;
   /** Synchronous document resolver. External resources remain owned by the application. */
   readonly resolveAsset?: (assetId: string) => unknown;
 }

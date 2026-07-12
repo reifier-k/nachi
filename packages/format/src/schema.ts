@@ -1,6 +1,6 @@
 import { EFFECT_ASSET_FORMAT, EFFECT_ASSET_VERSION } from './types.js';
 
-/** Draft 2020-12 schema for the stable envelope and extensible declarative effect body. */
+/** Draft 2020-12 schema for the stable envelope and closed format-owned effect structures. */
 export const effectAssetSchemaV1 = {
   $id: 'https://nachi.dev/schema/effect-v1.json',
   $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -200,19 +200,246 @@ export const effectAssetSchemaV1 = {
       required: ['kind', 'version', 'target', 'phase', 'iterations', 'update'],
       type: 'object',
     },
+    attribute: {
+      additionalProperties: false,
+      properties: {
+        default: {},
+        kind: { const: 'attribute' },
+        name: { minLength: 1, type: 'string' },
+        transient: { type: 'boolean' },
+        type: {
+          enum: [
+            'bool',
+            'color',
+            'f32',
+            'i32',
+            'mat3',
+            'mat4',
+            'quat',
+            'u32',
+            'vec2',
+            'vec3',
+            'vec4',
+          ],
+        },
+      },
+      required: ['kind', 'name', 'type', 'default'],
+      type: 'object',
+    },
+    attributes: {
+      additionalProperties: { $ref: '#/$defs/attribute' },
+      type: 'object',
+    },
+    bounds: {
+      additionalProperties: false,
+      properties: {
+        center: { items: { type: 'number' }, maxItems: 3, minItems: 3, type: 'array' },
+        radius: { type: 'number' },
+      },
+      required: ['radius'],
+      type: 'object',
+    },
+    events: {
+      additionalProperties: { $ref: '#/$defs/moduleOrArray' },
+      type: 'object',
+    },
+    lifecycle: {
+      additionalProperties: false,
+      properties: {
+        duration: { type: 'number' },
+        loopCount: { oneOf: [{ const: 'infinite' }, { type: 'integer' }] },
+        prewarm: { type: 'number' },
+        startDelay: { type: 'number' },
+      },
+      type: 'object',
+    },
+    parameter: {
+      additionalProperties: false,
+      properties: {
+        default: {},
+        kind: { const: 'parameter-definition' },
+        mutable: { type: 'boolean' },
+        path: { pattern: '^User\\.', type: 'string' },
+        type: {
+          enum: [
+            'bool',
+            'color',
+            'f32',
+            'i32',
+            'mat3',
+            'mat4',
+            'quat',
+            'u32',
+            'vec2',
+            'vec3',
+            'vec4',
+          ],
+        },
+      },
+      required: ['kind', 'path', 'type', 'default'],
+      type: 'object',
+    },
+    parameters: {
+      additionalProperties: { $ref: '#/$defs/parameter' },
+      propertyNames: { pattern: '^User\\.' },
+      type: 'object',
+    },
+    qualityFeatures: {
+      additionalProperties: false,
+      properties: {
+        lit: { type: 'boolean' },
+        soft: { type: 'boolean' },
+        sorted: { type: 'boolean' },
+      },
+      type: 'object',
+    },
+    qualityTier: {
+      additionalProperties: false,
+      properties: {
+        capacityScale: { type: 'number' },
+        features: { $ref: '#/$defs/qualityFeatures' },
+        spawnRateScale: { type: 'number' },
+      },
+      type: 'object',
+    },
+    quality: {
+      additionalProperties: false,
+      properties: {
+        epic: { $ref: '#/$defs/qualityTier' },
+        high: { $ref: '#/$defs/qualityTier' },
+        low: { $ref: '#/$defs/qualityTier' },
+        medium: { $ref: '#/$defs/qualityTier' },
+      },
+      type: 'object',
+    },
+    moduleOverride: {
+      additionalProperties: false,
+      properties: {
+        mode: { enum: ['append', 'merge', 'replace'] },
+        modules: { items: { $ref: '#/$defs/module' }, type: 'array' },
+        order: { items: { oneOf: [{ type: 'string' }, { type: 'integer' }] }, type: 'array' },
+        remove: { items: { oneOf: [{ type: 'string' }, { type: 'integer' }] }, type: 'array' },
+      },
+      type: 'object',
+    },
+    emitterOverrides: {
+      additionalProperties: false,
+      properties: {
+        attributes: { $ref: '#/$defs/attributes' },
+        bounds: { $ref: '#/$defs/bounds' },
+        capacity: { minimum: 1, type: 'integer' },
+        events: { $ref: '#/$defs/events' },
+        init: { $ref: '#/$defs/moduleOverride' },
+        integration: { enum: ['euler', 'none'] },
+        lifecycle: { $ref: '#/$defs/lifecycle' },
+        parameters: { $ref: '#/$defs/parameters' },
+        quality: { $ref: '#/$defs/quality' },
+        render: { $ref: '#/$defs/moduleOverride' },
+        spawn: { $ref: '#/$defs/moduleOrArray' },
+        update: { $ref: '#/$defs/moduleOverride' },
+      },
+      type: 'object',
+    },
+    scalability: {
+      additionalProperties: false,
+      properties: {
+        culling: {
+          additionalProperties: false,
+          properties: {
+            distance: {
+              additionalProperties: false,
+              properties: { fadeEnd: { type: 'number' }, fadeStart: { type: 'number' } },
+              required: ['fadeEnd'],
+              type: 'object',
+            },
+            frustum: { type: 'boolean' },
+          },
+          type: 'object',
+        },
+        significance: {
+          additionalProperties: false,
+          properties: { priority: { type: 'number' } },
+          type: 'object',
+        },
+      },
+      type: 'object',
+    },
+    timelineAction: {
+      oneOf: [
+        {
+          additionalProperties: false,
+          properties: { kind: { enum: ['play', 'stop'] }, target: { type: 'string' } },
+          required: ['kind', 'target'],
+          type: 'object',
+        },
+        {
+          additionalProperties: false,
+          properties: {
+            duration: { type: 'number' },
+            frequency: { type: 'number' },
+            kind: { const: 'camera-shake' },
+            strength: { type: 'number' },
+          },
+          required: ['kind', 'strength'],
+          type: 'object',
+        },
+        {
+          additionalProperties: false,
+          properties: {
+            durationMs: { type: 'number' },
+            kind: { const: 'hit-stop' },
+            timeScale: { type: 'number' },
+          },
+          required: ['kind', 'durationMs'],
+          type: 'object',
+        },
+        {
+          additionalProperties: false,
+          properties: { kind: { const: 'marker' }, name: { type: 'string' }, payload: {} },
+          required: ['kind', 'name'],
+          type: 'object',
+        },
+      ],
+    },
+    timelineEntry: {
+      additionalProperties: false,
+      properties: {
+        actions: { items: { $ref: '#/$defs/timelineAction' }, type: 'array' },
+        at: { type: 'number' },
+      },
+      required: ['at', 'actions'],
+      type: 'object',
+    },
+    timeline: {
+      oneOf: [
+        { items: { $ref: '#/$defs/timelineEntry' }, type: 'array' },
+        {
+          additionalProperties: false,
+          properties: {
+            duration: { type: 'number' },
+            entries: { items: { $ref: '#/$defs/timelineEntry' }, type: 'array' },
+            kind: { const: 'timeline' },
+            loop: { oneOf: [{ type: 'boolean' }, { type: 'integer' }] },
+            speed: { type: 'number' },
+          },
+          required: ['kind', 'entries'],
+          type: 'object',
+        },
+      ],
+    },
     emitter: {
       additionalProperties: false,
       properties: {
-        attributes: { type: 'object' },
-        bounds: { type: 'object' },
+        attributes: { $ref: '#/$defs/attributes' },
+        bounds: { $ref: '#/$defs/bounds' },
         capacity: { minimum: 1, type: 'integer' },
-        events: { type: 'object' },
+        events: { $ref: '#/$defs/events' },
         init: { items: { $ref: '#/$defs/module' }, type: 'array' },
         integration: { enum: ['euler', 'none'] },
         kind: { const: 'emitter' },
-        lifecycle: { type: 'object' },
-        parameters: { type: 'object' },
-        quality: { type: 'object' },
+        lifecycle: { $ref: '#/$defs/lifecycle' },
+        parameters: { $ref: '#/$defs/parameters' },
+        quality: { $ref: '#/$defs/quality' },
         render: { $ref: '#/$defs/moduleOrArray' },
         spawn: { $ref: '#/$defs/moduleOrArray' },
         update: { items: { $ref: '#/$defs/module' }, type: 'array' },
@@ -225,7 +452,7 @@ export const effectAssetSchemaV1 = {
       properties: {
         extends: { pattern: '^[^#]*#[^#]+$', type: 'string' },
         kind: { const: 'emitter-extends' },
-        overrides: { type: 'object' },
+        overrides: { $ref: '#/$defs/emitterOverrides' },
       },
       required: ['kind', 'extends', 'overrides'],
       type: 'object',
@@ -278,9 +505,9 @@ export const effectAssetSchemaV1 = {
           type: 'object',
         },
         kind: { const: 'effect' },
-        parameters: { type: 'object' },
-        scalability: { type: 'object' },
-        timeline: { oneOf: [{ type: 'array' }, { type: 'object' }] },
+        parameters: { $ref: '#/$defs/parameters' },
+        scalability: { $ref: '#/$defs/scalability' },
+        timeline: { $ref: '#/$defs/timeline' },
       },
       required: ['kind', 'elements'],
       type: 'object',

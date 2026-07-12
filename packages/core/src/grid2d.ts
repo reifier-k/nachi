@@ -22,6 +22,7 @@ import type {
 
 export const GRID2D_WORKGROUP_SIZE = 64;
 export const GRID2D_FIXED_POINT_SCALE = 4096;
+const MAX_U32 = 0xffff_ffff;
 
 export interface Grid2DStageContext {
   readonly cell: readonly [KernelNode, KernelNode];
@@ -167,8 +168,16 @@ export function gridProjectVelocity(
 
 export function gridCellIndex(x: number, y: number, resolution: readonly [number, number]): number {
   const [width, height] = resolution;
-  if (!Number.isSafeInteger(width) || width <= 0 || !Number.isSafeInteger(height) || height <= 0) {
-    throw new RangeError('Grid2D resolution must contain positive safe integers.');
+  if (
+    !Number.isSafeInteger(width) ||
+    width <= 0 ||
+    !Number.isSafeInteger(height) ||
+    height <= 0 ||
+    !Number.isSafeInteger(width * height)
+  ) {
+    throw new RangeError(
+      'Grid2D resolution must contain positive safe integers with a safe product.',
+    );
   }
   if (
     !Number.isSafeInteger(x) ||
@@ -251,7 +260,15 @@ function diagnosticsForDefinition(definition: Grid2DDefinition): VfxDiagnostic[]
   if (!Number.isSafeInteger(width) || width <= 0 || !Number.isSafeInteger(height) || height <= 0) {
     diagnostics.push({
       code: 'NACHI_GRID2D_RESOLUTION_INVALID',
-      message: 'Grid2D resolution must contain two positive safe integers.',
+      message: 'Grid2D resolution must contain two positive safe integers with a safe product.',
+      path: 'resolution',
+      phase: 'compile',
+      severity: 'error',
+    });
+  } else if (!Number.isSafeInteger(width * height)) {
+    diagnostics.push({
+      code: 'NACHI_GRID2D_RESOLUTION_INVALID',
+      message: 'Grid2D resolution product exceeds the safe integer range.',
       path: 'resolution',
       phase: 'compile',
       severity: 'error',
@@ -405,6 +422,14 @@ function buildStage(
       : [lane(record, layout.offset), lane(record, layout.offset + 1)];
   };
   const sample = (channel: string, cell: readonly [KernelNode, KernelNode]) => {
+    const layout = byName.get(channel);
+    if (!layout) {
+      return stageDiagnostic(
+        'NACHI_GRID2D_STAGE_CHANNEL_UNDECLARED',
+        `Grid2D channel "${channel}" is not declared.`,
+        `sample.${channel}`,
+      );
+    }
     const sx = cell[0].clamp(0, width - 1);
     const sy = cell[1].clamp(0, height - 1);
     const x0f = adapter.floor(sx);
@@ -428,7 +453,7 @@ function buildStage(
         .add(componentAt(x1f, y1f).mul(tx));
       return a.mul(adapter.constant(1, 'f32').sub(ty)).add(b.mul(ty));
     };
-    return byName.get(channel)!.components === 1 ? mixOne(0) : ([mixOne(0), mixOne(1)] as const);
+    return layout.components === 1 ? mixOne(0) : ([mixOne(0), mixOne(1)] as const);
   };
   const customFactory = stageFactory(declaration.update, registry);
   const moduleConfig = declaration.update.config as Record<string, unknown>;
@@ -655,7 +680,8 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
     stages: readonly SimStageDefinition[],
     registry?: Grid2DStageRegistry,
   ) {
-    const diagnostics = diagnosticsForDefinition(definition);
+    const definitionDiagnostics = diagnosticsForDefinition(definition);
+    const diagnostics = [...definitionDiagnostics];
     if (renderer.kernelAdapter.capabilities.backend !== 'webgpu') {
       diagnostics.push({
         code: 'NACHI_GRID2D_WEBGL2_UNSUPPORTED',
@@ -665,6 +691,26 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
         phase: 'compile',
         severity: 'error',
       });
+    }
+    if (definitionDiagnostics.length === 0) {
+      const layouts = resolveGrid2DChannelLayout(definition);
+      const groups = Math.max(...layouts.map(({ group }) => group)) + 1;
+      const cells = definition.resolution[0] * definition.resolution[1];
+      const largestBuffer = Math.max(cells * groups * 16, cells * 8);
+      const limits = renderer.kernelAdapter.deviceLimits;
+      const activeLimits = [limits?.maxStorageBufferBindingSize, limits?.maxBufferSize].filter(
+        (value): value is number => value !== undefined,
+      );
+      const allocationLimit = activeLimits.length > 0 ? Math.min(...activeLimits) : undefined;
+      if (allocationLimit !== undefined && largestBuffer > allocationLimit) {
+        diagnostics.push({
+          code: 'NACHI_GRID2D_STORAGE_LIMIT_EXCEEDED',
+          message: `Grid2D requires a ${largestBuffer}-byte storage binding, exceeding the active device buffer limit ${allocationLimit}.`,
+          path: 'grid2d.resolution',
+          phase: 'compile',
+          severity: 'error',
+        });
+      }
     }
     for (const [index, stage] of stages.entries()) {
       if (!isGrid2DStage(stage)) {
@@ -928,6 +974,11 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError('Particle rasterization value must be finite and non-negative.');
     }
+    if (value * GRID2D_FIXED_POINT_SCALE > MAX_U32) {
+      throw new RangeError(
+        'Particle rasterization value exceeds the Grid2D fixed-point u32 range.',
+      );
+    }
     this.#uploadParticles(points);
     this.#particleValue.value = value;
     await this.#renderer.flushStorageWrites?.();
@@ -943,6 +994,14 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
       throw new RangeError(
         `Particle sampling requires a scalar Grid2D channel; received "${channel}".`,
       );
+    const invalidPoint = points.findIndex(
+      (point) => point.length !== 2 || point.some((component) => !Number.isFinite(component)),
+    );
+    if (invalidPoint >= 0) {
+      throw new RangeError(
+        `Grid2D particle point ${invalidPoint} must contain two finite coordinates.`,
+      );
+    }
     if (!this.#renderer.readStorage)
       throw new Error('Grid2D particle sampling requires storage readback support.');
     this.#uploadParticles(points);
@@ -954,6 +1013,7 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
   }
 
   release(): void {
+    this.#initialized = false;
     this.#renderer.releaseStorage?.(this.#state);
     this.#renderer.releaseStorage?.(this.#scratch);
     this.#renderer.releaseStorage?.(this.#particleAtomic);
@@ -967,6 +1027,11 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
       throw new RangeError(
         `Grid2D particle transfer supports at most ${capacity} points per call.`,
       );
+    for (const [index, point] of points.entries()) {
+      if (point.length !== 2 || point.some((component) => !Number.isFinite(component))) {
+        throw new RangeError(`Grid2D particle point ${index} must contain two finite coordinates.`);
+      }
+    }
     if (!this.#renderer.writeStorage)
       throw new Error('Grid2D particle transfer requires renderer storage upload support.');
     const data = new Float32Array(capacity * 2);

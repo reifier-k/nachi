@@ -29,6 +29,8 @@ import {
   grid3DAdvect,
   grid3DInject,
   grid3DTslModule,
+  Grid2DStageRegistry,
+  Grid3DStageRegistry,
   hitStop,
   lifetime,
   lightIntensity,
@@ -54,6 +56,7 @@ import {
   effectAssetSchemaV1,
   loadEffect,
   serializeEffect,
+  validateEffectAsset,
 } from '../src/index.js';
 
 const texture = (uri: string): TextureRef => ({ assetType: 'texture', kind: 'asset-ref', uri });
@@ -184,6 +187,51 @@ describe('effect asset v1', () => {
     const document = serializeEffect(representativeEffect());
     expect(effectAssetSchemaV1.properties.format.const).toBe('nachi-effect');
     expect(effectAssetSchemaV1.properties.version.const).toBe(1);
+    expect(effectAssetSchemaV1.$defs.emitter.properties.attributes).toEqual({
+      $ref: '#/$defs/attributes',
+    });
+    expect(effectAssetSchemaV1.$defs.emitter.properties.bounds).toEqual({
+      $ref: '#/$defs/bounds',
+    });
+    expect(effectAssetSchemaV1.$defs.emitter.properties.events).toEqual({
+      $ref: '#/$defs/events',
+    });
+    expect(effectAssetSchemaV1.$defs.emitter.properties.lifecycle).toEqual({
+      $ref: '#/$defs/lifecycle',
+    });
+    expect(effectAssetSchemaV1.$defs.emitter.properties.parameters).toEqual({
+      $ref: '#/$defs/parameters',
+    });
+    expect(effectAssetSchemaV1.$defs.emitter.properties.quality).toEqual({
+      $ref: '#/$defs/quality',
+    });
+    expect(effectAssetSchemaV1.$defs.emitterExtension.properties.overrides).toEqual({
+      $ref: '#/$defs/emitterOverrides',
+    });
+    expect(effectAssetSchemaV1.properties.effect.properties.parameters).toEqual({
+      $ref: '#/$defs/parameters',
+    });
+    expect(effectAssetSchemaV1.properties.effect.properties.scalability).toEqual({
+      $ref: '#/$defs/scalability',
+    });
+    expect(effectAssetSchemaV1.properties.effect.properties.timeline).toEqual({
+      $ref: '#/$defs/timeline',
+    });
+    for (const name of [
+      'attribute',
+      'bounds',
+      'lifecycle',
+      'parameter',
+      'quality',
+      'qualityFeatures',
+      'qualityTier',
+      'emitterOverrides',
+      'moduleOverride',
+      'scalability',
+      'timelineEntry',
+    ] as const) {
+      expect(effectAssetSchemaV1.$defs[name].additionalProperties).toBe(false);
+    }
     expect(loadEffect(document)).toEqual(document.effect);
   });
 
@@ -601,7 +649,38 @@ describe('asset-reference emitter inheritance', () => {
       },
     });
     const document = serializeEffect(effect);
-    expect(serializeEffect(loadEffect(document))).toEqual(document);
+    expect(diagnosticCodes(() => loadEffect(document))).toContain(
+      'NACHI_ASSET_GRID_STAGE_FUNCTION_UNRESOLVED',
+    );
+    expect(
+      serializeEffect(
+        loadEffect(document, {
+          grid2DStageRegistry: new Grid2DStageRegistry().register(registered),
+        }),
+      ),
+    ).toEqual(document);
+  });
+
+  it('rejects unknown built-in grid stage sources during validation and load', () => {
+    const document = serializeEffect(
+      defineEffect({
+        elements: {
+          fluid: defineGrid2D({ channels: { density: { type: 'f32' } }, resolution: [2, 2] }),
+          update: defineSimStage({ target: 'fluid', update: gridAdvect() }),
+        },
+      }),
+    );
+    const invalid = structuredClone(document);
+    const effect = invalid.effect as unknown as {
+      elements: { update: { update: { source: string } } };
+    };
+    effect.elements.update.update.source = 'core/grid2d-typo';
+    expect(validateEffectAsset(invalid)).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ASSET_GRID_STAGE_SOURCE_UNKNOWN' }),
+    );
+    expect(diagnosticCodes(() => loadEffect(invalid))).toContain(
+      'NACHI_ASSET_GRID_STAGE_SOURCE_UNKNOWN',
+    );
   });
 
   it('rejects inline Grid2D TSL while preserving the registered declarative subset', () => {
@@ -648,7 +727,13 @@ describe('asset-reference emitter inheritance', () => {
       },
     });
     const document = serializeEffect(effect);
-    expect(serializeEffect(loadEffect(document))).toEqual(document);
+    expect(
+      serializeEffect(
+        loadEffect(document, {
+          grid3DStageRegistry: new Grid3DStageRegistry().register(registered),
+        }),
+      ),
+    ).toEqual(document);
   });
 
   it('round-trips NeighborGrid declarations and built-in boids references', () => {

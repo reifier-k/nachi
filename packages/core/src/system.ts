@@ -562,6 +562,10 @@ class NeighborGridRuntime implements NeighborGridRuntimeView {
     this.#submissionCount += 1;
   }
 
+  release(): void {
+    this.#initialized = false;
+  }
+
   async capture(): Promise<NeighborGridSnapshot> {
     if (!this.renderer.readStorage) {
       throw new Error('NeighborGrid capture requires renderer storage readback support.');
@@ -1583,6 +1587,9 @@ export class VfxEffectInstance<
   readonly #grids = new Map<string, Grid2DRuntime>();
   readonly #grids3D = new Map<string, Grid3DRuntime>();
   readonly #neighborGrids = new Map<string, NeighborGridRuntime>();
+  readonly #gridViews = new Map<string, Grid2DRuntimeView>();
+  readonly #grid3DViews = new Map<string, Grid3DRuntimeView>();
+  readonly #neighborGridViews = new Map<string, NeighborGridRuntimeView>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
   readonly #now: () => number;
@@ -1663,29 +1670,77 @@ export class VfxEffectInstance<
 
   addGrid2D(key: string, grid: Grid2DRuntime): void {
     this.#grids.set(key, grid);
+    const schedule = this.#scheduleCapture;
+    this.#gridViews.set(key, {
+      capture: () => schedule(() => grid.capture()),
+      get definition() {
+        return grid.definition;
+      },
+      get initialized() {
+        return grid.initialized;
+      },
+      rasterizeParticles: (points, channel, value) =>
+        schedule(() => grid.rasterizeParticles(points, channel, value)),
+      sampleParticles: (points, channel) => schedule(() => grid.sampleParticles(points, channel)),
+      get submissionCount() {
+        return grid.submissionCount;
+      },
+    });
   }
 
   addGrid3D(key: string, grid: Grid3DRuntime): void {
     this.#grids3D.set(key, grid);
+    const schedule = this.#scheduleCapture;
+    this.#grid3DViews.set(key, {
+      capture: () => schedule(() => grid.capture()),
+      get definition() {
+        return grid.definition;
+      },
+      get initialized() {
+        return grid.initialized;
+      },
+      get memoryEstimate() {
+        return grid.memoryEstimate;
+      },
+      rasterizeParticles: (points, channel, value) =>
+        schedule(() => grid.rasterizeParticles(points, channel, value)),
+      sampleParticles: (points, channel) => schedule(() => grid.sampleParticles(points, channel)),
+      get submissionCount() {
+        return grid.submissionCount;
+      },
+    });
   }
 
   addNeighborGrid(key: string, grid: NeighborGridRuntime): void {
     this.#neighborGrids.set(key, grid);
+    const schedule = this.#scheduleCapture;
+    this.#neighborGridViews.set(key, {
+      capture: () => schedule(() => grid.capture()),
+      get definition() {
+        return grid.definition;
+      },
+      get initialized() {
+        return grid.initialized;
+      },
+      get submissionCount() {
+        return grid.submissionCount;
+      },
+    });
   }
 
   getGrid2D(key: string): Grid2DRuntimeView | undefined {
     this.#assertNotReleased();
-    return this.#grids.get(key);
+    return this.#gridViews.get(key);
   }
 
   getGrid3D(key: string): Grid3DRuntimeView | undefined {
     this.#assertNotReleased();
-    return this.#grids3D.get(key);
+    return this.#grid3DViews.get(key);
   }
 
   getNeighborGrid(key: string): NeighborGridRuntimeView | undefined {
     this.#assertNotReleased();
-    return this.#neighborGrids.get(key);
+    return this.#neighborGridViews.get(key);
   }
 
   get boundingSphere(): BoundingSphere {
@@ -1875,9 +1930,13 @@ export class VfxEffectInstance<
   releaseGrid2D(): void {
     for (const grid of this.#grids.values()) grid.release();
     this.#grids.clear();
+    this.#gridViews.clear();
     for (const grid of this.#grids3D.values()) grid.release();
     this.#grids3D.clear();
+    this.#grid3DViews.clear();
+    for (const grid of this.#neighborGrids.values()) grid.release();
     this.#neighborGrids.clear();
+    this.#neighborGridViews.clear();
   }
 
   setParameter<Path extends UserParameterKeys<Definition>>(

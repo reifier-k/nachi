@@ -23,13 +23,24 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { Object3D, Scene } from 'three';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+
 const r3f = vi.hoisted(() => ({
-  frames: new Set<(state: unknown, delta: number) => void>(),
+  frames: new Set<(state: R3FFrameState, delta: number) => void>(),
   scene: undefined as unknown,
 }));
 
+type R3FFrameState = {
+  camera: {
+    matrixWorldInverse: { elements: readonly number[] };
+    projectionMatrix: { elements: readonly number[] };
+  };
+  size: { height: number; width: number };
+};
+
 vi.mock('@react-three/fiber', () => ({
-  useFrame: (callback: (state: unknown, delta: number) => void) => {
+  useFrame: (callback: (state: R3FFrameState, delta: number) => void) => {
     r3f.frames.add(callback);
   },
   useThree: (selector: (state: { scene: unknown }) => unknown) => selector({ scene: r3f.scene }),
@@ -266,6 +277,14 @@ const immutableDefinition = defineEffect({
 
 const SYSTEM_OPTIONS = { maxPoolSize: 0 } as const;
 
+const IDENTITY_FRAME_STATE: R3FFrameState = {
+  camera: {
+    matrixWorldInverse: { elements: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+    projectionMatrix: { elements: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+  },
+  size: { height: 360, width: 640 },
+};
+
 describe('@nachi/react lifecycle', () => {
   beforeEach(() => {
     r3f.frames.clear();
@@ -306,7 +325,7 @@ describe('@nachi/react lifecycle', () => {
     expect(r3f.frames.size).toBe(1);
 
     await act(async () => {
-      for (const frame of r3f.frames) frame({}, 1 / 60);
+      for (const frame of r3f.frames) frame(IDENTITY_FRAME_STATE, 1 / 60);
       await Promise.resolve();
     });
     expect(renderer.submissions).toContain('NachiEmitterUpdate');
@@ -322,7 +341,7 @@ describe('@nachi/react lifecycle', () => {
     target.position.x = 7;
     renderer.uniformWrites.length = 0;
     await act(async () => {
-      for (const frame of r3f.frames) frame({}, 1 / 60);
+      for (const frame of r3f.frames) frame(IDENTITY_FRAME_STATE, 1 / 60);
       await Promise.resolve();
     });
     expect(renderer.uniformWrites.some(({ path }) => path === 'Emitter.transform')).toBe(true);
@@ -360,6 +379,99 @@ describe('@nachi/react lifecycle', () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it('keeps an error-state instance stable when every live prop path is present', async () => {
+    const target = new Object3D();
+    let observedState: string | undefined;
+    let root: ReactTestRenderer;
+
+    function Tree({ changed = false }: { changed?: boolean }) {
+      return (
+        <VFXSystemProvider renderer={{} as VfxRuntimeRenderer} options={SYSTEM_OPTIONS}>
+          <VFXEffect
+            attachTo={target}
+            definition={immutableDefinition}
+            onInstance={(instance) => {
+              observedState = instance?.state;
+            }}
+            parameters={{ 'User.variant': changed ? 3 : 2 }}
+            position={changed ? [4, 5, 6] : [1, 2, 3]}
+            rotation={changed ? [0.4, 0.5, 0.6] : [0.1, 0.2, 0.3]}
+            timeScale={changed ? 0.5 : 2}
+          />
+        </VFXSystemProvider>
+      );
+    }
+
+    await act(async () => {
+      root = create(<Tree />);
+    });
+    expect(observedState).toBe('error');
+    await act(async () => {
+      root.update(<Tree changed />);
+    });
+    expect(root!.toJSON()).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it('copies the R3F camera matrices and pixel viewport before each update unless disabled', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    let system: ReturnType<typeof useVFXSystem> | undefined;
+    const projectionMatrix = Array.from({ length: 16 }, (_, index) => index + 1);
+    const viewMatrix = Array.from({ length: 16 }, (_, index) => 32 - index);
+
+    function Probe(): null {
+      system = useVFXSystem();
+      return null;
+    }
+
+    let root: ReactTestRenderer;
+    await act(async () => {
+      root = create(
+        <VFXSystemProvider renderer={renderer} options={SYSTEM_OPTIONS}>
+          <Probe />
+        </VFXSystemProvider>,
+      );
+    });
+    const setCamera = vi.spyOn(system!, 'setCamera');
+    await act(async () => {
+      for (const frame of r3f.frames) {
+        frame(
+          {
+            camera: {
+              matrixWorldInverse: { elements: viewMatrix },
+              projectionMatrix: { elements: projectionMatrix },
+            },
+            size: { height: 720, width: 1280 },
+          },
+          1 / 60,
+        );
+      }
+      await Promise.resolve();
+    });
+    expect(setCamera).toHaveBeenCalledWith({
+      projectionMatrix,
+      viewMatrix,
+      viewportSize: [1280, 720],
+    });
+
+    await act(async () => root.unmount());
+    r3f.frames.clear();
+    await act(async () => {
+      root = create(
+        <VFXSystemProvider renderer={renderer} options={SYSTEM_OPTIONS} syncCamera={false}>
+          <Probe />
+        </VFXSystemProvider>,
+      );
+    });
+    const manuallyManagedSetCamera = vi.spyOn(system!, 'setCamera');
+    await act(async () => {
+      for (const frame of r3f.frames) frame(IDENTITY_FRAME_STATE, 1 / 60);
+      await Promise.resolve();
+    });
+    expect(manuallyManagedSetCamera).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
   });
 
   it('notifies an inline onInstance callback only when the instance changes', async () => {
