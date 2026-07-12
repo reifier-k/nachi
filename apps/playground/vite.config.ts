@@ -50,6 +50,7 @@ export default defineConfig({
         m12Neighbors: 'm12-neighbors/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
+        wuwaSlash: 'wuwa-slash/index.html',
       },
     },
   },
