@@ -408,10 +408,6 @@ function createSanctuaryBloom(textures: EffectTextures, loop: boolean) {
       velocityCone({ angle: 40, direction: [0, 1, 0], speed: range(1.4, 3.0) }),
       lifetime(range(0.9, 1.5)),
     ],
-    // Multi-cycle bursts require an explicit lifecycle duration covering the
-    // spawn envelope; the default duration completes the emitter immediately
-    // and later cycles never fire.
-    lifecycle: { duration: 1.3 },
     render: billboard({ blending: 'additive', map: GLOW_REF }),
     spawn: burst({ count: 34, cycles: 10, interval: 0.14 }),
     update: [

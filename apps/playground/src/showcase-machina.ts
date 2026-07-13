@@ -1370,13 +1370,10 @@ async function runHeadless(
     // A tiny readback every frame keeps the async readback path drained; a
     // full-size capture after many readback-free frames returns empty pixels.
     await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
-    // This page submits many more compute passes per frame than the smaller
-    // spikes (two systems x four substeps), so resolve more often than every
-    // six frames or the timestamp query pool overflows and warns.
-    if (frame % 3 === 2) {
-      await renderer.resolveTimestampsAsync('compute');
-      await renderer.resolveTimestampsAsync('render');
-    }
+    // Derived burst envelopes overlap heavily during the barrage. Drain both timestamp scopes
+    // every frame so the page-local compute query pool cannot accumulate enough entries to warn.
+    await renderer.resolveTimestampsAsync('compute');
+    await renderer.resolveTimestampsAsync('render');
     if (captureIndex < CAPTURE_TIMES.length && instance.localTime >= CAPTURE_TIMES[captureIndex]!) {
       captures.push(
         new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT)),

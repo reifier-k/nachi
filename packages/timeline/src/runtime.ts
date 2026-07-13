@@ -64,6 +64,7 @@ export interface TimelineActionEvent {
 
 export interface TimelineElementState {
   readonly aliveCount: number | undefined;
+  /** Element-local time; after completion this retains the final value for every element kind. */
   readonly localTime: number;
   readonly playing: boolean;
   readonly visible: boolean;
@@ -281,6 +282,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   readonly #cameraShakeTarget: CameraShakeTarget | undefined;
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #meshRuntimes = new Map<string, MeshRuntime>();
+  readonly #retiredEmitterStates = new Map<string, TimelineElementState>();
   readonly #parameters: Record<string, unknown>;
   readonly #scene: SceneTarget | undefined;
   readonly #seed: number;
@@ -394,6 +396,8 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     }
     const emitter = this.#activeEmitters.get(key);
     if (!emitter) {
+      const retired = this.#retiredEmitterStates.get(key);
+      if (retired) return retired;
       return key in this.definition.elements
         ? { aliveCount: undefined, localTime: 0, playing: false, visible: false }
         : undefined;
@@ -683,6 +687,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       return undefined;
     }
     this.#stopElement(key);
+    this.#retiredEmitterStates.delete(key);
     const emitter = this.#spawnEmitter(key, {
       parameters: this.#parameters,
       seed: this.#seed,
@@ -714,6 +719,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     }
     const emitter = this.#activeEmitters.get(key);
     if (emitter) {
+      this.#retainEmitterState(key, emitter);
       emitter.stop();
       emitter.release();
       this.#activeEmitters.delete(key);
@@ -734,9 +740,21 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
         this.diagnostics.push(...emitter.diagnostics);
         this.#state = 'error';
       }
+      this.#retainEmitterState(key, emitter);
       emitter.release();
       this.#activeEmitters.delete(key);
     }
+  }
+
+  #retainEmitterState(key: string, emitter: VfxEffectInstance): void {
+    // Mesh runtimes retain their terminal elapsed value. Keep the emitter's terminal clock too so
+    // getElementState() has one completion contract instead of resetting only emitters to zero.
+    this.#retiredEmitterStates.set(key, {
+      aliveCount: undefined,
+      localTime: emitter.localTime,
+      playing: false,
+      visible: false,
+    });
   }
 
   #processCycleBoundary(): void {

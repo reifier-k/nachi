@@ -46,6 +46,7 @@ import {
   positionSphere,
   packedComponentIndex,
   rate,
+  range,
   resolvePackedAttributeAddress,
   replaySimulation,
   sortEmittersBackToFront,
@@ -2456,6 +2457,140 @@ describe('VFXSystem runtime scheduler', () => {
 
     expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(2);
     expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(2);
+  });
+
+  it('derives an omitted lifecycle from the full multi-cycle burst envelope', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 200,
+      init: [lifetime(range(0.3, 0.45))],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 40, cycles: 5, interval: 0.12 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }), {
+      seed: 0x007b_57c1,
+    });
+
+    await system.update(0);
+    for (let cycle = 1; cycle < 5; cycle += 1) await system.update(0.12);
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(5);
+    expect(instance.getEmitter('particles')).toMatchObject({ lifecycleState: 'active' });
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(
+      40,
+    );
+  });
+
+  it('derives the envelope for an explicitly empty lifecycle object', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 8,
+      init: [lifetime(1)],
+      integration: 'none',
+      lifecycle: {},
+      render: computeRender,
+      spawn: burst({ count: 1, cycles: 3, interval: 0.2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await system.update(0);
+    await system.update(0.2);
+    await system.update(0.2);
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(3);
+    expect(instance.getEmitter('particles')).toMatchObject({ lifecycleState: 'active' });
+  });
+
+  it('composes startDelay with a derived envelope for a partial lifecycle object', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 8,
+      init: [lifetime(1)],
+      integration: 'none',
+      lifecycle: { startDelay: 0.2 },
+      render: computeRender,
+      spawn: burst({ count: 1, cycles: 3, interval: 0.2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await system.update(0);
+    await system.update(0.19);
+    expect(renderer.submissions).not.toContain('NachiEmitterSpawn');
+    expect(instance.getEmitter('particles')).toMatchObject({ lifecycleState: 'delayed' });
+
+    await system.update(0.01);
+    await system.update(0.2);
+    await system.update(0.2);
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(3);
+    expect(instance.getEmitter('particles')).toMatchObject({ lifecycleState: 'active' });
+  });
+
+  it('keeps an explicit numeric duration ahead of envelope derivation', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 8,
+      init: [lifetime(1)],
+      integration: 'none',
+      lifecycle: { duration: 0 },
+      render: computeRender,
+      spawn: burst({ count: 1, cycles: 3, interval: 0.2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await system.update(0);
+    await system.update(0.5);
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
+    expect(instance.getEmitter('particles')).toMatchObject({ lifecycleState: 'completed' });
+  });
+
+  it.each([
+    ['finite', 2 as const, 4, 1, 'completed' as const],
+    ['infinite', 'infinite' as const, 5, 2, 'active' as const],
+  ])(
+    'repeats the complete derived envelope for a %s loop count',
+    async (_name, loopCount, expectedSpawns, expectedLoopIndex, expectedState) => {
+      const renderer = new FakeRuntimeRenderer();
+      const system = new VFXSystem(renderer);
+      const emitter = defineEmitter({
+        capacity: 16,
+        init: [lifetime(0.05)],
+        integration: 'none',
+        lifecycle: { loopCount },
+        render: computeRender,
+        spawn: burst({ count: 1, cycles: 2, interval: 0.1 }),
+      });
+      const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+      await system.update(0);
+      await system.update(0.5);
+
+      expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(
+        expectedSpawns,
+      );
+      expect(instance.getEmitter('particles')).toMatchObject({
+        lifecycleState: expectedState,
+        loopIndex: expectedLoopIndex,
+        spawnGeneration: expectedLoopIndex,
+      });
+    },
+  );
+
+  it('still diagnoses a loop without an explicit or derived positive duration', () => {
+    expect(() =>
+      defineEmitter({
+        capacity: 1,
+        lifecycle: { loopCount: 2 },
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    ).toThrow(VfxDiagnosticError);
   });
 
   it('can complete from opt-in exact alive-count readback', async () => {

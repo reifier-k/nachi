@@ -92,7 +92,14 @@ function fakeChildInstance(
       state = 'stopped';
     },
   } as unknown as VfxEffectInstance;
-  return { advance: (delta: number) => clock.advance(delta), applyHitStop, child };
+  return {
+    advance: (delta: number) => clock.advance(delta),
+    applyHitStop,
+    child,
+    setState: (value: EffectInstanceState) => {
+      state = value;
+    },
+  };
 }
 
 describe('@nachi/timeline authoring', () => {
@@ -467,6 +474,53 @@ describe('@nachi/timeline runtime', () => {
     await system.update(0.03);
     expect(instance.localTime).toBeCloseTo(0.08, 10);
     expect(instance.getElementState('arc')).toMatchObject({ playing: false, visible: false });
+  });
+
+  it('retains the final localTime for both emitter and mesh elements after completion', async () => {
+    const child = defineEmitter({
+      capacity: 1,
+      init: [lifetime(0.05)],
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({
+      elements: { arc: mesh(0.05), child },
+      timeline: timeline([at(0, play('arc'), play('child'))], { duration: 0.05 }),
+    });
+    const fake = fakeChildInstance('active', [], { aliveCount: 7 } as NonNullable<
+      ReturnType<VfxEffectInstance['getEmitter']>
+    >);
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    const updateSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'update')
+      .mockImplementation((deltaSeconds) => {
+        fake.advance(deltaSeconds ?? 0);
+        if (fake.child.localTime >= 0.05) fake.setState('complete');
+        return Promise.resolve();
+      });
+    try {
+      const system = new VFXSystem({}, new THREE.Scene());
+      const instance = system.spawn(effect);
+
+      await system.update(0.05);
+
+      expect(instance.getElementState('arc')).toMatchObject({
+        localTime: 0.05,
+        playing: false,
+        visible: false,
+      });
+      expect(instance.getElementState('child')).toMatchObject({
+        aliveCount: undefined,
+        localTime: 0.05,
+        playing: false,
+        visible: false,
+      });
+    } finally {
+      updateSpy.mockRestore();
+      spawnSpy.mockRestore();
+    }
   });
 
   it('applies timeline speed and restarts element lifecycle at loop boundaries', async () => {

@@ -663,6 +663,11 @@ export interface EmitterConfig<
   readonly events?: Partial<Record<ParticleEventName, EventModule | readonly EventModule[]>>;
   readonly init?: readonly InitModule[];
   readonly integration?: EmitterIntegration;
+  /**
+   * Lifecycle settings. When `duration` is absent—whether this object is omitted or only partially
+   * authored—a multi-cycle burst derives its active duration from the complete cycle envelope plus
+   * statically known particle-lifetime grace. An explicit numeric `duration` always wins.
+   */
   readonly lifecycle?: EmitterLifecycle;
   readonly parameters?: Parameters;
   /** Serializable per-emitter overrides layered over Nachi's four system quality presets. */

@@ -719,6 +719,28 @@ function maximumLifetime(program: CompiledEmitterProgram, definition: EmitterDef
   return Math.max(0, maximum);
 }
 
+function defaultSpawnEnvelopeDuration(
+  program: CompiledEmitterProgram,
+  maximumParticleLifetime: number,
+): number {
+  let burstEnvelope = 0;
+  for (const module of program.spawn.modules) {
+    if (module.type !== 'core/burst') continue;
+    const { cycles = 1, interval } = module.config as {
+      readonly cycles?: number;
+      readonly interval?: number;
+    };
+    if (cycles <= 1 || interval === undefined) continue;
+    // Keep one complete interval after the last scheduled boundary, then keep emission active for
+    // the statically-known particle lifetime. Besides matching the authored cycles*interval
+    // envelope, this grace makes death/re-fire overlap explicit instead of completing into drain.
+    burstEnvelope = Math.max(burstEnvelope, cycles * interval);
+  }
+  if (burstEnvelope === 0) return 0;
+  const lifetimeGrace = Number.isFinite(maximumParticleLifetime) ? maximumParticleLifetime : 0;
+  return burstEnvelope + lifetimeGrace;
+}
+
 function vector3(input: PositionInput | undefined): readonly [number, number, number] {
   if (input === undefined) return [0, 0, 0];
   return 'x' in input ? [input.x, input.y, input.z] : input;
@@ -915,7 +937,16 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#aliveCountReadbackInterval = aliveCountReadbackInterval;
     this.#onDiagnostic = onDiagnostic;
     this.#onEventAggregate = onEventAggregate;
-    this.controller = new EmitterLifecycleController(definition.lifecycle);
+    // Missing duration opts into the derived multi-cycle burst envelope while every other authored
+    // lifecycle field composes normally. An explicit numeric duration always wins.
+    const lifecycle =
+      definition.lifecycle?.duration === undefined
+        ? {
+            ...(definition.lifecycle ?? {}),
+            duration: defaultSpawnEnvelopeDuration(program, maxLifetime),
+          }
+        : definition.lifecycle;
+    this.controller = new EmitterLifecycleController(lifecycle);
     this.kernels =
       reusedKernels ?? program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
     for (const [key, kernels] of Object.entries(this.kernels.neighborGrids)) {

@@ -9,6 +9,7 @@ import {
   gradient,
   lifetime,
   positionSphere,
+  range,
   velocityCone,
 } from '@nachi/core';
 import type { BillboardOptions, TextureRef, Vec4, VfxEmitterRuntimeView } from '@nachi/core';
@@ -525,6 +526,48 @@ async function run(): Promise<void> {
   const firstDeath = aliveHistory.findIndex((count) => count === 0);
   const respawned =
     firstDeath >= 0 && aliveHistory.slice(firstDeath + 1).some((count) => count > 0);
+
+  const burstCycleSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { stepSeconds: STEP },
+  });
+  const burstCycleInstance = burstCycleSystem.spawn(
+    defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 200,
+          init: [positionSphere({ radius: 0.65 }), lifetime(range(0.3, 0.45))],
+          integration: 'none',
+          render: billboard({}),
+          spawn: burst({ count: 40, cycles: 5, interval: 0.12 }),
+        }),
+      },
+    }),
+    { seed: 0x007b_57c1 },
+  ) as RuntimeInstance;
+  const burstCycleView = emitter(burstCycleInstance);
+  const burstCycleMesh = materializeThreeSpriteDraw(burstCycleView.program, burstCycleView.kernels);
+  await burstCycleSystem.update(0);
+  for (let frame = 0; frame < 30; frame += 1) await burstCycleSystem.update(STEP);
+  const burstCycleAlive = (await readLogicalAttribute(
+    renderer,
+    burstCycleView.program,
+    burstCycleView.kernels,
+    'alive',
+  )) as Uint32Array;
+  const burstCycleSpawnGeneration = (await readLogicalAttribute(
+    renderer,
+    burstCycleView.program,
+    burstCycleView.kernels,
+    'spawnGeneration',
+  )) as Uint32Array;
+  const burstCyclePhysicalAlive = [...burstCycleAlive].filter((value) => value !== 0).length;
+  const burstCycleSuccessfulBirths = [...burstCycleSpawnGeneration].reduce(
+    (total, generation) => total + generation,
+    0,
+  );
+  const burstCycleIndirectAlive = await indirectCount(renderer, burstCycleView);
+  const burstCyclePixels = comparePixels(await render(burstCycleMesh), baseline);
   const blendBrightness = Object.fromEntries(
     Object.entries(blendMetrics).map(([mode, metrics]) => [mode, metrics.meanForegroundBrightness]),
   );
@@ -536,6 +579,12 @@ async function run(): Promise<void> {
       Math.abs((blendBrightness.additive ?? 0) - (blendBrightness.alpha ?? 0)) > 2 &&
       Math.abs((blendBrightness.multiply ?? 0) - (blendBrightness.alpha ?? 0)) > 2 &&
       (blendMetrics.premultiplied?.foregroundPixelRatio ?? 0) > 0,
+    burstCycleDeathOverlap:
+      burstCycleSuccessfulBirths === 200 &&
+      burstCyclePhysicalAlive > 0 &&
+      burstCyclePhysicalAlive < 200 &&
+      burstCycleIndirectAlive === burstCyclePhysicalAlive &&
+      burstCyclePixels.foregroundPixelRatio > 0.01,
     cutoutShape:
       cutoutGeometry?.shape === 'cutout' &&
       cutoutGeometry.vertexCount === 6 &&
@@ -589,6 +638,12 @@ async function run(): Promise<void> {
   const result = {
     aliveHistory,
     blendMetrics,
+    burstCycleDeathOverlap: {
+      foreground: burstCyclePixels,
+      indirectAlive: burstCycleIndirectAlive,
+      physicalAlive: burstCyclePhysicalAlive,
+      successfulBirths: burstCycleSuccessfulBirths,
+    },
     cutout: {
       centerDifference: cutoutCenterDifference,
       draw: cutoutGeometry,
