@@ -353,6 +353,14 @@ async function run(): Promise<void> {
   const lightSystem = new VFXSystem(runtime, undefined, { fixedTimeStep: { stepSeconds: STEP } });
   const decalSystem = new VFXSystem(runtime, undefined, { fixedTimeStep: { stepSeconds: STEP } });
   const socket = new THREE.Object3D();
+  const trailStartAngle = -2.45;
+  const trailStart: Vec3 = [
+    Math.cos(trailStartAngle) * 1.55 - 0.25,
+    Math.sin(trailStartAngle) * 1.05 + 0.35,
+    0.16,
+  ];
+  socket.position.set(...trailStart);
+  socket.updateMatrixWorld(true);
   const trailInstance = trailSystem.spawn(defineEffect({ elements: { trail: trailDefinition } }), {
     seed: 7101,
   }) as RuntimeInstance;
@@ -376,7 +384,7 @@ async function run(): Promise<void> {
   await decalSystem.update(0);
   for (let frame = 0; frame < 48; frame += 1) {
     const t = frame / 47;
-    const angle = -2.45 + t * 2.65;
+    const angle = trailStartAngle + t * 2.65;
     socket.position.set(Math.cos(angle) * 1.55 - 0.25, Math.sin(angle) * 1.05 + 0.35, 0.16);
     socket.updateMatrixWorld(true);
     socketSamples.push(socket.position.toArray() as Vec3);
@@ -397,8 +405,15 @@ async function run(): Promise<void> {
   let ribbonFollowError = 0;
   for (let physical = 0; physical < 64; physical += 1) {
     if ((trailAlive[physical] ?? 0) === 0) continue;
-    const expected = socketSamples[Number(trailOrders[physical] ?? 0)];
-    if (!expected) continue;
+    const order = Number(trailOrders[physical] ?? 0);
+    const current = socketSamples[order];
+    const previous = order === 0 ? trailStart : socketSamples[order - 1];
+    if (!current || !previous) continue;
+    const expected: Vec3 = [
+      (current[0] + previous[0]) * 0.5,
+      (current[1] + previous[1]) * 0.5,
+      (current[2] + previous[2]) * 0.5,
+    ];
     ribbonFollowError = Math.max(
       ribbonFollowError,
       Math.hypot(

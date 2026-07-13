@@ -53,6 +53,7 @@ import {
   materializeThreeSpriteDraw,
 } from '@nachi/three';
 import { createPerformanceMonitor } from './perf';
+import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './wuwa-slash.css';
 
@@ -73,6 +74,7 @@ const CAPTURE_LABELS = [
   'afterglow · embers',
   'dissipation',
 ] as const;
+const TRAIL_SPACING_ERROR_BUDGET = 64 * 2 ** -23;
 const root = document.documentElement;
 const headless = new URLSearchParams(location.search).get('headless') === '1';
 const consoleMessages: string[] = [];
@@ -624,21 +626,13 @@ function sweepProgress(localTime: number, window: { start: number; end: number }
 function crescentA(p: number): Vec3 {
   const angle = 2.2 - p * 2.55;
   const radius = 1.62 - 0.3 * Math.sin(p * Math.PI);
-  return [
-    Math.cos(angle) * radius * 1.06,
-    Math.sin(angle) * radius * 0.62 + 0.1,
-    0.45 - 0.75 * p,
-  ];
+  return [Math.cos(angle) * radius * 1.06, Math.sin(angle) * radius * 0.62 + 0.1, 0.45 - 0.75 * p];
 }
 
 function crescentB(p: number): Vec3 {
   const angle = -2.75 + p * 2.4;
   const radius = 1.38 - 0.26 * Math.sin(p * Math.PI);
-  return [
-    Math.cos(angle) * radius * 0.98,
-    -Math.sin(angle) * radius * 0.5 + 0.02,
-    0.3 - 0.5 * p,
-  ];
+  return [Math.cos(angle) * radius * 0.98, -Math.sin(angle) * radius * 0.5 + 0.02, 0.3 - 0.5 * p];
 }
 
 function cameraState(camera: THREE.Camera, viewport: readonly [number, number]) {
@@ -735,8 +729,18 @@ async function run(): Promise<void> {
   trailSystem.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
   // Windows are wider than the sweep itself: the sweep runs on the timeline's
   // hit-stopped local clock while trail lifecycles run on world time.
-  const trailCyan = createTrailEffect(['#f4feff', '#7ce4ff', '#3a4cff00'], 0.24, SLASH_A.start, 0.3);
-  const trailGold = createTrailEffect(['#fff7d8', '#ffcf5e', '#d05a1a00'], 0.18, SLASH_B.start, 0.28);
+  const trailCyan = createTrailEffect(
+    ['#f4feff', '#7ce4ff', '#3a4cff00'],
+    0.24,
+    SLASH_A.start,
+    0.3,
+  );
+  const trailGold = createTrailEffect(
+    ['#fff7d8', '#ffcf5e', '#d05a1a00'],
+    0.18,
+    SLASH_B.start,
+    0.28,
+  );
   const socketA = new THREE.Object3D();
   const socketB = new THREE.Object3D();
   scene.add(socketA, socketB);
@@ -844,20 +848,14 @@ async function run(): Promise<void> {
 
   const localNow = () => instance.localTime % EFFECT_DURATION;
 
-  // Sub-stepping keeps distance-based trail spawning smooth: at 60 Hz a full
-  // sweep crosses half a world unit per frame and every particle spawned in
-  // one step lands on the same emitter transform.
-  const SUBSTEPS = 4;
   const step = async (delta: number) => {
-    for (let subStep = 0; subStep < SUBSTEPS; subStep += 1) {
-      const local = localNow();
-      socketA.position.set(...crescentA(sweepProgress(local, SLASH_A)));
-      socketB.position.set(...crescentB(sweepProgress(local, SLASH_B)));
-      socketA.updateMatrixWorld(true);
-      socketB.updateMatrixWorld(true);
-      await system.update(delta / SUBSTEPS);
-      await trailSystem.update(delta / SUBSTEPS);
-    }
+    const local = localNow();
+    socketA.position.set(...crescentA(sweepProgress(local, SLASH_A)));
+    socketB.position.set(...crescentB(sweepProgress(local, SLASH_B)));
+    socketA.updateMatrixWorld(true);
+    socketB.updateMatrixWorld(true);
+    await system.update(delta);
+    await trailSystem.update(delta);
     materializeNewDraws();
     for (const trail of trailRuntimes) {
       if (trail.draw) continue;
@@ -876,9 +874,7 @@ async function run(): Promise<void> {
       shockClone.scale.setScalar(scale);
     }
     if (latestShake) {
-      camera.position
-        .copy(cameraBasePosition)
-        .add(new THREE.Vector3(...latestShake.translation));
+      camera.position.copy(cameraBasePosition).add(new THREE.Vector3(...latestShake.translation));
       camera.rotation.set(
         cameraBaseRotation.x + latestShake.rotation[0],
         cameraBaseRotation.y + latestShake.rotation[1],
@@ -972,6 +968,7 @@ async function runHeadless(
     readonly instance: {
       readonly diagnostics: ReadonlyArray<{ readonly code: string }>;
       readonly state: string;
+      getEmitter(key: string): VfxEmitterRuntimeView | undefined;
     };
   }>,
   perfWindow: () => Promise<void>,
@@ -993,7 +990,7 @@ async function runHeadless(
   const captures: Uint8Array[] = [];
   const captureStates: Array<Record<string, unknown>> = [];
   let captureIndex = 0;
-  let trailSegments = { segmentCount: 0 };
+  let trailSegments = { maximumGap: Number.POSITIVE_INFINITY, segmentCount: 0 };
   await step(0);
   // The very first readback from a fresh render target returns empty pixels;
   // warm the readback path up before any measured capture.
@@ -1027,7 +1024,25 @@ async function runHeadless(
       const trailDraw = trails()[0]?.draw;
       if (trailDraw) {
         const sample = await readRibbonSegments(renderer, trailDraw);
-        if (sample.segmentCount > trailSegments.segmentCount) trailSegments = sample;
+        const trailView = trails()[0]?.instance.getEmitter('trail');
+        if (sample.segmentCount > trailSegments.segmentCount && trailView) {
+          const positions = await readLogicalAttribute(
+            renderer,
+            trailView.program,
+            trailView.kernels,
+            'position',
+          );
+          const gaps = Array.from({ length: sample.segmentCount }, (_, segment) => {
+            const from = sample.indices[segment * 4] ?? 0;
+            const to = sample.indices[segment * 4 + 1] ?? 0;
+            return Math.hypot(
+              (positions[to * 3] ?? 0) - (positions[from * 3] ?? 0),
+              (positions[to * 3 + 1] ?? 0) - (positions[from * 3 + 1] ?? 0),
+              (positions[to * 3 + 2] ?? 0) - (positions[from * 3 + 2] ?? 0),
+            );
+          });
+          trailSegments = { maximumGap: Math.max(0, ...gaps), segmentCount: sample.segmentCount };
+        }
       }
     }
   }
@@ -1077,6 +1092,9 @@ async function runHeadless(
       trailDiagnostics.length === 0 &&
       trails().every(({ instance: trail }) => trail.state !== 'error'),
     trailRendered: trailSegments.segmentCount > 20,
+    trailSpacingUniform:
+      trailSegments.segmentCount > 20 &&
+      trailSegments.maximumGap <= 1 / 22 + TRAIL_SPACING_ERROR_BUDGET * 2,
   };
   const result = {
     checks,
@@ -1088,7 +1106,8 @@ async function runHeadless(
       finalState: instance.state,
       panelStats,
       trailDiagnostics,
-      trailSegments: trailSegments.segmentCount,
+      trailSegments,
+      trailSpacingErrorBudget: TRAIL_SPACING_ERROR_BUDGET,
     },
     ok: Object.values(checks).every(Boolean),
     schema: 'nachi.wuwa-slash.v1',

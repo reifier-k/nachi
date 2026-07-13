@@ -700,21 +700,21 @@ export function rate(options: RateSpawnOptions | number): SpawnModule {
 export function perDistance(options: PerDistanceSpawnOptions | number): SpawnModule {
   const config = typeof options === 'number' ? { rate: options } : options;
   return createModule('spawn', 'core/per-distance', config, {
-    reads: ['Emitter.transform'],
+    reads: ['Emitter.previousTransform', 'Emitter.transform'],
     writes: ['Emitter.spawnCount'],
   });
 }
 
 export function positionSphere(options: PositionSphereOptions): InitModule {
   return createModule('init', 'core/position-sphere', options, {
-    reads: ['Emitter.transform', 'Emitter.seed', 'Particles.spawnGeneration'],
+    reads: ['Emitter.spawnInterpolatedTransform', 'Emitter.seed', 'Particles.spawnGeneration'],
     writes: ['Particles.position'],
   });
 }
 
 export function positionMeshSurface(options: PositionMeshSurfaceOptions): InitModule {
   return createModule('init', 'core/position-mesh-surface', options, {
-    reads: ['Emitter.seed', 'Emitter.transform', 'Particles.spawnGeneration'],
+    reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnGeneration'],
     writes: ['Particles.position', 'Particles.surfaceNormal'],
   });
 }

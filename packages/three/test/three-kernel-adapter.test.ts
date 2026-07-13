@@ -26,6 +26,8 @@ import {
   parseFga,
   positionSphere,
   positionMeshSurface,
+  perDistance,
+  rate,
   rotationOverLife,
   turbulence,
   tslModule,
@@ -64,6 +66,40 @@ import {
 } from '../src/index.js';
 
 describe('three kernel adapter', () => {
+  it.each([
+    ['rate', rate(600)],
+    ['per-distance', perDistance(20)],
+  ])('builds the interpolated %s spawn kernel with Three WGSLNodeBuilder', (_name, spawn) => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 16,
+        init: [positionSphere({ radius: 0 })],
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn,
+      }),
+    );
+    const kernels = program.buildKernels(createThreeKernelAdapter({ backend: 'webgpu' }));
+    const renderer = {
+      backend: {
+        capabilities: { getUniformBufferLimit: () => 64 },
+        compatibilityMode: false,
+      },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      hasFeature: () => false,
+    };
+    const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const builder = new NodeBuilder(kernels.spawn, renderer);
+
+    expect(() => builder.build()).not.toThrow();
+    expect(builder.computeShader).toContain('if (');
+  });
+
   it('keeps legacy positionSphere WGSL bit-identical and builds center/arc codegen', () => {
     const renderer = {
       backend: {

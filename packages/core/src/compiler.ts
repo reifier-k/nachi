@@ -465,6 +465,12 @@ export interface KernelTslAdapter {
   instancedArray(length: number, type: TslStorageType): KernelStorageNode;
   indirectArray(values: Uint32Array): KernelIndirectStorageNode;
   inverse(value: KernelNode): KernelNode;
+  mat4(
+    column0: KernelNodeInput,
+    column1: KernelNodeInput,
+    column2: KernelNodeInput,
+    column3: KernelNodeInput,
+  ): KernelNode;
   /** Optional structured GPU loop; NeighborGrid scans require this on WebGPU. */
   loop?(
     range: {
@@ -924,9 +930,12 @@ const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.events.pending',
   'Emitter.localTime',
   'Emitter.loopIndex',
+  'Emitter.interpolationActive',
+  'Emitter.previousTransform',
   'Emitter.seed',
   'Emitter.spawnCount',
   'Emitter.spawnGeneration',
+  'Emitter.spawnInterpolatedTransform',
   'Emitter.transform',
 ]);
 const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
@@ -1692,9 +1701,15 @@ function uniformDescriptions(
     describe('Emitter.localTime', 0, 'f32'),
     describe('Emitter.logicalCapacity', 0, 'u32'),
     describe('Emitter.loopIndex', 0, 'u32'),
+    describe('Emitter.interpolationActive', 0, 'u32'),
+    describe('Emitter.previousRotation', [0, 0, 0, 1], 'quat'),
+    describe('Emitter.previousTransform', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
+    describe('Emitter.rotation', [0, 0, 0, 1], 'quat'),
     describe('Emitter.seed', options.emitterSeed ?? 0, 'u32'),
     describe('Emitter.spawnCount', 0, 'u32'),
     describe('Emitter.spawnGeneration', options.spawnGeneration ?? 0, 'u32'),
+    describe('Emitter.spawnPhaseStart', 1, 'f32'),
+    describe('Emitter.spawnPhaseStep', 0, 'f32'),
     describe('Emitter.transform', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
   ];
   for (const [path, definition] of Object.entries(parameters ?? {})) {
@@ -3085,6 +3100,91 @@ function createBuildKernels(
     };
     const constant = (value: unknown, type: AttributeType): KernelNode =>
       adapter.constant(value, type);
+    const mutable = (value: KernelNode): KernelNode =>
+      (value as KernelNode & { toVar?(): KernelNode }).toVar?.() ?? value;
+    const quaternionLength = (value: KernelNode): KernelNode =>
+      value.x
+        .mul(value.x)
+        .add(value.y.mul(value.y))
+        .add(value.z.mul(value.z))
+        .add(value.w.mul(value.w))
+        .sqrt();
+    const normalizedQuaternion = (value: KernelNode): KernelNode =>
+      value.div(quaternionLength(value).clamp(0.000001, 1e20));
+    const slerpQuaternion = (
+      previous: KernelNode,
+      current: KernelNode,
+      phase: KernelNode,
+    ): KernelNode => {
+      const rawDot = previous.x
+        .mul(current.x)
+        .add(previous.y.mul(current.y))
+        .add(previous.z.mul(current.z))
+        .add(previous.w.mul(current.w));
+      const sign = adapter.select(rawDot.lessThan(0), constant(-1, 'f32'), constant(1, 'f32'));
+      const target = current.mul(sign);
+      const cosine = rawDot.mul(sign).clamp(-1, 1);
+      const sine = constant(1, 'f32').sub(cosine.mul(cosine)).clamp(0, 1).sqrt();
+      const angle = adapter.atan2(sine, cosine);
+      const inverseSine = constant(1, 'f32').div(sine.clamp(0.000001, 1e20));
+      const spherical = previous
+        .mul(adapter.sin(constant(1, 'f32').sub(phase).mul(angle)))
+        .add(target.mul(adapter.sin(phase.mul(angle))))
+        .mul(inverseSine);
+      const linear = normalizedQuaternion(
+        previous.mul(constant(1, 'f32').sub(phase)).add(target.mul(phase)),
+      );
+      return normalizedQuaternion(adapter.select(sine.lessThan(0.00001), linear, spherical));
+    };
+    const quaternionTransform = (rotation: KernelNode, position: KernelNode): KernelNode => {
+      const x2 = rotation.x.add(rotation.x);
+      const y2 = rotation.y.add(rotation.y);
+      const z2 = rotation.z.add(rotation.z);
+      const xx = rotation.x.mul(x2);
+      const xy = rotation.x.mul(y2);
+      const xz = rotation.x.mul(z2);
+      const yy = rotation.y.mul(y2);
+      const yz = rotation.y.mul(z2);
+      const zz = rotation.z.mul(z2);
+      const wx = rotation.w.mul(x2);
+      const wy = rotation.w.mul(y2);
+      const wz = rotation.w.mul(z2);
+      return adapter.mat4(
+        adapter.vec4(constant(1, 'f32').sub(yy.add(zz)), xy.add(wz), xz.sub(wy), 0),
+        adapter.vec4(xy.sub(wz), constant(1, 'f32').sub(xx.add(zz)), yz.add(wx), 0),
+        adapter.vec4(xz.add(wy), yz.sub(wx), constant(1, 'f32').sub(xx.add(yy)), 0),
+        adapter.vec4(position.x, position.y, position.z, 1),
+      );
+    };
+    const spawnInterpolatedTransform = (spawnIndex?: KernelNode): KernelUniformNode => {
+      const currentTransform = uniformNode('Emitter.transform');
+      // Event spawning and the all-slots compatibility Init kernel have no rate/distance phase.
+      // They intentionally retain the exact current-transform path.
+      if (spawnIndex === undefined) return currentTransform;
+      const transform = mutable(currentTransform);
+      adapter.branch(
+        adapter.uint(uniformNode('Emitter.interpolationActive')).equal(adapter.uint(1)),
+        () => {
+          const phase = uniformNode('Emitter.spawnPhaseStart')
+            .add(spawnIndex.toFloat().mul(uniformNode('Emitter.spawnPhaseStep')))
+            .clamp(0, 1);
+          const previousTransform = uniformNode('Emitter.previousTransform');
+          const origin = adapter.vec4(0, 0, 0, 1);
+          const previousPosition = previousTransform.mul(origin).xyz;
+          const currentPosition = currentTransform.mul(origin).xyz;
+          const position = previousPosition
+            .mul(constant(1, 'f32').sub(phase))
+            .add(currentPosition.mul(phase));
+          const rotation = slerpQuaternion(
+            uniformNode('Emitter.previousRotation'),
+            uniformNode('Emitter.rotation'),
+            phase,
+          );
+          transform.assign(quaternionTransform(rotation, position));
+        },
+      );
+      return transform as KernelUniformNode;
+    };
     const randomNode = (
       module: CompiledKernelModule,
       particleIndex: KernelNode,
@@ -3150,6 +3250,7 @@ function createBuildKernels(
     const buildContext = (
       module: CompiledKernelModule,
       particleIndex: KernelNode,
+      spawnIndex?: KernelNode,
     ): KernelModuleBuildContext => ({
       adapter,
       module,
@@ -3168,7 +3269,10 @@ function createBuildKernels(
         const texelCentered = coordinate.mul((lut.width - 1) / lut.width).add(0.5 / lut.width);
         return adapter.sampleTexture(texture, adapter.vec2(texelCentered, 0.5));
       },
-      uniform: uniformNode,
+      uniform: (path) =>
+        path === 'Emitter.spawnInterpolatedTransform'
+          ? spawnInterpolatedTransform(spawnIndex)
+          : uniformNode(path),
       value: (input, type, sampleOffset = 0) =>
         buildValue(input, type, module, particleIndex, sampleOffset),
       write: (name, value) => {
@@ -3395,8 +3499,6 @@ function createBuildKernels(
       };
     }
 
-    const mutable = (value: KernelNode): KernelNode =>
-      (value as KernelNode & { toVar?(): KernelNode }).toVar?.() ?? value;
     const forEachNeighbor = (
       grid: MutableNeighborGrid,
       particleIndex: KernelNode,
@@ -3469,7 +3571,11 @@ function createBuildKernels(
       });
     };
 
-    const buildModule = (module: CompiledKernelModule, particleIndex: KernelNode): void => {
+    const buildModule = (
+      module: CompiledKernelModule,
+      particleIndex: KernelNode,
+      spawnIndex?: KernelNode,
+    ): void => {
       if (module.type === 'core/tsl-module') {
         buildTslModule(module, particleIndex);
         return;
@@ -3575,7 +3681,7 @@ function createBuildKernels(
       if (!implementation || implementation.stage === 'spawn') {
         throw new Error(`Kernel implementation for ${module.type} is missing.`);
       }
-      implementation.build(buildContext(module, particleIndex));
+      implementation.build(buildContext(module, particleIndex, spawnIndex));
     };
 
     const initModules = program.kernels.init.modules;
@@ -3794,7 +3900,12 @@ function createBuildKernels(
                   birthSlot,
                 );
               }
-              for (const module of initModules) buildModule(module, particleIndex);
+              const spawnIndex = hasSpawnOrder
+                ? attributeNode('spawnOrder', particleIndex).sub(
+                    readLifecycle(stateLayout.fields.currentSpawnBase.offsetWords),
+                  )
+                : invocation;
+              for (const module of initModules) buildModule(module, particleIndex, spawnIndex);
               writeAttribute('alive', adapter.uint(1), particleIndex);
               adapter.atomicAdd(counter(counterOffsets.spawnSuccess), adapter.uint(1));
             },
@@ -3817,7 +3928,7 @@ function createBuildKernels(
               invocation,
             );
           }
-          for (const module of initModules) buildModule(module, particleIndex);
+          for (const module of initModules) buildModule(module, particleIndex, invocation);
           writeAttribute('alive', adapter.uint(1), particleIndex);
         }
       });
@@ -4725,7 +4836,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.transform'],
+      reads: ['Emitter.previousTransform', 'Emitter.transform'],
       writes: ['Emitter.spawnCount'],
     },
     stage: 'spawn',
@@ -4771,7 +4882,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.transform', 'Emitter.seed', 'Particles.spawnGeneration'],
+      reads: ['Emitter.spawnInterpolatedTransform', 'Emitter.seed', 'Particles.spawnGeneration'],
       writes: ['Particles.position'],
     },
     build(context) {
@@ -4822,7 +4933,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         local = local.add(context.value(config.center, 'vec3', 6));
       }
       const world = context
-        .uniform('Emitter.transform')
+        .uniform('Emitter.spawnInterpolatedTransform')
         .mul(context.adapter.vec4(local.x, local.y, local.z, 1)).xyz;
       context.write('position', world);
     },
@@ -4832,7 +4943,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.seed', 'Emitter.transform', 'Particles.spawnGeneration'],
+      reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnGeneration'],
       writes: ['Particles.position', 'Particles.surfaceNormal'],
     },
     build(context) {
@@ -4843,7 +4954,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         context.random(2),
         context.random(3),
       );
-      const transform = context.uniform('Emitter.transform');
+      const transform = context.uniform('Emitter.spawnInterpolatedTransform');
       const worldPosition = transform.mul(
         context.adapter.vec4(sample.position.x, sample.position.y, sample.position.z, 1),
       ).xyz;

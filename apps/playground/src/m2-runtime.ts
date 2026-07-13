@@ -6,11 +6,12 @@ import {
   defineEmitter,
   lifetime,
   perDistance,
+  positionSphere,
   range,
   rate,
   velocityCone,
 } from '@nachi/core';
-import type { ModuleDefinition, SpawnModule, VfxEmitterRuntimeView } from '@nachi/core';
+import type { ModuleDefinition, SpawnModule, ValueInput, VfxEmitterRuntimeView } from '@nachi/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -21,6 +22,9 @@ import './spike-compute.css';
 
 const FIXED_DELTA_SECONDS = 1 / 60;
 const PREWARM_FRAMES = 4;
+// Interpolation uses at most a few dozen unit-scale f32 operations. This is a roundoff-derived
+// budget (32 IEEE-754 f32 ulps at magnitude one), not an arbitrary visual epsilon.
+const SPAWN_INTERPOLATION_ERROR_BUDGET = 32 * 2 ** -23;
 
 type RendererBackendLike = {
   device?: {
@@ -177,6 +181,21 @@ function movingEffect(
   });
 }
 
+function placementEffect(spawn: SpawnModule, radius: ValueInput<number> = 0) {
+  return defineEffect({
+    elements: {
+      particles: defineEmitter({
+        capacity: 16,
+        init: [positionSphere({ radius }), lifetime(10)],
+        integration: 'none',
+        lifecycle: { duration: 1 },
+        render: computeRender,
+        spawn,
+      }),
+    },
+  });
+}
+
 function emitter(instance: RuntimeInstance): VfxEmitterRuntimeView {
   const value = instance.getEmitter('particles');
   if (!value) throw new Error('M2 runtime emitter is missing.');
@@ -242,6 +261,52 @@ function close(left: number, right: number, tolerance = 0.0002): boolean {
   return Math.abs(left - right) <= tolerance;
 }
 
+async function alivePositions(
+  renderer: THREE.WebGPURenderer,
+  instance: RuntimeInstance,
+): Promise<readonly (readonly [number, number, number])[]> {
+  const [alive, position] = await Promise.all([
+    uintStorage(renderer, instance, 'alive'),
+    floatStorage(renderer, instance, 'position'),
+  ]);
+  return Array.from({ length: alive.length }, (_, particle) => particle)
+    .filter((particle) => alive[particle] !== 0)
+    .map(
+      (particle) =>
+        [
+          position[particle * 3] ?? Number.NaN,
+          position[particle * 3 + 1] ?? Number.NaN,
+          position[particle * 3 + 2] ?? Number.NaN,
+        ] as const,
+    );
+}
+
+function lineDistribution(
+  positions: readonly (readonly [number, number, number])[],
+  expectedCount: number,
+  maximumSpacing: number,
+): { readonly maximumGap: number; readonly valid: boolean; readonly xs: readonly number[] } {
+  const xs = positions.map(([x]) => x).sort((left, right) => left - right);
+  const maximumGap = Math.max(
+    0,
+    ...xs.slice(1).map((value, index) => value - (xs[index] ?? value)),
+  );
+  return {
+    maximumGap,
+    valid:
+      positions.length === expectedCount &&
+      positions.every(
+        ([x, y, z]) =>
+          x >= -SPAWN_INTERPOLATION_ERROR_BUDGET &&
+          x <= 0.5 + SPAWN_INTERPOLATION_ERROR_BUDGET &&
+          Math.abs(y) <= SPAWN_INTERPOLATION_ERROR_BUDGET &&
+          Math.abs(z) <= SPAWN_INTERPOLATION_ERROR_BUDGET,
+      ) &&
+      maximumGap <= maximumSpacing + SPAWN_INTERPOLATION_ERROR_BUDGET * 2,
+    xs,
+  };
+}
+
 async function runLifecycleScenario(
   renderer: THREE.WebGPURenderer,
   runtimeRenderer: ReturnType<typeof createThreeRuntimeRenderer>,
@@ -285,23 +350,74 @@ async function runLifecycleScenario(
   const secondGeneration = await uintStorage(renderer, recycled, 'spawnGeneration');
   const secondVelocity = await floatStorage(renderer, recycled, 'velocity');
 
-  // 3. Per-distance: moving two units at four particles/unit must emit eight.
+  // 3. Per-distance: the accumulator fires ten particles along one 0.5-unit segment.
   const distanceSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
-  const distanceInstance = distanceSystem.spawn(
-    smokeEffect({ capacity: 16, spawn: perDistance({ rate: 4 }) }),
-    { seed: 23 },
-  );
+  const distanceInstance = distanceSystem.spawn(placementEffect(perDistance({ rate: 20 })), {
+    seed: 23,
+  });
   await distanceSystem.update(0);
-  distanceInstance.setTransform([2, 0, 0]);
+  distanceInstance.setTransform([0.5, 0, 0]);
   await distanceSystem.update(FIXED_DELTA_SECONDS);
   const distanceAlive = await aliveCount(renderer, distanceInstance);
+  const distanceDistribution = lineDistribution(
+    await alivePositions(renderer, distanceInstance),
+    10,
+    1 / 20,
+  );
 
-  // 4/5. Atomic compaction count, alive flags, and indirect instanceCount must agree.
+  // 4. Timed births use deterministic midpoints across the same moving segment.
+  const movingRateSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const movingRate = movingRateSystem.spawn(placementEffect(rate(600)), { seed: 24 });
+  await movingRateSystem.update(0);
+  movingRate.setTransform([0.5, 0, 0]);
+  await movingRateSystem.update(FIXED_DELTA_SECONDS);
+  const rateDistribution = lineDistribution(await alivePositions(renderer, movingRate), 10, 1 / 20);
+
+  // 5. interpolationActive=0 must retain the current-transform path bit-for-bit. A static timed
+  // batch and an equivalent static burst therefore produce identical seeded positions.
+  const staticDefinition = placementEffect(rate(600), range(0.1, 0.4));
+  const staticControlDefinition = placementEffect(burst({ count: 10 }), range(0.1, 0.4));
+  const staticSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const staticControlSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const staticTimed = staticSystem.spawn(staticDefinition, { seed: 25 });
+  const staticControl = staticControlSystem.spawn(staticControlDefinition, { seed: 25 });
+  await staticSystem.update(0);
+  await staticControlSystem.update(0);
+  await staticSystem.update(FIXED_DELTA_SECONDS);
+  const staticTimedPositions = await floatStorage(renderer, staticTimed, 'position');
+  const staticControlPositions = await floatStorage(renderer, staticControl, 'position');
+
+  // 6. A pooled kernel whose prior generation moved must respawn exactly like a fresh kernel.
+  const pooledDefinition = placementEffect(burst({ count: 10 }), range(0.1, 0.4));
+  const pooledSystem = new VFXSystem(runtimeRenderer, undefined, {
+    ...systemOptions,
+    maxPoolSize: 1,
+  });
+  const previousGeneration = pooledSystem.spawn(pooledDefinition, { seed: 26 });
+  await pooledSystem.update(0);
+  previousGeneration.setTransform([0.5, 0, 0]);
+  await pooledSystem.update(FIXED_DELTA_SECONDS);
+  previousGeneration.release();
+  const pooledRespawn = pooledSystem.spawn(pooledDefinition, {
+    position: [2, 0, 0],
+    seed: 27,
+  });
+  await pooledSystem.update(0);
+  const freshPoolControlSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const freshPoolControl = freshPoolControlSystem.spawn(pooledDefinition, {
+    position: [2, 0, 0],
+    seed: 27,
+  });
+  await freshPoolControlSystem.update(0);
+  const pooledRespawnPositions = await floatStorage(renderer, pooledRespawn, 'position');
+  const freshPoolControlPositions = await floatStorage(renderer, freshPoolControl, 'position');
+
+  // 7/8. Atomic compaction count, alive flags, and indirect instanceCount must agree.
   const distanceFlags = await uintStorage(renderer, distanceInstance, 'alive');
   const actualAlive = distanceFlags.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
   const indirectAlive = await indirectInstanceCount(renderer, distanceInstance);
 
-  // 6. Exhaustion clamps safely and publishes a stable warning diagnostic.
+  // 9. Exhaustion clamps safely and publishes a stable warning diagnostic.
   const overflowSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
   const overflowed = overflowSystem.spawn(
     smokeEffect({ capacity: 2, duration: 0, spawn: burst({ count: 5 }) }),
@@ -310,7 +426,7 @@ async function runLifecycleScenario(
   await overflowSystem.update(0);
   const overflowAlive = await aliveCount(renderer, overflowed);
 
-  // 7. Identical seeds and schedules must produce bit-identical particle state.
+  // 10. Identical seeds and schedules must produce bit-identical particle state.
   const deterministicEffect = smokeEffect({
     capacity: 4,
     randomVelocity: true,
@@ -336,12 +452,22 @@ async function runLifecycleScenario(
       overflowAlive === 2 &&
       overflowed.diagnostics.some(({ code }) => code === 'NACHI_SPAWN_CAPACITY_EXCEEDED'),
     indirectCountMatchesAlive: indirectAlive === distanceAlive,
-    perDistanceProportional: distanceAlive === 8,
+    perDistanceInterpolated:
+      distanceAlive === 10 &&
+      distanceDistribution.valid &&
+      (distanceDistribution.xs[0] ?? 1) < 0.1 &&
+      (distanceDistribution.xs.at(-1) ?? 0) > 0.45,
+    rateInterpolated:
+      rateDistribution.valid &&
+      (rateDistribution.xs[0] ?? 1) < 0.1 &&
+      (rateDistribution.xs.at(-1) ?? 0) > 0.4,
     rateSpawnTotal: rateAlive === 30,
     recycledIndexHasNewRandomStream:
       firstGeneration[0] === 1 &&
       secondGeneration[0] === 2 &&
       !equalArrays(firstVelocity, secondVelocity),
+    respawnTransformHistoryReset: equalArrays(pooledRespawnPositions, freshPoolControlPositions),
+    stationaryCurrentPathBitExact: equalArrays(staticTimedPositions, staticControlPositions),
   };
   return {
     counts: {
@@ -350,6 +476,13 @@ async function runLifecycleScenario(
       indirectAlive,
       overflowAlive,
       rateAlive,
+    },
+    interpolation: {
+      errorBudget: SPAWN_INTERPOLATION_ERROR_BUDGET,
+      perDistance: distanceDistribution,
+      pooledRespawnBitExact: equalArrays(pooledRespawnPositions, freshPoolControlPositions),
+      rate: rateDistribution,
+      stationaryBitExact: equalArrays(staticTimedPositions, staticControlPositions),
     },
     recycle: {
       firstGeneration: firstGeneration[0],

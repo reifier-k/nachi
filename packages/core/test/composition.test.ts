@@ -182,6 +182,7 @@ function fakeAdapter(): KernelTslAdapter {
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     instancedArray: () => new FakeStorage(),
     inverse: node,
+    mat4: node,
     sampleMeshSurface: () => ({ normal: node(), position: node() }),
     sampleSdf: () => ({ distance: node(), gradient: node() }),
     sampleTexture: node,

@@ -2,7 +2,7 @@
 
 - 重大度: 中(視覚品質 / Niagara パリティ)
 - 対象: `@nachi/core`(spawn カーネル、`core/per-distance` および `core/rate`)
-- 状態: 提案
+- 状態: 実装済み
 
 ## 症状
 
@@ -34,7 +34,56 @@ Niagara の interpolated spawning 相当を導入する:
 4. `perDistance` の距離アキュムレータも同じ prev→current 線分上で発火位置を算出する
    (等間隔配置が自然に得られる)。
 
-`rate()` にも同じ位相補間を適用する(spawn 時刻の age サブステップ補正も同時に得られる)。
+`rate()` にも同じ位相補間を適用する。spawn 時刻の age サブステップ補正は v1 の対象外とし、
+将来の明示的なオプションとして RFC 001 に記録する。
+
+## 実装した契約
+
+- `RuntimeEmitter` は最後にシミュレーションした合成済み transform を保持する。正の時間を
+  進める各ステップでは、attach/socket/`setTransform()` の同期結果を current とし、直前の
+  シミュレーション値を `Emitter.previousTransform` に公開する。
+- 初回 spawn とプールからの再取得では `previousTransform = transform`、
+  `interpolationActive = 0` にリセットする。`update(0)` は履歴を進めない。
+- 行列がビット単位で等しいときは CPU が `Emitter.interpolationActive = 0` を設定する。
+  init カーネルはこの場合、従来どおり `Emitter.transform` を直接読み、lerp/slerp を実行しない。
+- 補間が有効な通常の rate/burst バッチでは、capacity clamp 後の実スポーン数を `N`、
+  `spawnOrder` から導いたバッチ内 index を `i` として
+  `phase = (i + 0.5) / N` とする。compaction の割り当て順には依存しない。
+- `perDistance({ rate: R })` ではステップ距離を `D`、ステップ開始時の距離アキュムレータを
+  `r` (`0 <= r < 1`) とし、`phaseStart = (1 - r) / (R * D)`、
+  `phaseStep = 1 / (R * D)` とする。各発火位置そのものを current segment 上の位相へ変換する。
+  `D` はステップ間スナップショットの直線 chord 長であり、1ステップ前に複数回 `setTransform()`
+  しても折れ線は蓄積せず、最後のcurrentまでの純変位だけを消費する。
+- `Emitter.spawnInterpolatedTransform` は translation を lerp、rotation を最短経路の quaternion
+  slerp で合成する仮想 init 入力である。init 以外の段と event spawn は current transform を使う。
+- `setTransform()` は連続運動として補間する。瞬間移動用の previous reset API は将来課題である。
+- カリング中や有効time scaleが0のhitStop中も、正のsystem stepごとにtransform履歴を追従する。
+  その間の移動距離はスポーンせず破棄し、再開時の一括発火とstale補間ビードを防ぐ。
+
+## previous transform のリセット経路
+
+1. 新規 `RuntimeEmitter` の生成。
+2. `RuntimeEmitter` をプールから再取得して新しい effect instance に割り当てる経路。
+3. 初期化完了前の transform/attachment 同期。初回の origin から補間しない。
+
+各経路は current の合成済み transform と rotation を previous uniform に複製し、
+`interpolationActive` を無効化する。
+
+## 既存ページへの影響調査
+
+`rate()` / `perDistance()` と `setTransform()` / attach を機械走査し、位置 init の有無と
+transform の実移動を確認した。
+
+- 意図的に分布が変わる: `golden-slash`(移動 emitter + rate)、
+  `m7-ribbons`(移動 emitter + rate)、`wuwa-slash`(移動 emitter + perDistance)。
+- 回帰検査専用: `m2-runtime`(perDistance/rate/静止時ビット一致を検査)。
+- 分布は変わらない: `m11-scale` は移動 rate emitter だが emitter transform を読む position init が
+  なく、`golden-character` の rate aura は attach 先 transform が静止している。
+- `golden-ultimate`、`golden-charge`、`showcase-beam`、`golden-ambient` など、その他の
+  rate/burst 使用ページには移動 emitter と transform 依存 position init の組み合わせがない。
+
+`wuwa-slash` はページ側の 4 サブステップ回避を削除し、1 フレーム 1 update に戻した。
+headless spike は ribbon segment の物理間隔が `1 / 22 unit` と WGSL 誤差予算以内であることを検査する。
 
 ## 受け入れ基準
 
@@ -43,6 +92,9 @@ Niagara の interpolated spawning 相当を導入する:
 2. 静止エミッタの挙動・決定性(seed 再現)が不変。
 3. `m2-runtime` / `m4-behaviors` / golden 系スパイクが全て緑。
 4. wuwa-slash のページ側 4 サブステップ回避策を 1 サブステップに戻してもビードが出ない。
+
+GPU readback の位置許容値は f32 machine epsilon に演算回数の上限を掛けた値
+(`32 * 2^-23`)とし、perDistance の最大間隔 `1 / 20 unit` に加算する。
 
 ## 互換性 / リスク
 

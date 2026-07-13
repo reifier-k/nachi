@@ -593,6 +593,8 @@ export function createThreeKernelAdapter(
       return node;
     },
     inverse: (value) => asNode(inverse(value as never)),
+    mat4: (column0, column1, column2, column3) =>
+      asNode(mat4(column0 as never, column1 as never, column2 as never, column3 as never)),
     loop: (range, body) => {
       const visit = ((inputs: Readonly<Record<string, unknown>>) => {
         body(asNode(inputs[range.name ?? 'i']));

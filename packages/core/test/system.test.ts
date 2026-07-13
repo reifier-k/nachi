@@ -962,6 +962,7 @@ function fakeAdapter(): KernelTslAdapter {
     instancedArray: () => new FakeStorage(),
     indirectArray: () => Object.assign(new FakeStorage(), { indirectResource: {} }),
     inverse: node,
+    mat4: node,
     loop: (_parameters, callback) => callback(node()),
     mod: node,
     sampleTexture: node,
@@ -2459,6 +2460,12 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(
       10,
     );
+    expect(
+      instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnPhaseStart']?.value,
+    ).toBeCloseTo(0.1);
+    expect(
+      instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnPhaseStep']?.value,
+    ).toBeCloseTo(0.1);
   });
 
   it('discards distance accumulated before delayed activation', async () => {
@@ -2927,6 +2934,49 @@ describe('VFXSystem runtime scheduler', () => {
     instance.setTransform([3, 4, 5]);
     const matrix = instance.getEmitter('particles')?.kernels.uniforms['Emitter.transform']?.value;
     expect(matrix).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1]);
+  });
+
+  it('snapshots the last simulated transform and disables interpolation on a stationary step', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }), { position: [1, 2, 3] });
+    const uniforms = instance.getEmitter('particles')!.kernels.uniforms;
+    const initial = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1];
+    const moved = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 5, 6, 1];
+
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(initial);
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
+    await system.update(0);
+    instance.setTransform([4, 5, 6]);
+    await system.update(0.1);
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(initial);
+    expect(uniforms['Emitter.transform']?.value).toEqual(moved);
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(1);
+
+    await system.update(0.1);
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(moved);
+    expect(uniforms['Emitter.transform']?.value).toEqual(moved);
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
+  });
+
+  it('resets previousTransform when pooled kernels are reacquired by a new spawn', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 1 });
+    const definition = runtimeEffect({ duration: 1 });
+    const first = system.spawn(definition, { position: [7, 0, 0] });
+    const pooledKernels = first.getEmitter('particles')!.kernels;
+    await system.update(0);
+    first.setTransform([9, 0, 0]);
+    await system.update(0.1);
+    expect(pooledKernels.uniforms['Emitter.interpolationActive']?.value).toBe(1);
+    first.release();
+
+    const respawned = system.spawn(definition, { position: [-3, 2, 1] });
+    const respawnedKernels = respawned.getEmitter('particles')!.kernels;
+    const respawnTransform = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -3, 2, 1, 1];
+    expect(respawnedKernels).toBe(pooledKernels);
+    expect(respawnedKernels.uniforms['Emitter.transform']?.value).toEqual(respawnTransform);
+    expect(respawnedKernels.uniforms['Emitter.previousTransform']?.value).toEqual(respawnTransform);
+    expect(respawnedKernels.uniforms['Emitter.interpolationActive']?.value).toBe(0);
   });
 
   it('composes each emitter offset after the instance transform for scattered bursts', () => {

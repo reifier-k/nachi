@@ -860,6 +860,54 @@ function composeEmitterTransform(
   ];
 }
 
+function transformsEqual(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function transformQuaternion(matrix: readonly number[]): readonly [number, number, number, number] {
+  const m00 = matrix[0] ?? 1;
+  const m01 = matrix[4] ?? 0;
+  const m02 = matrix[8] ?? 0;
+  const m10 = matrix[1] ?? 0;
+  const m11 = matrix[5] ?? 1;
+  const m12 = matrix[9] ?? 0;
+  const m20 = matrix[2] ?? 0;
+  const m21 = matrix[6] ?? 0;
+  const m22 = matrix[10] ?? 1;
+  const trace = m00 + m11 + m22;
+  let x: number;
+  let y: number;
+  let z: number;
+  let w: number;
+  if (trace > 0) {
+    const scale = Math.sqrt(trace + 1) * 2;
+    x = (m21 - m12) / scale;
+    y = (m02 - m20) / scale;
+    z = (m10 - m01) / scale;
+    w = scale / 4;
+  } else if (m00 > m11 && m00 > m22) {
+    const scale = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    x = scale / 4;
+    y = (m01 + m10) / scale;
+    z = (m02 + m20) / scale;
+    w = (m21 - m12) / scale;
+  } else if (m11 > m22) {
+    const scale = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    x = (m01 + m10) / scale;
+    y = scale / 4;
+    z = (m12 + m21) / scale;
+    w = (m02 - m20) / scale;
+  } else {
+    const scale = Math.sqrt(1 + m22 - m00 - m11) * 2;
+    x = (m02 + m20) / scale;
+    y = (m12 + m21) / scale;
+    z = scale / 4;
+    w = (m10 - m01) / scale;
+  }
+  const length = Math.hypot(x, y, z, w) || 1;
+  return [x / length, y / length, z / length, w / length];
+}
+
 function isParameterValue(type: AttributeType, value: unknown): boolean {
   const lengths: Partial<Record<AttributeType, number>> = {
     color: 4,
@@ -925,6 +973,11 @@ function validateSpawnParameterOverrides(
 
 type SpawnAccumulator = { burstCycles: number; remainder: number };
 type LogicalSpawnBatch = { readonly count: number; readonly expiresAt: number };
+type SpawnBatch = {
+  readonly count: number;
+  readonly phaseStart?: number;
+  readonly phaseStep?: number;
+};
 
 class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly controller: EmitterLifecycleController;
@@ -968,6 +1021,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #profileSpawnCount = 0;
   #spawnRateScale = 1;
   #spawnSuppressed = false;
+  #previousTransform: readonly number[];
+  #simulatedTransform: readonly number[];
   #transform: readonly number[];
 
   constructor(
@@ -991,6 +1046,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.program = program;
     this.#renderer = renderer;
     this.#seed = seed >>> 0;
+    this.#previousTransform = emitterTransform;
+    this.#simulatedTransform = emitterTransform;
     this.#transform = emitterTransform;
     this.#parameters = { ...parameters };
     this.#emitterPath = emitterPath;
@@ -1016,6 +1073,20 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     renderer.clearStorageReplayReady?.(this.kernels);
     this.setQualityTier(qualityTier);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
+    setUniform(renderer, this.kernels.uniforms, 'Emitter.interpolationActive', 0);
+    setUniform(
+      renderer,
+      this.kernels.uniforms,
+      'Emitter.previousRotation',
+      transformQuaternion(emitterTransform),
+    );
+    setUniform(renderer, this.kernels.uniforms, 'Emitter.previousTransform', emitterTransform);
+    setUniform(
+      renderer,
+      this.kernels.uniforms,
+      'Emitter.rotation',
+      transformQuaternion(emitterTransform),
+    );
     setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', emitterTransform);
     for (const [path, value] of Object.entries(parameters)) {
       setUniform(renderer, this.kernels.uniforms, path as ParameterPath, value);
@@ -1207,12 +1278,58 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
 
   setTransform(transform: readonly number[]): void {
     const emitterTransform = composeEmitterTransform(transform, this.definition.offset);
-    const dx = (emitterTransform[12] ?? 0) - (this.#transform[12] ?? 0);
-    const dy = (emitterTransform[13] ?? 0) - (this.#transform[13] ?? 0);
-    const dz = (emitterTransform[14] ?? 0) - (this.#transform[14] ?? 0);
-    this.#pendingDistance += Math.hypot(dx, dy, dz);
     this.#transform = emitterTransform;
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.rotation',
+      transformQuaternion(emitterTransform),
+    );
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.transform', emitterTransform);
+    if (!this.#initialized) this.#resetTransformHistory();
+  }
+
+  beginTransformStep(): void {
+    this.#previousTransform = this.#simulatedTransform;
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.previousRotation',
+      transformQuaternion(this.#previousTransform),
+    );
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.previousTransform',
+      this.#previousTransform,
+    );
+  }
+
+  finalizeTransformStep(): void {
+    const dx = (this.#transform[12] ?? 0) - (this.#previousTransform[12] ?? 0);
+    const dy = (this.#transform[13] ?? 0) - (this.#previousTransform[13] ?? 0);
+    const dz = (this.#transform[14] ?? 0) - (this.#previousTransform[14] ?? 0);
+    this.#pendingDistance = Math.hypot(dx, dy, dz);
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.interpolationActive',
+      transformsEqual(this.#previousTransform, this.#transform) ? 0 : 1,
+    );
+  }
+
+  commitTransformStep(): void {
+    this.#simulatedTransform = this.#transform;
+  }
+
+  #resetTransformHistory(): void {
+    this.#previousTransform = this.#transform;
+    this.#simulatedTransform = this.#transform;
+    this.#pendingDistance = 0;
+    const rotation = transformQuaternion(this.#transform);
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.interpolationActive', 0);
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.previousRotation', rotation);
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.previousTransform', this.#transform);
   }
 
   setCamera(camera: VfxCameraState): void {
@@ -1333,7 +1450,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           'Emitter.spawnGeneration',
           command.spawnGeneration,
         );
-        await this.#dispatchSpawn(this.#activationSpawnCount());
+        const batch = this.#activationSpawnBatch();
+        if (batch) await this.#dispatchSpawn(batch);
         await this.#compactAlive();
       } else if (command.kind === 'complete') {
         this.#drainRemaining = this.#maxLifetime;
@@ -1356,7 +1474,9 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
             command.prewarm ? step : context.systemDelta,
           );
           if (command.phase === 'active') {
-            await this.#dispatchSpawn(this.#stepSpawnCount(step, this.#pendingDistance));
+            for (const batch of this.#stepSpawnBatches(step, this.#pendingDistance)) {
+              await this.#dispatchSpawn(batch);
+            }
             this.#pendingDistance = 0;
           }
           await this.#rebuildNeighborGrids();
@@ -1385,7 +1505,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     }
   }
 
-  #activationSpawnCount(): number {
+  #activationSpawnBatch(): SpawnBatch | undefined {
     let count = 0;
     for (const module of this.program.spawn.modules) {
       if (module.type !== 'core/burst') continue;
@@ -1393,11 +1513,12 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       const accumulator = this.#accumulator(module);
       accumulator.burstCycles = 1;
     }
-    return count;
+    return count > 0 ? { count } : undefined;
   }
 
-  #stepSpawnCount(deltaSeconds: number, distance: number): number {
-    let count = 0;
+  #stepSpawnBatches(deltaSeconds: number, distance: number): readonly SpawnBatch[] {
+    let timedCount = 0;
+    const distanceBatches: SpawnBatch[] = [];
     const nextAge = this.#emitterAge + deltaSeconds;
     for (const module of this.program.spawn.modules) {
       const accumulator = this.#accumulator(module);
@@ -1406,13 +1527,21 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         const exact = accumulator.remainder + rate * deltaSeconds;
         const emitted = Math.floor(exact + TIME_EPSILON);
         accumulator.remainder = exact - emitted;
-        count += emitted;
+        timedCount += emitted;
       } else if (module.type === 'core/per-distance') {
         const rate = (module.config as { rate: number }).rate * this.#spawnRateScale;
+        const previousRemainder = accumulator.remainder;
         const exact = accumulator.remainder + rate * distance;
         const emitted = Math.floor(exact + TIME_EPSILON);
         accumulator.remainder = exact - emitted;
-        count += emitted;
+        const segmentUnits = rate * distance;
+        if (emitted > 0 && segmentUnits > 0) {
+          distanceBatches.push({
+            count: emitted,
+            phaseStart: (1 - previousRemainder) / segmentUnits,
+            phaseStep: 1 / segmentUnits,
+          });
+        }
       } else if (module.type === 'core/burst') {
         const config = module.config as { cycles?: number; interval?: number };
         const cycles = config.cycles ?? 1;
@@ -1421,12 +1550,12 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
           accumulator.burstCycles < cycles &&
           accumulator.burstCycles * interval <= nextAge + TIME_EPSILON
         ) {
-          count += Math.floor(this.#burstCount(module) * this.#spawnRateScale);
+          timedCount += Math.floor(this.#burstCount(module) * this.#spawnRateScale);
           accumulator.burstCycles += 1;
         }
       }
     }
-    return count;
+    return [...(timedCount > 0 ? [{ count: timedCount }] : []), ...distanceBatches];
   }
 
   #burstCount(module: CompiledSpawnModule): number {
@@ -1471,7 +1600,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#spawnAccumulators.clear();
   }
 
-  async #dispatchSpawn(requestedCount: number): Promise<void> {
+  async #dispatchSpawn(batch: SpawnBatch): Promise<void> {
+    const requestedCount = batch.count;
     if (requestedCount <= 0 || this.#spawnSuppressed) return;
     // Never encode more spawn invocations than physical slots. The GPU overflow counter handles
     // lower free-list availability; this clamp also makes malformed/extreme requests safe.
@@ -1492,6 +1622,18 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       this.#reportOverflow(requestedCount, cpuOverflow);
     }
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.spawnCount', dispatchCount);
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.spawnPhaseStart',
+      batch.phaseStart ?? 0.5 / dispatchCount,
+    );
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.spawnPhaseStep',
+      batch.phaseStep ?? 1 / dispatchCount,
+    );
     if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
       const { finalizeSpawn, prepareSpawn, spawnDispatch } = this.kernels;
       if (
@@ -2039,6 +2181,18 @@ export class VfxEffectInstance<
     if (transform && this.#state !== 'released') {
       this.setTransform(transform.position, transform.rotation);
     }
+  }
+
+  beginTransformStep(): void {
+    for (const emitter of this.#emitters.values()) emitter.beginTransformStep();
+  }
+
+  finalizeTransformStep(): void {
+    for (const emitter of this.#emitters.values()) emitter.finalizeTransformStep();
+  }
+
+  commitTransformStep(): void {
+    for (const emitter of this.#emitters.values()) emitter.commitTransformStep();
   }
 
   on(event: string, callback: EffectEventCallback): () => void {
@@ -2722,7 +2876,12 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
         for (const step of steps) {
           this.#systemTime += step;
-          for (const instance of this.#instances.values()) this.#syncAttachment(instance);
+          const transformStep = step > TIME_EPSILON;
+          if (transformStep) {
+            for (const instance of this.#instances.values()) instance.beginTransformStep();
+            for (const instance of this.#instances.values()) this.#syncAttachment(instance);
+            for (const instance of this.#instances.values()) instance.finalizeTransformStep();
+          }
           this.#updateScalability();
           this.#updateTransparencyOrder();
           for (const instance of this.#instances.values()) {
@@ -2730,6 +2889,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
             await this.#advanceInstance(instance, () =>
               instance.advance(step, this.#systemTime, this.#prewarmStepSeconds),
             );
+          }
+          if (transformStep) {
+            for (const instance of this.#instances.values()) instance.commitTransformStep();
           }
         }
       } finally {
