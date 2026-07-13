@@ -438,6 +438,92 @@ describe('@nachi/timeline runtime', () => {
     expect(instance.getElementState('arc')).toMatchObject({ playing: true, visible: true });
   });
 
+  it('composes authored mesh-fx local transforms with spawn and live effect transforms', () => {
+    const authored = ring({
+      innerRadius: 0.5,
+      material: fxMaterial(),
+      outerRadius: 1,
+    });
+    authored.name = 'authored-local-ring';
+    authored.position.y = -0.9;
+    authored.rotation.x = -Math.PI / 2;
+    const effect = defineEffect({ elements: { ring: meshFxElement(authored) } });
+    const scene = new THREE.Scene();
+    const instance = new VFXSystem({}, scene).spawn(effect, { position: [1, 0, 0] });
+    const clone = scene.getObjectByName('authored-local-ring');
+
+    expect(clone).toBeInstanceOf(THREE.Mesh);
+    expect(clone?.position.toArray()).toEqual([1, -0.9, 0]);
+    expect(clone?.quaternion.x).toBeCloseTo(-Math.SQRT1_2, 10);
+    expect(clone?.quaternion.y).toBeCloseTo(0, 10);
+    expect(clone?.quaternion.z).toBeCloseTo(0, 10);
+    expect(clone?.quaternion.w).toBeCloseTo(Math.SQRT1_2, 10);
+
+    authored.position.set(100, 100, 100);
+    authored.quaternion.identity();
+    instance.setTransform([2, 3, 4], [0, 0, Math.PI / 2]);
+
+    expect(clone?.position.x).toBeCloseTo(2.9, 10);
+    expect(clone?.position.y).toBeCloseTo(3, 10);
+    expect(clone?.position.z).toBeCloseTo(4, 10);
+    expect(clone?.quaternion.x).toBeCloseTo(-0.5, 10);
+    expect(clone?.quaternion.y).toBeCloseTo(-0.5, 10);
+    expect(clone?.quaternion.z).toBeCloseTo(0.5, 10);
+    expect(clone?.quaternion.w).toBeCloseTo(0.5, 10);
+  });
+
+  it('does not overwrite page-driven clone scale during updates or setTransform', async () => {
+    const authored = ring({
+      innerRadius: 0.5,
+      material: fxMaterial(),
+      outerRadius: 1,
+    });
+    authored.name = 'animated-scale-ring';
+    authored.scale.set(0.5, 0.75, 1.25);
+    const effect = defineEffect({
+      elements: { ring: meshFxElement(authored, { duration: 1 }) },
+      timeline: [at(0, play('ring'))],
+    });
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const instance = system.spawn(effect);
+    const clone = scene.getObjectByName('animated-scale-ring');
+
+    expect(clone?.scale.toArray()).toEqual([0.5, 0.75, 1.25]);
+    await system.update(0.1);
+    expect(instance.getElementState('ring')?.playing).toBe(true);
+    expect(clone?.scale.toArray()).toEqual([0.5, 0.75, 1.25]);
+    clone?.scale.set(2, 3, 4);
+    await system.update(0.1);
+    expect(clone?.scale.toArray()).toEqual([2, 3, 4]);
+
+    instance.setTransform([1, 2, 3], [0.1, 0.2, 0.3]);
+    expect(clone?.scale.toArray()).toEqual([2, 3, 4]);
+  });
+
+  it('matches the previous effect transform when authored local is identity', () => {
+    const authored = ring({
+      innerRadius: 0.5,
+      material: fxMaterial(),
+      outerRadius: 1,
+    });
+    authored.name = 'identity-local-ring';
+    const effect = defineEffect({ elements: { ring: meshFxElement(authored) } });
+    const scene = new THREE.Scene();
+    new VFXSystem({}, scene).spawn(effect, {
+      position: [1, 2, 3],
+      rotation: [0.1, 0.2, 0.3],
+    });
+    const clone = scene.getObjectByName('identity-local-ring');
+    const expected = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.1, 0.2, 0.3));
+
+    expect(clone?.position.toArray()).toEqual([1, 2, 3]);
+    expect(clone?.quaternion.x).toBeCloseTo(expected.x, 10);
+    expect(clone?.quaternion.y).toBeCloseTo(expected.y, 10);
+    expect(clone?.quaternion.z).toBeCloseTo(expected.z, 10);
+    expect(clone?.quaternion.w).toBeCloseTo(expected.w, 10);
+  });
+
   it('fires in stable order, freezes local time while world time advances, and updates mesh life', async () => {
     const scene = new THREE.Scene();
     const effect = defineEffect({

@@ -651,9 +651,6 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
     ],
   });
 
-  // The timeline runtime resets clone position/quaternion to the effect
-  // transform on every play, so static orientation is baked into geometry and
-  // per-strike offsets are reasserted every frame by the choreography loop.
   const circleOuterMesh = ring({
     innerRadius: 1.3,
     material: fxMaterial({
@@ -672,8 +669,8 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
     segments: 128,
   });
   circleOuterMesh.name = 'machina-circle-outer';
-  circleOuterMesh.geometry.rotateX(-Math.PI / 2);
-  circleOuterMesh.geometry.translate(0, 0.02, 0);
+  circleOuterMesh.rotation.x = -Math.PI / 2;
+  circleOuterMesh.position.y = 0.02;
   const circleMidMesh = ring({
     innerRadius: 0.98,
     material: fxMaterial({
@@ -692,8 +689,8 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleMidMesh.name = 'machina-circle-mid';
-  circleMidMesh.geometry.rotateX(-Math.PI / 2);
-  circleMidMesh.geometry.translate(0, 0.03, 0);
+  circleMidMesh.rotation.x = -Math.PI / 2;
+  circleMidMesh.position.y = 0.03;
   const circleCoreMesh = ring({
     innerRadius: 0.42,
     material: fxMaterial({
@@ -712,8 +709,8 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleCoreMesh.name = 'machina-circle-core';
-  circleCoreMesh.geometry.rotateX(-Math.PI / 2);
-  circleCoreMesh.geometry.translate(0, 0.04, 0);
+  circleCoreMesh.rotation.x = -Math.PI / 2;
+  circleCoreMesh.position.y = 0.04;
 
   const columnMesh = cylinder({
     height: 3.2,
@@ -735,6 +732,7 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
     radius: 0.72,
   });
   columnMesh.name = 'machina-column';
+  // Keep the base-pivot bake: clone scale animates the column's vertical growth.
   columnMesh.geometry.translate(0, 1.61, 0);
   const columnInnerMesh = cylinder({
     height: 3.0,
@@ -777,6 +775,7 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
       radius,
     });
     mesh.name = final ? 'machina-laser-final' : `machina-laser-${index}`;
+    // Keep the beam base at the clone origin used by per-strike choreography.
     mesh.geometry.translate(0, 3, 0);
     return mesh;
   };
@@ -798,6 +797,7 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
       segments: 48,
     });
     mesh.name = final ? 'machina-shock-final' : `machina-shock-${index}`;
+    // Keep orientation baked so page-driven x/z scale expands in the ground plane.
     mesh.geometry.rotateX(-Math.PI / 2);
     return mesh;
   };

@@ -530,8 +530,8 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleFillMesh.name = 'barrier-circle-fill';
-  circleFillMesh.geometry.rotateX(-Math.PI / 2);
-  circleFillMesh.geometry.translate(0, 0.01, 0);
+  circleFillMesh.rotation.x = -Math.PI / 2;
+  circleFillMesh.position.y = 0.01;
   const circleOuterMesh = ring({
     innerRadius: 1.78,
     material: fxMaterial({
@@ -550,10 +550,8 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
     segments: 128,
   });
   circleOuterMesh.name = 'barrier-circle-outer';
-  // The timeline runtime resets clone transforms to the effect transform, so
-  // every static orientation/offset must be baked into the geometry itself.
-  circleOuterMesh.geometry.rotateX(-Math.PI / 2);
-  circleOuterMesh.geometry.translate(0, 0.02, 0);
+  circleOuterMesh.rotation.x = -Math.PI / 2;
+  circleOuterMesh.position.y = 0.02;
   const circleInnerMesh = ring({
     innerRadius: 1.16,
     material: fxMaterial({
@@ -572,8 +570,8 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
     segments: 128,
   });
   circleInnerMesh.name = 'barrier-circle-inner';
-  circleInnerMesh.geometry.rotateX(-Math.PI / 2);
-  circleInnerMesh.geometry.translate(0, 0.015, 0);
+  circleInnerMesh.rotation.x = -Math.PI / 2;
+  circleInnerMesh.position.y = 0.015;
 
   // Sealed base rim: a thin bright ring that snaps in with the dome and stays
   // for the whole hold, anchoring the hemisphere to the ground.
@@ -594,8 +592,8 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
     segments: 128,
   });
   baseRimMesh.name = 'barrier-base-rim';
-  baseRimMesh.geometry.rotateX(-Math.PI / 2);
-  baseRimMesh.geometry.translate(0, 0.03, 0);
+  baseRimMesh.rotation.x = -Math.PI / 2;
+  baseRimMesh.position.y = 0.03;
 
   const shockMesh = ring({
     innerRadius: 0.86,
@@ -614,6 +612,7 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   shockMesh.name = 'barrier-shock';
+  // Keep the offset baked because clone scale animates the expanding shock.
   shockMesh.geometry.rotateX(-Math.PI / 2);
   shockMesh.geometry.translate(0, 0.04, 0);
 

@@ -477,10 +477,8 @@ function createSanctuaryBloom(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleOuterMesh.name = 'heal-circle-outer';
-  // The timeline runtime resets clone transforms to the effect transform, so
-  // every static orientation/offset must be baked into the geometry itself.
-  circleOuterMesh.geometry.rotateX(-Math.PI / 2);
-  circleOuterMesh.geometry.translate(0, -0.93, 0);
+  circleOuterMesh.rotation.x = -Math.PI / 2;
+  circleOuterMesh.position.y = -0.93;
   const circleInnerMesh = ring({
     innerRadius: 0.8,
     material: fxMaterial({
@@ -499,8 +497,8 @@ function createSanctuaryBloom(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleInnerMesh.name = 'heal-circle-inner';
-  circleInnerMesh.geometry.rotateX(-Math.PI / 2);
-  circleInnerMesh.geometry.translate(0, -0.93, 0);
+  circleInnerMesh.rotation.x = -Math.PI / 2;
+  circleInnerMesh.position.y = -0.93;
 
   const columnMesh = cylinder({
     height: 3.4,
@@ -518,7 +516,7 @@ function createSanctuaryBloom(textures: EffectTextures, loop: boolean) {
     radius: 0.5,
   });
   columnMesh.name = 'heal-column';
-  columnMesh.geometry.translate(0, 3.4 / 2 - 0.93, 0);
+  columnMesh.position.y = 3.4 / 2 - 0.93;
 
   const waveMaterial = (opacity: number) =>
     fxMaterial({
@@ -539,6 +537,7 @@ function createSanctuaryBloom(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   waveMesh.name = 'heal-wave';
+  // Keep orientation/offset baked for page-driven ground-plane expansion.
   waveMesh.geometry.rotateX(-Math.PI / 2);
   waveMesh.geometry.translate(0, -0.92, 0);
   const waveMesh2 = ring({

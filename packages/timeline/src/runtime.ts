@@ -103,10 +103,17 @@ type SceneTarget = {
 };
 
 type MeshRuntime = {
+  readonly authoredLocal: AuthoredLocalTransform;
   elapsed: number;
   readonly duration: number;
   readonly mesh: MeshFxMesh;
   playing: boolean;
+};
+
+type AuthoredLocalTransform = {
+  readonly position: readonly [number, number, number];
+  readonly quaternion: readonly [number, number, number, number];
+  readonly scale: readonly [number, number, number];
 };
 
 type ActiveShake = {
@@ -250,22 +257,59 @@ function cloneMaterial(material: MeshFxMesh['material'], path: string): MeshFxMe
   return material.clone();
 }
 
-function cloneMesh(key: string, resource: MeshFxRuntimeResource): MeshFxMesh {
+function cloneMesh(
+  key: string,
+  resource: MeshFxRuntimeResource,
+): { readonly authoredLocal: AuthoredLocalTransform; readonly mesh: MeshFxMesh } {
+  const authoredLocal = Object.freeze({
+    position: Object.freeze([
+      resource.mesh.position.x,
+      resource.mesh.position.y,
+      resource.mesh.position.z,
+    ] as const),
+    quaternion: Object.freeze([
+      resource.mesh.quaternion.x,
+      resource.mesh.quaternion.y,
+      resource.mesh.quaternion.z,
+      resource.mesh.quaternion.w,
+    ] as const),
+    scale: Object.freeze([
+      resource.mesh.scale.x,
+      resource.mesh.scale.y,
+      resource.mesh.scale.z,
+    ] as const),
+  });
   const mesh = resource.mesh.clone() as MeshFxMesh;
   mesh.material = cloneMaterial(resource.mesh.material, `elements.${key}.material`);
   mesh.visible = false;
-  return mesh;
+  return { authoredLocal, mesh };
 }
 
 function setMeshTransform(
   mesh: MeshFxMesh,
+  authoredLocal: AuthoredLocalTransform,
   position: PositionInput | undefined,
   rotation: RotationInput | undefined,
 ): void {
   const [px, py, pz] = vector3(position);
   const [qx, qy, qz, qw] = quaternion(rotation);
-  mesh.position.set(px, py, pz);
-  mesh.quaternion.set(qx, qy, qz, qw);
+  const [ax, ay, az] = authoredLocal.position;
+  const tx = 2 * (qy * az - qz * ay);
+  const ty = 2 * (qz * ax - qx * az);
+  const tz = 2 * (qx * ay - qy * ax);
+  mesh.position.set(
+    px + ax + qw * tx + qy * tz - qz * ty,
+    py + ay + qw * ty + qz * tx - qx * tz,
+    pz + az + qw * tz + qx * ty - qy * tx,
+  );
+
+  const [aqx, aqy, aqz, aqw] = authoredLocal.quaternion;
+  mesh.quaternion.set(
+    qw * aqx + qx * aqw + qy * aqz - qz * aqy,
+    qw * aqy - qx * aqz + qy * aqw + qz * aqx,
+    qw * aqz + qx * aqy - qy * aqx + qz * aqw,
+    qw * aqw - qx * aqx - qy * aqy - qz * aqz,
+  );
 }
 
 function materialControls(mesh: MeshFxMesh): FxNodeMaterial['fx'][] {
@@ -337,10 +381,11 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     }
     try {
       for (const [key, resource] of getMeshFxResources(definition)) {
-        const mesh = cloneMesh(key, resource);
-        setMeshTransform(mesh, this.#position, this.#rotation);
+        const { authoredLocal, mesh } = cloneMesh(key, resource);
+        setMeshTransform(mesh, authoredLocal, this.#position, this.#rotation);
         this.#scene?.add(mesh);
         this.#meshRuntimes.set(key, {
+          authoredLocal,
           duration: resource.duration,
           elapsed: 0,
           mesh,
@@ -509,7 +554,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.#rotation = rotation;
     for (const emitter of this.#activeEmitters.values()) emitter.setTransform(position, rotation);
     for (const runtime of this.#meshRuntimes.values())
-      setMeshTransform(runtime.mesh, position, rotation);
+      setMeshTransform(runtime.mesh, runtime.authoredLocal, position, rotation);
   }
 
   stop(): void {

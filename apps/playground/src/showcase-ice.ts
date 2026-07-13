@@ -571,17 +571,13 @@ function buildPillarMesh(spec: PillarSpec, textures: EffectTextures): MeshFxMesh
     thetaStart: spec.thetaStart,
   });
   mesh.name = `ice-pillar-${spec.suffix}`;
-  // The timeline runtime resets clone transforms to the effect transform, so
-  // the whole placement — base on the circle, outward tilt — is baked into
-  // the geometry: base to origin, tilt around the base, then translate.
+  // Keep the base at the local origin so any authored scale grows from it.
   mesh.geometry.translate(0, spec.height / 2, 0);
-  mesh.geometry.applyMatrix4(
-    new THREE.Matrix4().makeRotationAxis(
-      new THREE.Vector3(Math.sin(spec.angle), 0, -Math.cos(spec.angle)),
-      spec.tilt,
-    ),
+  mesh.quaternion.setFromAxisAngle(
+    new THREE.Vector3(Math.sin(spec.angle), 0, -Math.cos(spec.angle)),
+    spec.tilt,
   );
-  mesh.geometry.translate(
+  mesh.position.set(
     Math.cos(spec.angle) * spec.ringRadius,
     FLOOR_Y + 0.01,
     Math.sin(spec.angle) * spec.ringRadius,
@@ -608,8 +604,8 @@ function buildBaseRingMesh(spec: PillarSpec, textures: EffectTextures): MeshFxMe
     segments: 48,
   });
   mesh.name = `ice-ring-${spec.suffix}`;
-  mesh.geometry.rotateX(-Math.PI / 2);
-  mesh.geometry.translate(
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.set(
     Math.cos(spec.angle) * spec.ringRadius,
     CIRCLE_Y + 0.006,
     Math.sin(spec.angle) * spec.ringRadius,
@@ -726,6 +722,7 @@ function createGlacialRequiem(textures: EffectTextures, loop: boolean) {
     segments: 128,
   });
   circleOuterMesh.name = 'ice-circle-outer';
+  // Keep orientation baked: page-driven x/z scale is expressed in world axes.
   circleOuterMesh.geometry.rotateX(-Math.PI / 2);
   circleOuterMesh.geometry.translate(0, CIRCLE_Y, 0);
   const circleInnerMesh = ring({
@@ -766,6 +763,7 @@ function createGlacialRequiem(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   frostWaveMesh.name = 'ice-frost-wave';
+  // Keep orientation/offset baked for the page-driven ground-plane scale.
   frostWaveMesh.geometry.rotateX(-Math.PI / 2);
   frostWaveMesh.geometry.translate(0, CIRCLE_Y + 0.003, 0);
 

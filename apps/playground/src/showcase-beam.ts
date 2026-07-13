@@ -447,11 +447,7 @@ interface EffectTextures {
   readonly ticks: THREE.Texture;
 }
 
-/**
- * Timeline effect: the beam itself plus the caster circle and both shock
- * rings. All static placement is baked into the geometry because the timeline
- * runtime overwrites clone position/quaternion with the effect transform.
- */
+/** Timeline effect: the beam itself plus the caster circle and both shock rings. */
 function createPlasmaLance(textures: EffectTextures, loop: boolean) {
   const beamCoreMesh = cylinder({
     height: BEAM_LENGTH,
@@ -471,8 +467,8 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
   beamCoreMesh.name = 'beam-core';
   // rotateZ(-PI/2) lays the cylinder along +X with UV v = 0 at the caster, so
   // the V-ramp dissolve sweeps caster -> enemy and uvFlow scrolls the same axis.
-  beamCoreMesh.geometry.rotateZ(-Math.PI / 2);
-  beamCoreMesh.geometry.translate(0, 0.05, 0);
+  beamCoreMesh.rotation.z = -Math.PI / 2;
+  beamCoreMesh.position.y = 0.05;
 
   const beamSheathMesh = cylinder({
     height: BEAM_LENGTH,
@@ -492,6 +488,7 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
     radius: 0.3,
   });
   beamSheathMesh.name = 'beam-sheath';
+  // Keep orientation baked so the page's y/z width pulse remains world-aligned.
   beamSheathMesh.geometry.rotateZ(-Math.PI / 2);
   beamSheathMesh.geometry.translate(0, 0.05, 0);
 
@@ -512,6 +509,7 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
     radius: 0.5,
   });
   beamGlowMesh.name = 'beam-glow';
+  // Keep orientation baked so the page's y/z width pulse remains world-aligned.
   beamGlowMesh.geometry.rotateZ(-Math.PI / 2);
   beamGlowMesh.geometry.translate(0, 0.05, 0);
 
@@ -532,8 +530,8 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
     radius: 0.06,
   });
   beamResidualMesh.name = 'beam-residual';
-  beamResidualMesh.geometry.rotateZ(-Math.PI / 2);
-  beamResidualMesh.geometry.translate(0, 0.05, 0);
+  beamResidualMesh.rotation.z = -Math.PI / 2;
+  beamResidualMesh.position.y = 0.05;
 
   const circleGlyphsMesh = ring({
     innerRadius: 0.62,
@@ -554,8 +552,8 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
   });
   circleGlyphsMesh.name = 'beam-circle-glyphs';
   // Vertical magic circle facing the enemy: XY ring plane rotated into YZ.
-  circleGlyphsMesh.geometry.rotateY(Math.PI / 2);
-  circleGlyphsMesh.geometry.translate(-2.3, 0.1, 0);
+  circleGlyphsMesh.rotation.y = Math.PI / 2;
+  circleGlyphsMesh.position.set(-2.3, 0.1, 0);
 
   const circleTicksMesh = ring({
     innerRadius: 0.4,
@@ -575,8 +573,8 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleTicksMesh.name = 'beam-circle-ticks';
-  circleTicksMesh.geometry.rotateY(Math.PI / 2);
-  circleTicksMesh.geometry.translate(-2.3, 0.1, 0);
+  circleTicksMesh.rotation.y = Math.PI / 2;
+  circleTicksMesh.position.set(-2.3, 0.1, 0);
 
   const muzzleRingMesh = ring({
     innerRadius: 0.55,
@@ -595,6 +593,7 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
     segments: 80,
   });
   muzzleRingMesh.name = 'beam-muzzle-ring';
+  // Keep the bake so page-driven y/z scale expands in the world YZ plane.
   muzzleRingMesh.geometry.rotateY(Math.PI / 2);
   muzzleRingMesh.geometry.translate(-2.3, 0.1, 0);
 
@@ -616,6 +615,7 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
   });
   impactRingMesh.name = 'beam-impact-ring';
   // Faces -X so the camera-side front face stays visible at the enemy end.
+  // Keep the bake so page-driven y/z scale expands in the world YZ plane.
   impactRingMesh.geometry.rotateY(-Math.PI / 2);
   impactRingMesh.geometry.translate(2.3, 0, 0);
 

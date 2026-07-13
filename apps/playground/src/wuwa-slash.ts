@@ -456,10 +456,8 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleOuterMesh.name = 'wuwa-circle-outer';
-  // The timeline runtime resets clone transforms to the effect transform, so
-  // every static orientation/offset must be baked into the geometry itself.
-  circleOuterMesh.geometry.rotateX(-Math.PI / 2);
-  circleOuterMesh.geometry.translate(0, -0.93, 0);
+  circleOuterMesh.rotation.x = -Math.PI / 2;
+  circleOuterMesh.position.y = -0.93;
   const circleInnerMesh = ring({
     innerRadius: 0.82,
     material: fxMaterial({
@@ -477,8 +475,8 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     segments: 96,
   });
   circleInnerMesh.name = 'wuwa-circle-inner';
-  circleInnerMesh.geometry.rotateX(-Math.PI / 2);
-  circleInnerMesh.geometry.translate(0, -0.93, 0);
+  circleInnerMesh.rotation.x = -Math.PI / 2;
+  circleInnerMesh.position.y = -0.93;
 
   const slashMainMesh = slashArc({
     angle: 145,
@@ -498,10 +496,8 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     taper: 0.8,
   });
   slashMainMesh.name = 'wuwa-slash-main';
-  slashMainMesh.geometry.applyMatrix4(
-    new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(-0.24, 0.16, 0.3)),
-  );
-  slashMainMesh.geometry.translate(0, -0.4, 0.2);
+  slashMainMesh.rotation.set(-0.24, 0.16, 0.3);
+  slashMainMesh.position.set(0, -0.4, 0.2);
   const slashCounterMesh = slashArc({
     angle: 125,
     innerRadius: 0.45,
@@ -520,10 +516,8 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     taper: 0.75,
   });
   slashCounterMesh.name = 'wuwa-slash-counter';
-  slashCounterMesh.geometry.applyMatrix4(
-    new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(0.18, -0.14, -0.3)),
-  );
-  slashCounterMesh.geometry.translate(0, 0.2, 0.1);
+  slashCounterMesh.rotation.set(0.18, -0.14, -0.3);
+  slashCounterMesh.position.set(0, 0.2, 0.1);
 
   const shockMesh = ring({
     innerRadius: 0.93,
