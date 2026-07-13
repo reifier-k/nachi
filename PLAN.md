@@ -163,7 +163,7 @@ apps/
 
 - **Claude本体 = 統括(オーケストレーター)**。仕様整理・委譲・検収・進行管理・ドキュメント更新に徹し、**原則自ら実装しない**
 - **Codex = 実装担当**。`/codex:rescue --model gpt-5.6-sol --effort xhigh` で委譲する。**モデルとeffortはこの指定を厳守**(変更はユーザー判断のみ)
-- **Claudeサブエージェント = レビュー担当**。実装完了ごとに起動してコードレビュー
+- **レビュー = クロスレビュー原則(2026-07-14ユーザー指示)**。レビューは常に**実装者と異なる系統**が行う: Codex実装→Claudeサブエージェントがレビュー / Claude(サブエージェント)実装→**Codexがレビュー**(`codex-companion review`/`adversarial-review` または rescue でのレビュー依頼)。例外: GPU実測やスクリーンショット目視などCodexサンドボックスで物理的に不可能な検証項目は統括が実測で補完し、その旨をログに残す
 - **監査 = CodexとClaudeの両サブエージェント**が独立実施(ROADMAP.mdの監査プロトコル参照)
 
 ### 実装セッションのループ
@@ -215,6 +215,9 @@ apps/
 - 2026-07-10: **スパイク1/2の実証結果(three 0.185.1、SwiftShaderヘッドレス)**:①TSLコンピュートで10万粒子シミュレーションが公開APIで成立(`instancedArray`(SoA)+`Fn().compute()`+複数カーネル順序投入)②アトミクス動作確認(`.toAtomic()`+atomicAdd、91,327並行加算の完全一致)③間接描画引数のGPU駆動を実証(`IndirectStorageBufferAttribute`+`geometry.setIndirect`、readbackで引数内容確認。**描画実行自体の確認はWindows実GPU目視待ち**)④`renderer.getArrayBufferAsync`でreadback可。**未回答**: dispatchIndirect実証(APIは存在確認済み)、SoA vs interleaved比較、free-list vs compaction(スパイクは連続prefix生存で回避)、GPU timestamp計測(computeAsync壁時間はencodeのみで性能指標にならない)
 
 - 2026-07-12: **M12バッチ3(Grid3D流体)設計確定**。Grid3DはGrid2Dと同じpacked vec4 current/scratch、before/after particle境界、iterationごとのstage/commit独立submitを共有する。3D添字はx-fast、sampleは8-tap trilinear、全kernelにinvocation範囲guard。メモリは`C=WHD`・vec4 group数`G`に対しstate+scratch=`32CG` byte、transfer=`24C` byteを公開し、device buffer上限を割当前に診断。v1 volume描画はGPU grid→particle density sample+slice/billboardまで、full ray marchingは将来段階。WebGL2はCPU/texture fallbackせず`NACHI_GRID3D_WEBGL2_UNSUPPORTED`。
+- 2026-07-13: **H1瑕疵ハードニング開始+3裁定(ユーザー)**。①plan 001=mesh-fx作者ローカル変換の合成案採用(挙動変更/minor) ②plan 007(a)=案A: lifecycle未指定時のスポーン包絡からの既定duration導出 ③plan 008=RFC起票の上で既定空間'emitter'統一まで断行。H1-1実装中の統括裁定: 導出キーは`lifecycle?.duration === undefined`(部分オブジェクトでも導出。footgun再発防止でレビュー提案を採用)
+- 2026-07-14: **クロスレビュー原則(ユーザー指示)**。レビューは常に実装者と異なる系統: Codex実装→Claudeレビュー / Claude実装→Codexレビュー。GPU実測・目視などCodexで物理不可能な検証は統括が実測補完しログに残す
+- 2026-07-14: **H1-1で新規コア瑕疵を発見(plan 011 / H1-10)**。init乱数がスロットキーのため、rate系のスロット再利用で①ラン間非決定(スクショ2〜5%揺れ)②「凍結パターン」分布歪み(再利用スロットが同一乱数を再現し、名目分布より疎で構造的な見た目になる)。恒久修正はspawnOrder+シードキー化(H1-10)。暫定でshowcase-beamにページローカル`stableRateInit`(hash(spawnOrder+salt+stream))を適用し決定化
 
 ## 未決事項
 
