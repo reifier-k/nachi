@@ -2929,6 +2929,42 @@ describe('VFXSystem runtime scheduler', () => {
     expect(matrix).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1]);
   });
 
+  it('composes each emitter offset after the instance transform for scattered bursts', () => {
+    const emitter = (offset: readonly [number, number, number]) =>
+      defineEmitter({
+        capacity: 1,
+        offset,
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      });
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          left: emitter([-2, 0, 0]),
+          middle: emitter([0, 1, 0]),
+          right: emitter([3, 0, 0]),
+        },
+      }),
+      { position: [10, 0, 0], rotation: [0, 0, Math.PI / 2] },
+    );
+
+    const translation = (key: string) => {
+      const matrix = instance.getEmitter(key)?.kernels.uniforms['Emitter.transform']?.value as
+        | readonly number[]
+        | undefined;
+      return matrix?.slice(12, 15);
+    };
+    expect(translation('left')).toEqual([expect.closeTo(10), expect.closeTo(-2), 0]);
+    expect(translation('middle')).toEqual([expect.closeTo(9), expect.closeTo(0), 0]);
+    expect(translation('right')).toEqual([expect.closeTo(10), expect.closeTo(3), 0]);
+
+    instance.setTransform([4, 5, 6]);
+    expect(translation('left')).toEqual([2, 5, 6]);
+    expect(translation('middle')).toEqual([4, 6, 6]);
+    expect(translation('right')).toEqual([7, 5, 6]);
+  });
+
   it('attaches an effect to a mutable world-transform source immediately', () => {
     const system = new VFXSystem(new FakeRuntimeRenderer());
     const instance = system.spawn(runtimeEffect({ duration: 1 }));

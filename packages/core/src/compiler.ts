@@ -8,7 +8,10 @@ import {
 import { VfxDiagnosticError } from './diagnostics.js';
 import { MAX_EMITTER_CAPACITY } from './limits.js';
 import { neighborGridCellCount, validateNeighborGridDefinition } from './neighbor-grid.js';
-import { collectCoreModuleConfigDiagnostics } from './module-validation.js';
+import {
+  collectCoreModuleConfigDiagnostics,
+  collectEmitterOffsetDiagnostics,
+} from './module-validation.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
   collectEmitterBehaviorConfigDiagnostics,
@@ -4230,6 +4233,7 @@ export function compileEmitter<
     });
   }
   diagnostics.push(...collectEmitterLifecycleDiagnostics(untypedDefinition));
+  diagnostics.push(...collectEmitterOffsetDiagnostics(untypedDefinition.offset));
   diagnostics.push(...collectEmitterBehaviorConfigDiagnostics(untypedDefinition));
   diagnostics.push(...collectEmitterModuleLabelDiagnostics(untypedDefinition));
   diagnostics.push(...collectParameterDeclarationDiagnostics(untypedDefinition.parameters));
@@ -4771,21 +4775,51 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     build(context) {
       const config = context.module.config as {
+        arc?: { axis?: Vec3; thetaMax: ValueInput<number> };
+        center?: ValueInput<Vec3>;
         radius: ValueInput<number>;
         surfaceOnly?: boolean;
       };
-      const z = context.random(1).mul(2).sub(1);
-      const azimuth = context.random(2).mul(Math.PI * 2);
-      const horizontal = context.adapter.constant(1, 'f32').sub(z.mul(z)).clamp(0, 1).sqrt();
-      const radius = context.value(config.radius, 'f32', 3);
-      const distance = config.surfaceOnly ? radius : radius.mul(context.random(4).pow(1 / 3));
-      const local = context.adapter
-        .vec3(
+      let direction: KernelNode;
+      if (config.arc === undefined) {
+        // Keep the legacy full-sphere graph byte-for-byte stable when arc is omitted.
+        const z = context.random(1).mul(2).sub(1);
+        const azimuth = context.random(2).mul(Math.PI * 2);
+        const horizontal = context.adapter.constant(1, 'f32').sub(z.mul(z)).clamp(0, 1).sqrt();
+        direction = context.adapter.vec3(
           context.adapter.cos(azimuth).mul(horizontal),
           z,
           context.adapter.sin(azimuth).mul(horizontal),
-        )
-        .mul(distance);
+        );
+      } else {
+        const basis = normalizedBasis(config.arc.axis ?? [0, 1, 0]);
+        const thetaMax = context.value(config.arc.thetaMax, 'f32', 5).mul(Math.PI / 180);
+        const cosLimit = context.adapter.cos(thetaMax);
+        // Uniform cos(theta) preserves area measure over the spherical cap.
+        const cosTheta = cosLimit.add(
+          context.random(1).mul(context.adapter.constant(1, 'f32').sub(cosLimit)),
+        );
+        const sinTheta = context.adapter
+          .constant(1, 'f32')
+          .sub(cosTheta.mul(cosTheta))
+          .clamp(0, 1)
+          .sqrt();
+        const azimuth = context.random(2).mul(Math.PI * 2);
+        const radialX = context.adapter.cos(azimuth).mul(sinTheta);
+        const radialZ = context.adapter.sin(azimuth).mul(sinTheta);
+        const component = (axis: 0 | 1 | 2) =>
+          radialX
+            .mul(basis.right[axis])
+            .add(cosTheta.mul(basis.up[axis]))
+            .add(radialZ.mul(basis.forward[axis]));
+        direction = context.adapter.vec3(component(0), component(1), component(2));
+      }
+      const radius = context.value(config.radius, 'f32', 3);
+      const distance = config.surfaceOnly ? radius : radius.mul(context.random(4).pow(1 / 3));
+      let local = direction.mul(distance);
+      if (config.center !== undefined) {
+        local = local.add(context.value(config.center, 'vec3', 6));
+      }
       const world = context
         .uniform('Emitter.transform')
         .mul(context.adapter.vec4(local.x, local.y, local.z, 1)).xyz;

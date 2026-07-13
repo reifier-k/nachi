@@ -98,12 +98,18 @@ function representativeEffect() {
     capacity: 256,
     events: { onDeath: emitTo('smoke', { inherit: ['position', 'velocity'] }) },
     init: [
-      positionSphere({ radius: range(0.1, 0.3), surfaceOnly: true }),
+      positionSphere({
+        arc: { axis: [0, 1, 0], thetaMax: 120 },
+        center: range([0.1, 0, -0.1], [0.2, 0.1, 0.1]),
+        radius: range(0.1, 0.3),
+        surfaceOnly: true,
+      }),
       velocityCone({ angle: 35, direction: [0, 1, 0], speed: range(2, 6) }),
       lifetime(range(0.4, 0.9)),
       lightIntensity(2),
     ],
     lifecycle: { duration: 1.5, loopCount: 2, prewarm: 0.1, startDelay: 0.05 },
+    offset: [1, 0.5, -2],
     parameters: { 'User.gravity': gravityParameter },
     quality: {
       low: {
@@ -265,6 +271,9 @@ describe('effect asset v1', () => {
     expect(effectAssetSchemaV1.$defs.emitter.properties.lifecycle).toEqual({
       $ref: '#/$defs/lifecycle',
     });
+    expect(effectAssetSchemaV1.$defs.emitter.properties.offset).toEqual({
+      $ref: '#/$defs/vec3',
+    });
     expect(effectAssetSchemaV1.$defs.emitter.properties.parameters).toEqual({
       $ref: '#/$defs/parameters',
     });
@@ -293,12 +302,90 @@ describe('effect asset v1', () => {
       'qualityTier',
       'emitterOverrides',
       'moduleOverride',
+      'positionSphereArc',
+      'positionSphereConfig',
       'scalability',
       'timelineEntry',
     ] as const) {
       expect(effectAssetSchemaV1.$defs[name].additionalProperties).toBe(false);
     }
     expect(loadEffect(document)).toEqual(document.effect);
+  });
+
+  it('round-trips emitter offset and strict positionSphere center/arc config', () => {
+    const effect = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 4,
+          init: [
+            positionSphere({
+              arc: { axis: [1, 0, 0], thetaMax: range(30, 75) },
+              center: [1, 2, 3],
+              radius: 0.25,
+            }),
+          ],
+          offset: [-2, 0.5, 4],
+          render: billboard({}),
+          spawn: burst({ count: 4 }),
+        }),
+      },
+    });
+    const document = serializeEffect(effect);
+
+    expect(serializeEffect(loadEffect(document))).toEqual(document);
+
+    const unknownConfig = structuredClone(document) as unknown as {
+      effect: { elements: { particles: { init: Array<{ config: Record<string, unknown> }> } } };
+    };
+    unknownConfig.effect.elements.particles.init[0]!.config.mystery = true;
+    expect(diagnosticCodes(() => loadEffect(unknownConfig))).toContain('NACHI_ASSET_UNKNOWN_FIELD');
+
+    const unknownArc = structuredClone(document) as unknown as {
+      effect: {
+        elements: {
+          particles: { init: Array<{ config: { arc: Record<string, unknown> } }> };
+        };
+      };
+    };
+    unknownArc.effect.elements.particles.init[0]!.config.arc.mystery = true;
+    expect(diagnosticCodes(() => loadEffect(unknownArc))).toContain('NACHI_ASSET_UNKNOWN_FIELD');
+
+    const invalidRange = structuredClone(document) as unknown as {
+      effect: {
+        elements: {
+          particles: { init: Array<{ config: { radius: unknown } }> };
+        };
+      };
+    };
+    invalidRange.effect.elements.particles.init[0]!.config.radius = {
+      distribution: 'uniform',
+      kind: 'range',
+      max: 0.2,
+      min: [0.1],
+    };
+    const invalidRangePath = '$.effect.elements.particles.init[0].config.radius.min';
+    expect(
+      validateEffectAsset(invalidRange).filter(({ path }) => path === invalidRangePath),
+    ).toHaveLength(1);
+
+    const invalidCurve = structuredClone(document) as unknown as {
+      effect: {
+        elements: {
+          particles: { init: Array<{ config: { radius: unknown } }> };
+        };
+      };
+    };
+    invalidCurve.effect.elements.particles.init[0]!.config.radius = {
+      keys: [
+        { time: 0, value: [0.1] },
+        { time: 1, value: 0.2 },
+      ],
+      kind: 'curve',
+    };
+    const invalidCurvePath = '$.effect.elements.particles.init[0].config.radius.keys[0].value';
+    expect(
+      validateEffectAsset(invalidCurve).filter(({ path }) => path === invalidCurvePath),
+    ).toHaveLength(1);
   });
 
   it('supports an explicit future migration registration point', () => {

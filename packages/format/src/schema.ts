@@ -239,6 +239,32 @@ export const effectAssetSchemaV1 = {
       required: ['radius'],
       type: 'object',
     },
+    vec3: {
+      items: { type: 'number' },
+      maxItems: 3,
+      minItems: 3,
+      type: 'array',
+    },
+    positionSphereArc: {
+      additionalProperties: false,
+      properties: {
+        axis: { $ref: '#/$defs/vec3' },
+        thetaMax: {},
+      },
+      required: ['thetaMax'],
+      type: 'object',
+    },
+    positionSphereConfig: {
+      additionalProperties: false,
+      properties: {
+        arc: { $ref: '#/$defs/positionSphereArc' },
+        center: {},
+        radius: {},
+        surfaceOnly: { type: 'boolean' },
+      },
+      required: ['radius'],
+      type: 'object',
+    },
     events: {
       additionalProperties: { $ref: '#/$defs/moduleOrArray' },
       type: 'object',
@@ -332,6 +358,7 @@ export const effectAssetSchemaV1 = {
         init: { $ref: '#/$defs/moduleOverride' },
         integration: { enum: ['euler', 'none'] },
         lifecycle: { $ref: '#/$defs/lifecycle' },
+        offset: { $ref: '#/$defs/vec3' },
         parameters: { $ref: '#/$defs/parameters' },
         quality: { $ref: '#/$defs/quality' },
         render: { $ref: '#/$defs/moduleOverride' },
@@ -438,6 +465,7 @@ export const effectAssetSchemaV1 = {
         integration: { enum: ['euler', 'none'] },
         kind: { const: 'emitter' },
         lifecycle: { $ref: '#/$defs/lifecycle' },
+        offset: { $ref: '#/$defs/vec3' },
         parameters: { $ref: '#/$defs/parameters' },
         quality: { $ref: '#/$defs/quality' },
         render: { $ref: '#/$defs/moduleOrArray' },
@@ -459,6 +487,15 @@ export const effectAssetSchemaV1 = {
     },
     module: {
       additionalProperties: false,
+      allOf: [
+        {
+          if: {
+            properties: { type: { const: 'core/position-sphere' } },
+            required: ['type'],
+          },
+          then: { properties: { config: { $ref: '#/$defs/positionSphereConfig' } } },
+        },
+      ],
       properties: {
         access: {
           additionalProperties: false,

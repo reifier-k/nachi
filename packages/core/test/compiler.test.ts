@@ -117,6 +117,28 @@ describe('M10 bitonic particle sort contract', () => {
     }
   });
 
+  it.each([
+    [
+      'center',
+      () => positionSphere({ center: [0, Number.NaN, 0], radius: 1 }),
+      'NACHI_POSITION_SPHERE_CENTER_INVALID',
+    ],
+    [
+      'thetaMax',
+      () => positionSphere({ arc: { thetaMax: 0 }, radius: 1 }),
+      'NACHI_POSITION_SPHERE_ARC_THETA_INVALID',
+    ],
+    [
+      'axis',
+      () => positionSphere({ arc: { axis: [0, 0, 0], thetaMax: 90 }, radius: 1 }),
+      'NACHI_POSITION_SPHERE_ARC_AXIS_INVALID',
+    ],
+  ])('throws static positionSphere %s diagnostics eagerly', (_name, factory, code) => {
+    expect(factory).toThrowError(
+      expect.objectContaining({ diagnostics: [expect.objectContaining({ code })] }),
+    );
+  });
+
   it('pads to 2^n, keeps far sentinels in the skipped prefix, and breaks ties by index', () => {
     const alive = [
       { depth: -2, index: 7 },
@@ -3568,6 +3590,54 @@ describe('emitter kernel compiler', () => {
     );
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_VELOCITY_CONE_DIRECTION_INVALID' }),
+    );
+  });
+
+  it('diagnoses positionSphere center and arc constraints for direct compiler input', () => {
+    const valid = positionSphere({ radius: 1 });
+    const program = compileEmitter(
+      baseEmitter({
+        init: [
+          rawConfig(valid, {
+            arc: { axis: [0, 0, 0], thetaMax: 181 },
+            center: [0, Number.NaN, 0],
+            radius: 1,
+          }),
+        ],
+        integration: 'none',
+      }),
+    );
+
+    expect(program.diagnostics.map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'NACHI_POSITION_SPHERE_CENTER_INVALID',
+        'NACHI_POSITION_SPHERE_ARC_THETA_INVALID',
+        'NACHI_POSITION_SPHERE_ARC_AXIS_INVALID',
+      ]),
+    );
+    expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
+  });
+
+  it('shares emitter offset validation between defineEmitter and direct compiler input', () => {
+    expect(() =>
+      defineEmitter({
+        capacity: 1,
+        offset: [0, Number.POSITIVE_INFINITY, 0],
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_EMITTER_OFFSET_INVALID' })],
+      }),
+    );
+
+    const program = compileEmitter({
+      ...baseEmitter(),
+      offset: [Number.NaN, 0, 0],
+    });
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_EMITTER_OFFSET_INVALID', path: 'offset' }),
     );
   });
 

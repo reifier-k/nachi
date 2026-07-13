@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   billboard,
@@ -59,6 +61,53 @@ import {
 } from '../src/index.js';
 
 describe('three kernel adapter', () => {
+  it('keeps legacy positionSphere WGSL bit-identical and builds center/arc codegen', () => {
+    const renderer = {
+      backend: {
+        capabilities: { getUniformBufferLimit: () => 64 },
+        compatibilityMode: false,
+      },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      hasFeature: () => false,
+    };
+    const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const shaderFor = (module: ReturnType<typeof positionSphere>) => {
+      const program = compileEmitter(
+        defineEmitter({
+          capacity: 4,
+          init: [module],
+          integration: 'none',
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 1 }),
+        }),
+      );
+      const kernels = program.buildKernels(createThreeKernelAdapter());
+      const builder = new NodeBuilder(kernels.init, renderer);
+      builder.build();
+      return builder.computeShader;
+    };
+
+    const legacyShader = shaderFor(positionSphere({ radius: 1 }));
+    expect(createHash('sha256').update(legacyShader).digest('hex')).toBe(
+      'f757f0a873c00cd93b0a1d780dba75f69ae1600a9caf58247227a010a8b39074',
+    );
+    expect(() =>
+      shaderFor(
+        positionSphere({
+          arc: { axis: [1, 0, 0], thetaMax: 75 },
+          center: [1, 2, 3],
+          radius: 0.5,
+          surfaceOnly: false,
+        }),
+      ),
+    ).not.toThrow();
+  });
+
   it('rejects M11 WebGL2 scale probes whose packed TF storage has multiple groups', () => {
     const adapter = createThreeKernelAdapter({
       backend: 'webgl2',

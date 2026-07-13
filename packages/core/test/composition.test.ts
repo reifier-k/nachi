@@ -256,6 +256,7 @@ describe('M9 emitter inheritance', () => {
       capacity: 8,
       init: [labeled('position', positionSphere({ radius: 1 })), labeled('life', lifetime(2))],
       lifecycle: { duration: 3, loopCount: 2 },
+      offset: [1, 0, 0],
       render: computeRender,
       spawn: burst({ count: 2 }),
       update: [labeled('gravity', gravity(-9)), labeled('drag', drag(0.1))],
@@ -264,6 +265,7 @@ describe('M9 emitter inheritance', () => {
       capacity: 16,
       init: { modules: [labeled('position', positionSphere({ radius: 2 }))] },
       lifecycle: { duration: 4 },
+      offset: [2, 0, -1],
       spawn: burst({ count: 5 }),
       update: {
         modules: [labeled('gravity', gravity(-3)), labeled('wind', gravity([2, 0, 0]))],
@@ -274,6 +276,7 @@ describe('M9 emitter inheritance', () => {
 
     expect(child.capacity).toBe(16);
     expect(child.lifecycle).toEqual({ duration: 4, loopCount: 2 });
+    expect(child.offset).toEqual([2, 0, -1]);
     expect((child.spawn as ModuleDefinition).config).toEqual({ count: 5 });
     expect(child.init?.map(({ label }) => label)).toEqual(['position', 'life']);
     expect(child.init?.[0]?.config).toEqual({ radius: 2 });

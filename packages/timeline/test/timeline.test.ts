@@ -699,6 +699,38 @@ describe('@nachi/timeline runtime', () => {
     }
   });
 
+  it('passes the effect frame through timeline play while preserving emitter offset data', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      offset: [1, 2, 3],
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({ elements: { child: emitter }, timeline: [at(0, play('child'))] });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const system = new VFXSystem({});
+      const instance = system.spawn(effect, {
+        position: [4, 5, 6],
+        rotation: [0, 0, Math.PI / 2],
+      });
+      await system.update(0);
+
+      const [childDefinition, options] = spawnSpy.mock.calls[0]!;
+      expect(childDefinition.elements.child).toMatchObject({ offset: [1, 2, 3] });
+      expect(options).toMatchObject({
+        position: [4, 5, 6],
+        rotation: [0, 0, Math.PI / 2],
+      });
+      instance.release();
+    } finally {
+      spawnSpy.mockRestore();
+    }
+  });
+
   it('enters error once when a split child cannot resolve a cross-emitter event target', async () => {
     const source = defineEmitter({
       capacity: 1,

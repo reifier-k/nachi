@@ -350,6 +350,15 @@ export interface PerDistanceSpawnOptions {
 }
 
 export interface PositionSphereOptions {
+  /** Emitter-local center offset. Defaults to [0, 0, 0]. */
+  readonly center?: ValueInput<Vec3>;
+  /** Area-uniform spherical cap around an emitter-local axis. Omission samples the full sphere. */
+  readonly arc?: {
+    /** Maximum polar angle in degrees, matching velocityCone.angle. */
+    readonly thetaMax: ValueInput<number>;
+    /** Emitter-local cap axis. Defaults to [0, 1, 0]. */
+    readonly axis?: Vec3;
+  };
   readonly radius: ValueInput<number>;
   readonly surfaceOnly?: boolean;
 }
@@ -669,6 +678,8 @@ export interface EmitterConfig<
    * statically known particle-lifetime grace. An explicit numeric `duration` always wins.
    */
   readonly lifecycle?: EmitterLifecycle;
+  /** Translates this emitter's local origin inside the effect-instance frame. */
+  readonly offset?: Vec3;
   readonly parameters?: Parameters;
   /** Serializable per-emitter overrides layered over Nachi's four system quality presets. */
   readonly quality?: EmitterQualityTiers;
@@ -708,6 +719,8 @@ export interface EmitterOverrideConfig<
   readonly init?: EmitterModuleListOverride<InitModule>;
   readonly integration?: EmitterIntegration;
   readonly lifecycle?: EmitterLifecycle;
+  /** Replaces the inherited emitter-local origin offset. */
+  readonly offset?: Vec3;
   readonly parameters?: Parameters;
   readonly quality?: EmitterQualityTiers;
   readonly render?: EmitterModuleListOverride<RenderModule>;

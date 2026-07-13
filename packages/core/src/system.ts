@@ -834,6 +834,32 @@ function transformMatrix(
   ];
 }
 
+function composeEmitterTransform(
+  instanceTransform: readonly number[],
+  offset: readonly [number, number, number] | undefined,
+): readonly number[] {
+  if (offset === undefined || (offset[0] === 0 && offset[1] === 0 && offset[2] === 0)) {
+    return instanceTransform;
+  }
+  const [x, y, z] = offset;
+  return [
+    ...instanceTransform.slice(0, 12),
+    instanceTransform[0]! * x +
+      instanceTransform[4]! * y +
+      instanceTransform[8]! * z +
+      instanceTransform[12]!,
+    instanceTransform[1]! * x +
+      instanceTransform[5]! * y +
+      instanceTransform[9]! * z +
+      instanceTransform[13]!,
+    instanceTransform[2]! * x +
+      instanceTransform[6]! * y +
+      instanceTransform[10]! * z +
+      instanceTransform[14]!,
+    1,
+  ];
+}
+
 function isParameterValue(type: AttributeType, value: unknown): boolean {
   const lengths: Partial<Record<AttributeType, number>> = {
     color: 4,
@@ -961,10 +987,11 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     reusedKernels?: BuiltEmitterKernels,
     qualityTier: QualityTier = 'epic',
   ) {
+    const emitterTransform = composeEmitterTransform(transform, definition.offset);
     this.program = program;
     this.#renderer = renderer;
     this.#seed = seed >>> 0;
-    this.#transform = transform;
+    this.#transform = emitterTransform;
     this.#parameters = { ...parameters };
     this.#emitterPath = emitterPath;
     this.#maxLifetime = maxLifetime;
@@ -989,7 +1016,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     renderer.clearStorageReplayReady?.(this.kernels);
     this.setQualityTier(qualityTier);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
-    setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', transform);
+    setUniform(renderer, this.kernels.uniforms, 'Emitter.transform', emitterTransform);
     for (const [path, value] of Object.entries(parameters)) {
       setUniform(renderer, this.kernels.uniforms, path as ParameterPath, value);
     }
@@ -1179,12 +1206,13 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   }
 
   setTransform(transform: readonly number[]): void {
-    const dx = (transform[12] ?? 0) - (this.#transform[12] ?? 0);
-    const dy = (transform[13] ?? 0) - (this.#transform[13] ?? 0);
-    const dz = (transform[14] ?? 0) - (this.#transform[14] ?? 0);
+    const emitterTransform = composeEmitterTransform(transform, this.definition.offset);
+    const dx = (emitterTransform[12] ?? 0) - (this.#transform[12] ?? 0);
+    const dy = (emitterTransform[13] ?? 0) - (this.#transform[13] ?? 0);
+    const dz = (emitterTransform[14] ?? 0) - (this.#transform[14] ?? 0);
     this.#pendingDistance += Math.hypot(dx, dy, dz);
-    this.#transform = transform;
-    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.transform', transform);
+    this.#transform = emitterTransform;
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.transform', emitterTransform);
   }
 
   setCamera(camera: VfxCameraState): void {

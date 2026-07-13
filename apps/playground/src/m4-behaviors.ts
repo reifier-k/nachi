@@ -328,6 +328,89 @@ async function run(): Promise<void> {
   const distanceBefore = meanDistance(attractorBefore, [5, 0, 0]);
   const distanceAfter = meanDistance(attractorAfter, [5, 0, 0]);
 
+  const placementSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { stepSeconds: STEP },
+  });
+  const placementInstance = placementSystem.spawn(
+    defineEffect({
+      elements: {
+        centerOnly: defineEmitter({
+          capacity: 32,
+          init: [
+            positionSphere({ center: [1, 0, 0], radius: 0.1, surfaceOnly: true }),
+            lifetime(1),
+          ],
+          integration: 'none',
+          offset: [2, 0, 0],
+          render: billboard({}),
+          spawn: burst({ count: 32 }),
+        }),
+        particles: defineEmitter({
+          capacity: 512,
+          init: [
+            positionSphere({
+              arc: { axis: [0, 1, 0], thetaMax: 90 },
+              center: [1, 0, 0],
+              radius: 0.1,
+            }),
+            lifetime(1),
+          ],
+          integration: 'none',
+          offset: [2, 0, 0],
+          render: billboard({}),
+          spawn: burst({ count: 512 }),
+        }),
+      },
+    }),
+    { position: [4, 0, 0], seed: 401 },
+  ) as RuntimeInstance;
+  const centerOnlyView = placementInstance.getEmitter('centerOnly');
+  if (!centerOnlyView) throw new Error('M4 center-only placement emitter is missing.');
+  const placementView = emitter(placementInstance);
+  await placementSystem.update(0);
+  const centerOnlyPositions = (await readLogicalAttribute(
+    renderer,
+    centerOnlyView.program,
+    centerOnlyView.kernels,
+    'position',
+  )) as Float32Array;
+  const placementPositions = (await readLogicalAttribute(
+    renderer,
+    placementView.program,
+    placementView.kernels,
+    'position',
+  )) as Float32Array;
+  const placementCenter: Vec3 = [7, 0, 0];
+  let placementMaximumRadiusError = 0;
+  let placementMinimumCosTheta = 1;
+  let placementMeanRadius = 0;
+  let placementMeanCosTheta = 0;
+  let centerOnlyMaximumRadiusError = 0;
+  for (let particle = 0; particle < 32; particle += 1) {
+    const offset = particle * 3;
+    const radius = Math.hypot(
+      (centerOnlyPositions[offset] ?? 0) - placementCenter[0],
+      (centerOnlyPositions[offset + 1] ?? 0) - placementCenter[1],
+      (centerOnlyPositions[offset + 2] ?? 0) - placementCenter[2],
+    );
+    centerOnlyMaximumRadiusError = Math.max(centerOnlyMaximumRadiusError, Math.abs(radius - 0.1));
+  }
+  for (let particle = 0; particle < 512; particle += 1) {
+    const offset = particle * 3;
+    const relative: Vec3 = [
+      (placementPositions[offset] ?? 0) - placementCenter[0],
+      (placementPositions[offset + 1] ?? 0) - placementCenter[1],
+      (placementPositions[offset + 2] ?? 0) - placementCenter[2],
+    ];
+    const radius = Math.hypot(...relative);
+    const cosTheta = radius === 0 ? 1 : relative[1] / radius;
+    placementMaximumRadiusError = Math.max(placementMaximumRadiusError, Math.max(0, radius - 0.1));
+    placementMinimumCosTheta = Math.min(placementMinimumCosTheta, cosTheta);
+    placementMeanRadius += radius / 512;
+    placementMeanCosTheta += cosTheta / 512;
+  }
+
   const acceleration: Vec3 = [1.5, -3, 0.75];
   const linearSystem = new VFXSystem(runtimeRenderer, undefined, {
     aliveCountReadbackInterval: 1,
@@ -646,6 +729,14 @@ async function run(): Promise<void> {
     linearForce: linearError < 0.00001,
     overLifeCurves: curveError < 0.002 && partitionError < 0.002,
     pointAttractor: distanceAfter < distanceBefore - 0.001,
+    positionSphereCenter: centerOnlyMaximumRadiusError < 0.001,
+    positionSpherePlacement:
+      placementMaximumRadiusError < 0.001 &&
+      placementMinimumCosTheta > -0.001 &&
+      placementMeanRadius > 0.07 &&
+      placementMeanRadius < 0.08 &&
+      placementMeanCosTheta > 0.45 &&
+      placementMeanCosTheta < 0.55,
     turbulence:
       bytesEqual(turbulenceA, turbulenceB) &&
       turbulenceVariance > 1e-8 &&
@@ -689,6 +780,26 @@ async function run(): Promise<void> {
       emitterCenterAfterMove: [5, 0, 0],
       emitterCenterAtSpawn: [4, 0, 0],
       space: 'emitter',
+    },
+    positionSphereCenter: {
+      center: [1, 0, 0],
+      emitterOffset: [2, 0, 0],
+      expectedWorldCenter: placementCenter,
+      instancePosition: [4, 0, 0],
+      maximumRadiusError: centerOnlyMaximumRadiusError,
+      radius: 0.1,
+    },
+    positionSpherePlacement: {
+      arc: { axis: [0, 1, 0], thetaMax: 90 },
+      center: placementCenter,
+      emitterOffset: [2, 0, 0],
+      instancePosition: [4, 0, 0],
+      maximumRadiusError: placementMaximumRadiusError,
+      meanCosTheta: placementMeanCosTheta,
+      meanRadius: placementMeanRadius,
+      minimumCosTheta: placementMinimumCosTheta,
+      radius: 0.1,
+      surfaceOnly: false,
     },
     turbulence: {
       bitIdentical: bytesEqual(turbulenceA, turbulenceB),

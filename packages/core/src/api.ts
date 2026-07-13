@@ -5,7 +5,10 @@ import {
   collectEmitterModuleLabelDiagnostics,
   collectParameterDeclarationDiagnostics,
 } from './emitter-modules.js';
-import { collectCoreModuleConfigDiagnostics } from './module-validation.js';
+import {
+  collectCoreModuleConfigDiagnostics,
+  collectEmitterOffsetDiagnostics,
+} from './module-validation.js';
 import type {
   AttributeDefinition,
   AttributeSchema,
@@ -631,6 +634,7 @@ function defineEmitterImplementation(
     ...collectEmitterLifecycleDiagnostics(normalizedConfig),
     ...collectEmitterModuleLabelDiagnostics(normalizedConfig),
     ...collectParameterDeclarationDiagnostics(normalizedConfig.parameters),
+    ...collectEmitterOffsetDiagnostics(normalizedConfig.offset),
     ...(normalizedConfig.bounds &&
     (!Number.isFinite(normalizedConfig.bounds.radius) || normalizedConfig.bounds.radius < 0)
       ? [

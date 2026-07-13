@@ -49,6 +49,58 @@ function isFiniteVector(value: unknown, length: number): value is readonly numbe
   );
 }
 
+function staticGeneratorValues(value: unknown): readonly unknown[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return [value];
+  if (!('kind' in value)) return [value];
+  if (value.kind === 'range') {
+    return ['min' in value ? value.min : undefined, 'max' in value ? value.max : undefined];
+  }
+  if (value.kind === 'parameter') {
+    return 'fallback' in value && value.fallback !== undefined ? [value.fallback] : [];
+  }
+  if (value.kind === 'curve' && 'keys' in value && Array.isArray(value.keys)) {
+    return value.keys.map((key) =>
+      typeof key === 'object' && key !== null && 'value' in key ? key.value : undefined,
+    );
+  }
+  return [value];
+}
+
+function isStaticFiniteVectorInput(value: unknown, length: number): boolean {
+  return staticGeneratorValues(value).every((candidate) => isFiniteVector(candidate, length));
+}
+
+function isStaticScalarInRange(value: unknown, exclusiveMinimum: number, maximum: number): boolean {
+  const candidates = staticGeneratorValues(value);
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'kind' in value &&
+    value.kind === 'range' &&
+    candidates.length === 2 &&
+    typeof candidates[0] === 'number' &&
+    typeof candidates[1] === 'number' &&
+    candidates[0] > candidates[1]
+  ) {
+    return false;
+  }
+  return candidates.every(
+    (candidate) =>
+      typeof candidate === 'number' &&
+      Number.isFinite(candidate) &&
+      candidate > exclusiveMinimum &&
+      candidate <= maximum,
+  );
+}
+
+/** Static emitter constraints shared by defineEmitter() and direct compiler input. */
+export function collectEmitterOffsetDiagnostics(offset: unknown, path = 'offset'): VfxDiagnostic[] {
+  if (offset === undefined || isFiniteVector(offset, 3)) return [];
+  return [
+    diagnostic('NACHI_EMITTER_OFFSET_INVALID', 'Emitter offset must be a finite vec3.', path),
+  ];
+}
+
 function validateStaticScalarRange(value: unknown, minimum: number, maximum: number): boolean {
   const staticMinimum = staticScalarMinimum(value);
   const staticMaximum = staticScalarMaximum(value);
@@ -135,6 +187,52 @@ function collectBehaviorDiagnostics(
   path: string,
 ): VfxDiagnostic[] {
   const diagnostics: VfxDiagnostic[] = [];
+  if (type === 'core/position-sphere') {
+    if (config.center !== undefined && !isStaticFiniteVectorInput(config.center, 3)) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_POSITION_SPHERE_CENTER_INVALID',
+          'Position-sphere center must resolve to a finite vec3.',
+          fieldPath(path, 'center'),
+        ),
+      );
+    }
+    if (config.arc !== undefined) {
+      const arc = config.arc;
+      if (typeof arc !== 'object' || arc === null || Array.isArray(arc)) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_POSITION_SPHERE_ARC_THETA_INVALID',
+            'Position-sphere arc thetaMax must remain within (0, 180] degrees.',
+            fieldPath(path, 'arc.thetaMax'),
+          ),
+        );
+      } else {
+        const arcConfig = arc as Readonly<Record<string, unknown>>;
+        if (!isStaticScalarInRange(arcConfig.thetaMax, 0, 180)) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_POSITION_SPHERE_ARC_THETA_INVALID',
+              'Position-sphere arc thetaMax must remain within (0, 180] degrees.',
+              fieldPath(path, 'arc.thetaMax'),
+            ),
+          );
+        }
+        if (
+          arcConfig.axis !== undefined &&
+          (!isFiniteVector(arcConfig.axis, 3) || Math.hypot(...arcConfig.axis) === 0)
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_POSITION_SPHERE_ARC_AXIS_INVALID',
+              'Position-sphere arc axis must be a finite non-zero vec3.',
+              fieldPath(path, 'arc.axis'),
+            ),
+          );
+        }
+      }
+    }
+  }
   if (type.startsWith('core/collide-')) {
     for (const coefficient of ['bounce', 'friction'] as const) {
       if (!validateStaticScalarRange(config[coefficient], 0, 1)) {

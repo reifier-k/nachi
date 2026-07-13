@@ -38,6 +38,7 @@ const EMITTER_FIELDS = new Set([
   'integration',
   'kind',
   'lifecycle',
+  'offset',
   'parameters',
   'quality',
   'render',
@@ -88,6 +89,19 @@ function isPlainRecord(value: unknown): value is UnknownRecord {
 function isEmitterReference(value: string): boolean {
   const hash = value.indexOf('#');
   return hash >= 0 && hash < value.length - 1 && value.indexOf('#', hash + 1) < 0;
+}
+
+function generatorNumberShape(value: unknown): string | undefined {
+  if (typeof value === 'number') return 'scalar';
+  if (
+    !Array.isArray(value) ||
+    value.length < 2 ||
+    value.length > 4 ||
+    !value.every((item) => typeof item === 'number')
+  ) {
+    return undefined;
+  }
+  return `vec${value.length}`;
 }
 
 function jsonClone(value: unknown): JsonValue {
@@ -396,6 +410,7 @@ class AssetValidator {
       );
     }
     if (value.lifecycle !== undefined) this.lifecycle(value.lifecycle, `${path}.lifecycle`);
+    if (value.offset !== undefined) this.numberTuple(value.offset, 3, `${path}.offset`);
     if (value.parameters !== undefined) this.parameters(value.parameters, `${path}.parameters`);
     if (value.quality !== undefined) this.quality(value.quality, `${path}.quality`);
     this.moduleOrArray(value.render, 'render', `${path}.render`);
@@ -428,6 +443,7 @@ class AssetValidator {
       'init',
       'integration',
       'lifecycle',
+      'offset',
       'parameters',
       'quality',
       'render',
@@ -461,6 +477,7 @@ class AssetValidator {
       );
     }
     if (value.lifecycle !== undefined) this.lifecycle(value.lifecycle, `${path}.lifecycle`);
+    if (value.offset !== undefined) this.numberTuple(value.offset, 3, `${path}.offset`);
     if (value.parameters !== undefined) this.parameters(value.parameters, `${path}.parameters`);
     if (value.quality !== undefined) this.quality(value.quality, `${path}.quality`);
     if (value.render !== undefined) this.moduleOverride(value.render, 'render', `${path}.render`);
@@ -539,7 +556,11 @@ class AssetValidator {
     if (value.label !== undefined && typeof value.label !== 'string')
       this.type('string', value.label, `${path}.label`);
     if (this.record(value.config, `${path}.config`)) {
-      this.json(value.config, `${path}.config`);
+      if (value.type === 'core/position-sphere') {
+        this.positionSphereConfig(value.config, `${path}.config`);
+      } else {
+        this.json(value.config, `${path}.config`);
+      }
       if (
         value.type === 'core/pbd-distance-constraint' &&
         typeof value.config.iterations === 'number' &&
@@ -553,6 +574,70 @@ class AssetValidator {
       }
     }
     if (value.access !== undefined) this.access(value.access, `${path}.access`);
+  }
+
+  positionSphereConfig(value: UnknownRecord, path: string): void {
+    this.json(value, path);
+    this.unknownFields(value, new Set(['arc', 'center', 'radius', 'surfaceOnly']), path);
+    this.required(value, ['radius'], path);
+    this.numericValueInput(value.radius, 'scalar', `${path}.radius`);
+    if (value.center !== undefined) {
+      this.numericValueInput(value.center, 'vec3', `${path}.center`);
+    }
+    if (value.surfaceOnly !== undefined && typeof value.surfaceOnly !== 'boolean') {
+      this.type('boolean', value.surfaceOnly, `${path}.surfaceOnly`);
+    }
+    if (value.arc === undefined) return;
+    if (!this.record(value.arc, `${path}.arc`)) return;
+    this.unknownFields(value.arc, new Set(['axis', 'thetaMax']), `${path}.arc`);
+    this.required(value.arc, ['thetaMax'], `${path}.arc`);
+    this.numericValueInput(value.arc.thetaMax, 'scalar', `${path}.arc.thetaMax`);
+    if (value.arc.axis !== undefined) {
+      this.numberTuple(value.arc.axis, 3, `${path}.arc.axis`);
+    }
+  }
+
+  numericValueInput(value: unknown, expectedShape: string, path: string): void {
+    const check = (candidate: unknown, candidatePath: string): void => {
+      const shape = generatorNumberShape(candidate);
+      if (shape === undefined) {
+        const alreadyDiagnosed = this.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.path === candidatePath ||
+            diagnostic.path?.startsWith(`${candidatePath}.`) ||
+            diagnostic.path?.startsWith(`${candidatePath}[`),
+        );
+        if (!alreadyDiagnosed) {
+          this.type('finite number or 2-4 component number array', candidate, candidatePath);
+        }
+      } else if (shape !== expectedShape) {
+        this.error(
+          'NACHI_ASSET_TYPE_MISMATCH',
+          `Expected ${expectedShape} value input, received ${shape}.`,
+          candidatePath,
+        );
+      }
+    };
+    if (!isRecord(value) || !('kind' in value)) {
+      check(value, path);
+      return;
+    }
+    if (value.kind === 'range') {
+      check(value.min, `${path}.min`);
+      check(value.max, `${path}.max`);
+      return;
+    }
+    if (value.kind === 'curve' && Array.isArray(value.keys)) {
+      value.keys.forEach((key, index) => {
+        if (isRecord(key)) check(key.value, `${path}.keys[${index}].value`);
+      });
+      return;
+    }
+    if (value.kind === 'parameter') {
+      if (value.fallback !== undefined) check(value.fallback, `${path}.fallback`);
+      return;
+    }
+    this.type(`${expectedShape} value input`, value, path);
   }
 
   access(value: unknown, path: string): void {
