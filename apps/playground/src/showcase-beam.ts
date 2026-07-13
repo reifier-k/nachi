@@ -19,9 +19,11 @@ import {
   range,
   rate,
   sizeOverLife,
+  tslModule,
   velocityCone,
   VFXSystem as CoreVFXSystem,
   type TextureRef,
+  type TslExpression,
   type Vec3,
   type VfxEmitterRuntimeView,
 } from '@nachi/core';
@@ -41,6 +43,7 @@ import {
   type CameraShakeSample,
 } from '@nachi/timeline';
 import * as THREE from 'three/webgpu';
+import { cos, float, hash, pow, sin, vec3 } from 'three/tsl';
 
 import {
   createThreeKernelAdapter,
@@ -672,9 +675,16 @@ function createChargeEffect() {
   const inflow = defineEmitter({
     capacity: 260,
     init: [
-      positionSphere({ radius: 1.35, surfaceOnly: true }),
-      velocityCone({ angle: 80, direction: [0, 1, 0], speed: range(0.3, 0.8) }),
-      lifetime(range(0.3, 0.45)),
+      stableRateInit({
+        angle: 80,
+        direction: [0, 1, 0],
+        lifetime: [0.3, 0.45],
+        origin: MUZZLE_POSITION,
+        positionRadius: 1.35,
+        positionSurfaceOnly: true,
+        salt: 0x1f10,
+        speed: [0.3, 0.8],
+      }),
     ],
     lifecycle: { duration: 0.6 },
     render: billboard({
@@ -684,12 +694,12 @@ function createChargeEffect() {
     }),
     // rate() instead of cycled bursts: burst cycles that overlap particle deaths
     // render nothing in a core system (library bug found during this page).
-    spawn: rate(210),
+    spawn: rate(150),
     update: [
       // pointAttractor position is simulation-space: target the muzzle, not [0,0,0].
       pointAttractor({ falloff: 1, position: [-2.3, 0.1, 0], strength: 30 }),
       drag(0.5),
-      sizeOverLife(curve([0, 0.07], [0.5, 0.17], [1, 0.03])),
+      sizeOverLife(curve([0, 0.07], [0.5, 0.14], [1, 0.03])),
       colorOverLife(gradient('#ffffff', '#e8fbff', '#8ce8ff', '#c86bff00')),
     ],
   });
@@ -781,14 +791,119 @@ function createFlashEffect() {
   return defineEffect({ elements: { flashLight, sparks, star } });
 }
 
+function normalizedConeBasis(direction: Vec3): { forward: Vec3; right: Vec3; up: Vec3 } {
+  const length = Math.hypot(...direction) || 1;
+  const up = direction.map((component) => component / length) as unknown as Vec3;
+  const reference: Vec3 = Math.abs(up[1]) < 0.99 ? [0, 1, 0] : [1, 0, 0];
+  const cross = (left: Vec3, right: Vec3): Vec3 => [
+    left[1] * right[2] - left[2] * right[1],
+    left[2] * right[0] - left[0] * right[2],
+    left[0] * right[1] - left[1] * right[0],
+  ];
+  const rawRight = cross(reference, up);
+  const rightLength = Math.hypot(...rawRight) || 1;
+  const right = rawRight.map((component) => component / rightLength) as unknown as Vec3;
+  return { forward: cross(up, right), right, up };
+}
+
+/**
+ * Rate emitters that recycle slots while spawning need Init randomness keyed to stable birth order
+ * so nondeterministic free-list reuse cannot change the visible particle pattern.
+ */
+function stableRateInit(options: {
+  readonly angle: number;
+  readonly direction: Vec3;
+  readonly lifetime: readonly [number, number];
+  readonly origin: Vec3;
+  readonly positionRadius: number;
+  readonly positionSurfaceOnly?: boolean;
+  readonly salt: number;
+  readonly speed: readonly [number, number];
+}) {
+  const basis = normalizedConeBasis(options.direction);
+  const cosLimit = Math.cos((options.angle * Math.PI) / 180);
+  return tslModule(
+    ({ spawnOrder }) => {
+      const order = spawnOrder.toFloat();
+      // Stride the hash input so neighboring spawn orders never see shifted
+      // copies of each other's stream draws (order+salt+k aliases order+1+salt+k-1).
+      const sample = (stream: number) => hash(order.mul(8).add(options.salt + stream) as never);
+
+      const positionZ = sample(1).mul(2).sub(1);
+      const positionAzimuth = sample(2).mul(Math.PI * 2);
+      const positionHorizontal = float(1).sub(positionZ.mul(positionZ)).clamp(0, 1).sqrt();
+      const positionDistance = options.positionSurfaceOnly
+        ? float(options.positionRadius)
+        : pow(sample(3), 1 / 3).mul(options.positionRadius);
+
+      const cosTheta = float(1).sub(sample(4).mul(1 - cosLimit));
+      const sinTheta = float(1).sub(cosTheta.mul(cosTheta)).clamp(0, 1).sqrt();
+      const velocityAzimuth = sample(5).mul(Math.PI * 2);
+      const radialX = cos(velocityAzimuth).mul(sinTheta);
+      const radialZ = sin(velocityAzimuth).mul(sinTheta);
+      const component = (axis: 0 | 1 | 2) =>
+        radialX
+          .mul(basis.right[axis])
+          .add(cosTheta.mul(basis.up[axis]))
+          .add(radialZ.mul(basis.forward[axis]));
+      const speed = sample(6)
+        .mul(options.speed[1] - options.speed[0])
+        .add(options.speed[0]);
+      const lifetimeValue = sample(7)
+        .mul(options.lifetime[1] - options.lifetime[0])
+        .add(options.lifetime[0]);
+
+      return {
+        // Writing age alongside lifetime is what opts the emitter into the
+        // compiler's aging/death pass (matching the core lifetime() module);
+        // without it particles never age, never die, and read forever-young.
+        age: float(0) as unknown as TslExpression<number>,
+        lifetime: lifetimeValue as unknown as TslExpression<number>,
+        position: vec3(
+          cos(positionAzimuth)
+            .mul(positionHorizontal)
+            .mul(positionDistance)
+            .add(options.origin[0]),
+          positionZ.mul(positionDistance).add(options.origin[1]),
+          sin(positionAzimuth)
+            .mul(positionHorizontal)
+            .mul(positionDistance)
+            .add(options.origin[2]),
+        ) as unknown as TslExpression<Vec3>,
+        velocity: vec3(component(0), component(1), component(2)).mul(
+          speed,
+        ) as unknown as TslExpression<Vec3>,
+      };
+    },
+    {
+      access: {
+        reads: ['Particles.spawnOrder'],
+        writes: [
+          'Particles.age',
+          'Particles.lifetime',
+          'Particles.position',
+          'Particles.velocity',
+        ],
+      },
+      stage: 'init',
+    },
+  );
+}
+
 /** Enemy-side sustained impact: backward spark spray, embers, flare light. */
 function createImpactEffect() {
   const chunks = defineEmitter({
     capacity: 100,
     init: [
-      positionSphere({ radius: 0.1 }),
-      velocityCone({ angle: 65, direction: [-0.55, 0.85, 0], speed: range(1.2, 3.8) }),
-      lifetime(range(0.6, 1.2)),
+      stableRateInit({
+        angle: 65,
+        direction: [-0.55, 0.85, 0],
+        lifetime: [0.6, 1.2],
+        origin: IMPACT_POSITION,
+        positionRadius: 0.1,
+        salt: 0x31c0,
+        speed: [1.2, 3.8],
+      }),
     ],
     lifecycle: { duration: 1.05 },
     render: billboard({ blending: 'additive', map: GLOW_REF }),
@@ -826,9 +941,15 @@ function createImpactEffect() {
   const spray = defineEmitter({
     capacity: 300,
     init: [
-      positionSphere({ radius: 0.07 }),
-      velocityCone({ angle: 42, direction: [-0.78, 0.58, 0.1], speed: range(4, 11) }),
-      lifetime(range(0.3, 0.8)),
+      stableRateInit({
+        angle: 42,
+        direction: [-0.78, 0.58, 0.1],
+        lifetime: [0.3, 0.8],
+        origin: IMPACT_POSITION,
+        positionRadius: 0.07,
+        salt: 0x5a71,
+        speed: [4, 11],
+      }),
     ],
     lifecycle: { duration: 1.05 },
     render: billboard({
