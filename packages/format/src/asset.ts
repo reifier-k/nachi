@@ -60,6 +60,13 @@ const ATTRIBUTE_TYPES = new Set<AttributeType>([
   'vec4',
 ]);
 const MODULE_STAGES = new Set(['event', 'init', 'render', 'spawn', 'update']);
+const EMITTER_DEFAULT_SPACE_MODULES = new Set([
+  'core/collide-box',
+  'core/collide-plane',
+  'core/collide-sphere',
+  'core/point-attractor',
+  'core/vortex',
+]);
 const MAX_JSON_DEPTH = 256;
 const GRID2D_BUILTIN_STAGE_SOURCES = new Set([
   'core/grid2d-advect',
@@ -111,6 +118,30 @@ function jsonClone(value: unknown): JsonValue {
   return Object.fromEntries(
     Object.entries(value as UnknownRecord).map(([key, item]) => [key, jsonClone(item)]),
   );
+}
+
+/**
+ * Version 1 already admits both selector literals. Its compatibility boundary therefore
+ * materializes the meaning of an omitted selector without changing the envelope version.
+ */
+function materializeOmittedModuleSpaces(value: JsonValue, omittedSpace: 'emitter' | 'world'): void {
+  if (Array.isArray(value)) {
+    for (const item of value) materializeOmittedModuleSpaces(item, omittedSpace);
+    return;
+  }
+  if (!isRecord(value)) return;
+  if (
+    value.kind === 'module' &&
+    typeof value.type === 'string' &&
+    EMITTER_DEFAULT_SPACE_MODULES.has(value.type) &&
+    isRecord(value.config) &&
+    value.config.space === undefined
+  ) {
+    value.config.space = omittedSpace;
+  }
+  for (const item of Object.values(value)) {
+    materializeOmittedModuleSpaces(item as JsonValue, omittedSpace);
+  }
 }
 
 function pushDiagnostic(
@@ -1486,10 +1517,12 @@ export function serializeEffect<
 >(definition: EffectDefinition<Elements, Parameters>): EffectAssetDocumentV1 {
   const diagnostics = collectSerializableDiagnostics(definition, 'serialize');
   if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
+  const effect = jsonClone(definition);
+  materializeOmittedModuleSpaces(effect, 'emitter');
   const document = {
     format: EFFECT_ASSET_FORMAT,
     version: EFFECT_ASSET_VERSION,
-    effect: jsonClone(definition),
+    effect,
   } satisfies EffectAssetDocumentV1;
   const validator = new AssetValidator('serialize');
   validator.document(document);
@@ -1512,7 +1545,9 @@ function migratedDocument(input: unknown, options: LoadEffectOptions): UnknownRe
     ...gridStageConfigDiagnostics(migrated),
   ];
   if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
-  return jsonClone(migrated) as UnknownRecord;
+  const normalized = jsonClone(migrated) as UnknownRecord;
+  materializeOmittedModuleSpaces(normalized as JsonValue, 'world');
+  return normalized;
 }
 
 function definitionDiagnostics(error: VfxDiagnosticError, path: string): readonly VfxDiagnostic[] {

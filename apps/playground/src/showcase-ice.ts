@@ -539,6 +539,7 @@ function shardEmitter(spec: PillarSpec) {
         mode: 'bounce',
         normal: [0, 1, 0],
         offset: CIRCLE_Y,
+        space: 'world',
       }),
       sizeOverLife(curve([0, 0.052], [0.35, 0.03], [1, 0.005])),
       colorOverLife(gradient('#ffffff', '#c9f2ff', '#5fc8ff', '#1c4fae00')),

@@ -19,8 +19,8 @@ import {
   range,
   sizeOverLife,
   velocityCone,
-  VFXSystem as CoreVFXSystem,
   type TextureRef,
+  type Vec3,
   type VfxEmitterRuntimeView,
 } from '@nachi/core';
 import { cylinder, ring, uvFlow } from '@nachi/mesh-fx';
@@ -650,6 +650,8 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
       colorOverLife(gradient('#ffffff', '#bdf2ff', '#ffc94a')),
     ],
   });
+  const impacts = STRIKES.map(({ x, z }) => createImpactEmitters([x, 0.08, z], false));
+  const finalImpact = createImpactEmitters([0, 0.08, 0], true);
 
   const circleOuterMesh = ring({
     innerRadius: 1.3,
@@ -819,6 +821,20 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
       embers,
       finalLight,
       haze,
+      impactFlash0: impacts[0]!.flash,
+      impactFlash1: impacts[1]!.flash,
+      impactFlash2: impacts[2]!.flash,
+      impactFlash3: impacts[3]!.flash,
+      impactFlash4: impacts[4]!.flash,
+      impactFlash5: impacts[5]!.flash,
+      impactFlashFinal: finalImpact.flash,
+      impactSparks0: impacts[0]!.sparks,
+      impactSparks1: impacts[1]!.sparks,
+      impactSparks2: impacts[2]!.sparks,
+      impactSparks3: impacts[3]!.sparks,
+      impactSparks4: impacts[4]!.sparks,
+      impactSparks5: impacts[5]!.sparks,
+      impactSparksFinal: finalImpact.sparks,
       laser0: meshFxElement(lasers[0]!, { duration: 1.35 }),
       laser1: meshFxElement(lasers[1]!, { duration: 1.35 }),
       laser2: meshFxElement(lasers[2]!, { duration: 1.35 }),
@@ -860,19 +876,53 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
           BARRAGE_START,
           play('laser0'),
           play('shock0'),
+          play('impactFlash0'),
+          play('impactSparks0'),
           play('strikeLight'),
           cameraShake({ duration: 0.25, frequency: 26, strength: 0.14 }),
           marker('barrage'),
         ),
-        at(BARRAGE_START + STRIKE_INTERVAL, play('laser1'), play('shock1')),
-        at(BARRAGE_START + STRIKE_INTERVAL * 2, play('laser2'), play('shock2')),
-        at(BARRAGE_START + STRIKE_INTERVAL * 3, play('laser3'), play('shock3')),
-        at(BARRAGE_START + STRIKE_INTERVAL * 4, play('laser4'), play('shock4')),
-        at(BARRAGE_START + STRIKE_INTERVAL * 5, play('laser5'), play('shock5')),
+        at(
+          BARRAGE_START + STRIKE_INTERVAL,
+          play('laser1'),
+          play('shock1'),
+          play('impactFlash1'),
+          play('impactSparks1'),
+        ),
+        at(
+          BARRAGE_START + STRIKE_INTERVAL * 2,
+          play('laser2'),
+          play('shock2'),
+          play('impactFlash2'),
+          play('impactSparks2'),
+        ),
+        at(
+          BARRAGE_START + STRIKE_INTERVAL * 3,
+          play('laser3'),
+          play('shock3'),
+          play('impactFlash3'),
+          play('impactSparks3'),
+        ),
+        at(
+          BARRAGE_START + STRIKE_INTERVAL * 4,
+          play('laser4'),
+          play('shock4'),
+          play('impactFlash4'),
+          play('impactSparks4'),
+        ),
+        at(
+          BARRAGE_START + STRIKE_INTERVAL * 5,
+          play('laser5'),
+          play('shock5'),
+          play('impactFlash5'),
+          play('impactSparks5'),
+        ),
         at(
           FINAL_TIME,
           play('laserFinal'),
           play('shockFinal'),
+          play('impactFlashFinal'),
+          play('impactSparksFinal'),
           play('finalLight'),
           cameraShake({ duration: 0.45, frequency: 30, strength: 0.4 }),
           marker('final'),
@@ -886,8 +936,8 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
   });
 }
 
-/** Per-strike ground burst spawned at the strike position by the core system. */
-function createImpactEffect(final: boolean) {
+/** Per-strike ground burst placed inside the timeline effect by an emitter-local offset. */
+function createImpactEmitters(offset: Vec3, final: boolean) {
   const flash = defineEmitter({
     capacity: 12,
     init: [
@@ -896,6 +946,7 @@ function createImpactEffect(final: boolean) {
       lifetime(range(0.1, 0.2)),
     ],
     lifecycle: { duration: 0.9 },
+    offset,
     render: billboard({ blending: 'additive', map: GLOW_REF }),
     spawn: burst({ count: final ? 7 : 5 }),
     update: [
@@ -913,6 +964,7 @@ function createImpactEffect(final: boolean) {
       lifetime(range(0.25, 0.7)),
     ],
     lifecycle: { duration: 0.9 },
+    offset,
     render: billboard({
       alignment: { factor: 0.65, mode: 'velocity-stretch' },
       blending: 'additive',
@@ -922,12 +974,19 @@ function createImpactEffect(final: boolean) {
     update: [
       gravity([0, -9.8, 0]),
       drag(1.0),
-      collidePlane({ bounce: 0.4, friction: 0.3, mode: 'bounce', normal: [0, 1, 0], offset: -0.92 }),
+      collidePlane({
+        bounce: 0.4,
+        friction: 0.3,
+        mode: 'bounce',
+        normal: [0, 1, 0],
+        offset: -0.92,
+        space: 'world',
+      }),
       sizeOverLife(curve([0, 0.05], [0.4, 0.028], [1, 0.004])),
       colorOverLife(gradient('#ffffff', '#ffe08a', '#ff9a2e', '#ff3a1000')),
     ],
   });
-  return defineEffect({ elements: { flash, sparks } });
+  return { flash, sparks };
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,38 +1096,11 @@ async function run(): Promise<void> {
   const effect = createMachinaJudgment(textures, !headless);
   const instance = system.spawn(effect, { position: [0, GROUND_Y, 0], seed: 0x77a1 });
 
-  // Impact bursts run on a second core system so each barrage strike can
-  // spawn its sparks at the strike's own world position.
-  const impactSystem = new CoreVFXSystem(runtime, undefined, { registry });
-  impactSystem.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
-  const impactEffect = createImpactEffect(false);
-  const impactFinalEffect = createImpactEffect(true);
-
-  interface ImpactRuntime {
-    age: number;
-    readonly draws: Map<string, THREE.Mesh>;
-    readonly instance: {
-      readonly diagnostics: ReadonlyArray<{ readonly code: string }>;
-      readonly state: string;
-      getEmitter(key: string): VfxEmitterRuntimeView | undefined;
-      release(): void;
-    };
-  }
-  const impacts: ImpactRuntime[] = [];
-  const pendingStrikes: number[] = [];
-  const strikeIndexByTarget = new Map<string, number>([
-    ...STRIKES.map((_, index) => [`laser${index}`, index] as const),
-    ['laserFinal', FINAL_STRIKE_INDEX],
+  const landedStrikeIndices = new Set<number>();
+  const strikeIndexByImpactTarget = new Map<string, number>([
+    ...STRIKES.map((_, index) => [`impactSparks${index}`, index] as const),
+    ['impactSparksFinal', FINAL_STRIKE_INDEX],
   ]);
-  const spawnImpact = (strikeIndex: number) => {
-    const final = strikeIndex === FINAL_STRIKE_INDEX;
-    const strike = final ? { x: 0, z: 0 } : STRIKES[strikeIndex]!;
-    const spawned = impactSystem.spawn(final ? impactFinalEffect : impactEffect, {
-      position: [strike.x, -0.82, strike.z],
-      seed: 0x5100 + strikeIndex,
-    });
-    impacts.push({ age: 0, draws: new Map(), instance: spawned });
-  };
 
   const actions: Array<{ kind: string; localTime: number; target?: string }> = [];
   const markers: string[] = [];
@@ -1078,8 +1110,8 @@ async function run(): Promise<void> {
     actions.push({ kind: action.kind, localTime, ...(target === undefined ? {} : { target }) });
     if (action.kind !== 'play' || target === undefined) return;
     if (emitter !== undefined) playedEmitters.set(target, emitter);
-    const strikeIndex = strikeIndexByTarget.get(target);
-    if (strikeIndex !== undefined) pendingStrikes.push(strikeIndex);
+    const strikeIndex = strikeIndexByImpactTarget.get(target);
+    if (strikeIndex !== undefined) landedStrikeIndices.add(strikeIndex);
   });
   for (const name of ['boot', 'charge', 'barrage', 'final', 'afterglow']) {
     instance.onMarker(name, () => markers.push(name));
@@ -1111,18 +1143,6 @@ async function run(): Promise<void> {
       const object = materializeThreeSpriteDraw(view.program, view.kernels, 0, { resolveTexture });
       scene.add(object);
       spriteDraws.set(key, { object, view });
-    }
-    for (const impact of impacts) {
-      for (const key of ['flash', 'sparks'] as const) {
-        if (impact.draws.has(key)) continue;
-        const view = impact.instance.getEmitter(key);
-        if (!view) continue;
-        const object = materializeThreeSpriteDraw(view.program, view.kernels, 0, {
-          resolveTexture,
-        });
-        scene.add(object);
-        impact.draws.set(key, object);
-      }
     }
   };
 
@@ -1214,26 +1234,14 @@ async function run(): Promise<void> {
 
   const localNow = () => instance.localTime % EFFECT_DURATION;
 
-  // Sub-stepping keeps the burst cadence and collision response stable at the
-  // capture rate; every strike spawned in one step lands on the same frame.
+  // Sub-stepping keeps the timeline burst cadence and collision response stable at capture rate.
   const SUBSTEPS = 4;
   const step = async (delta: number) => {
-    while (pendingStrikes.length > 0) spawnImpact(pendingStrikes.shift()!);
     for (let subStep = 0; subStep < SUBSTEPS; subStep += 1) {
       await system.update(delta / SUBSTEPS);
-      await impactSystem.update(delta / SUBSTEPS);
     }
     materializeNewDraws();
     for (const { draw } of lightDraws.values()) await draw.update(renderer);
-    for (let index = impacts.length - 1; index >= 0; index -= 1) {
-      const impact = impacts[index]!;
-      impact.age += delta;
-      if (!headless && impact.age > 1.5) {
-        for (const object of impact.draws.values()) scene.remove(object);
-        impact.instance.release();
-        impacts.splice(index, 1);
-      }
-    }
     animateClones();
     if (latestShake) {
       camera.position
@@ -1250,7 +1258,6 @@ async function run(): Promise<void> {
     }
     camera.updateMatrixWorld(true);
     system.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
-    impactSystem.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
     post.controls.setTime(localNow());
   };
 
@@ -1277,15 +1284,14 @@ async function run(): Promise<void> {
       post,
       step,
       instance,
-      () => impacts,
+      () => [...landedStrikeIndices],
       () => [...spriteDraws.keys(), ...lightDraws.keys()],
       perfWindow,
     );
     return;
   }
 
-  // Live viewer: present to the page canvas and loop forever; the timeline
-  // loops itself and impact instances are recycled by age.
+  // Live viewer: present to the page canvas and loop forever with the single timeline effect.
   required<HTMLCanvasElement>('#machina-visual').style.display = 'none';
   required<HTMLElement>('#frame-labels').style.display = 'none';
   const stage = required<HTMLElement>('#stage');
@@ -1325,16 +1331,12 @@ async function runHeadless(
   post: ReturnType<typeof createPostPipeline>,
   step: (delta: number) => Promise<void>,
   instance: {
+    readonly diagnostics: ReadonlyArray<{ readonly code: string }>;
     readonly localTime: number;
     readonly state: string;
     getElementState(key: string): unknown;
   },
-  impacts: () => ReadonlyArray<{
-    readonly instance: {
-      readonly diagnostics: ReadonlyArray<{ readonly code: string }>;
-      readonly state: string;
-    };
-  }>,
+  landedStrikes: () => readonly number[],
   drawKeys: () => readonly string[],
   perfWindow: () => Promise<void>,
 ): Promise<void> {
@@ -1348,6 +1350,9 @@ async function runHeadless(
     'columnInner',
     'embers',
     'haze',
+    'impactSparks0',
+    'impactSparks5',
+    'impactSparksFinal',
     'laser0',
     'laser5',
     'laserFinal',
@@ -1420,19 +1425,15 @@ async function runHeadless(
   const barrage = panelStats[3] ?? { foregroundRatio: 0, saturatedRatio: 1 };
   const finalStrike = panelStats[4] ?? { foregroundRatio: 0, saturatedRatio: 1 };
   const afterglow = panelStats[5] ?? { foregroundRatio: 0, saturatedRatio: 1 };
-  const impactDiagnostics = impacts().flatMap(({ instance: impact }) =>
-    impact.diagnostics.map(({ code }) => code),
-  );
+  const impactDiagnostics = instance.diagnostics.map(({ code }) => code);
   const checks = {
     afterglowLingers: afterglow.foregroundRatio > 0.012,
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
-    allStrikesLanded: impacts().length === STRIKES.length + 1,
+    allStrikesLanded: landedStrikes().length === STRIKES.length + 1,
     barrageReads: barrage.foregroundRatio > 0.035 && barrage.saturatedRatio < 0.28,
     consoleClean: consoleMessages.length === 0,
     finalStrikeReads: finalStrike.foregroundRatio > 0.04 && finalStrike.saturatedRatio < 0.3,
-    impactsHealthy:
-      impactDiagnostics.length === 0 &&
-      impacts().every(({ instance: impact }) => impact.state !== 'error'),
+    impactsHealthy: impactDiagnostics.length === 0 && instance.state !== 'error',
     stateHealthy: instance.state !== 'error',
   };
   const result = {
@@ -1444,7 +1445,7 @@ async function runHeadless(
       drawKeys: drawKeys(),
       finalLocalTime: instance.localTime,
       finalState: instance.state,
-      impactCount: impacts().length,
+      impactCount: landedStrikes().length,
       impactDiagnostics,
       panelStats,
     },

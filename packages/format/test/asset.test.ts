@@ -20,6 +20,9 @@ import {
   defineTslFunction,
   drag,
   boids,
+  collideBox,
+  collidePlane,
+  collideSphere,
   compileEmitter,
   createCoreKernelModuleRegistry,
   emitTo,
@@ -40,6 +43,7 @@ import {
   meshRenderer,
   parameter,
   play,
+  pointAttractor,
   positionSphere,
   pbdDistanceConstraint,
   range,
@@ -48,6 +52,7 @@ import {
   timeline,
   tslModule,
   velocityCone,
+  vortex,
   type TextureRef,
 } from '@nachi/core';
 import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
@@ -386,6 +391,69 @@ describe('effect asset v1', () => {
     expect(
       validateEffectAsset(invalidCurve).filter(({ path }) => path === invalidCurvePath),
     ).toHaveLength(1);
+  });
+
+  it('normalizes omitted v1 module spaces to world and writes every selector canonically', () => {
+    const authored = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 4,
+          integration: 'none',
+          render: billboard({}),
+          spawn: burst({ count: 1 }),
+          update: [
+            vortex({ axis: [0, 1, 0], strength: 1 }),
+            pointAttractor({ position: [0, 0, 0], strength: 1 }),
+            collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 0 }),
+            collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1 }),
+            collideBox({ center: [0, 0, 0], mode: 'stick', size: [1, 1, 1] }),
+          ],
+        }),
+      },
+    });
+    const omittedAuthoringDefinition = structuredClone(authored);
+    const omittedAuthoringModules = omittedAuthoringDefinition.elements.particles.update!;
+    for (const module of omittedAuthoringModules) {
+      delete (module.config as { space?: string }).space;
+    }
+    const canonicalAuthored = serializeEffect(omittedAuthoringDefinition);
+    const authoredModules = (
+      canonicalAuthored.effect as {
+        elements: { particles: { update: Array<{ config: { space?: string } }> } };
+      }
+    ).elements.particles.update;
+    expect(authoredModules.map(({ config }) => config.space)).toEqual(
+      Array.from({ length: 5 }, () => 'emitter'),
+    );
+
+    // Compatibility fixture: these selectors were all omitted by a pre-H1-5 v1 writer.
+    const omittedSelectorV1Fixture = structuredClone(canonicalAuthored);
+    const fixtureModules = (
+      omittedSelectorV1Fixture.effect as {
+        elements: { particles: { update: Array<{ config: { space?: string } }> } };
+      }
+    ).elements.particles.update;
+    for (const { config } of fixtureModules) delete config.space;
+
+    const loaded = loadEffect(omittedSelectorV1Fixture);
+    const loadedEmitter = loaded.elements.particles;
+    expect(loadedEmitter?.kind).toBe('emitter');
+    if (loadedEmitter?.kind !== 'emitter') throw new Error('Expected the fixture emitter to load.');
+    expect(
+      loadedEmitter.update?.map(({ config }) => (config as { readonly space?: string }).space),
+    ).toEqual(Array.from({ length: 5 }, () => 'world'));
+
+    const canonicalLegacy = serializeEffect(loaded);
+    expect(canonicalLegacy.version).toBe(1);
+    const legacyModules = (
+      canonicalLegacy.effect as {
+        elements: { particles: { update: Array<{ config: { space?: string } }> } };
+      }
+    ).elements.particles.update;
+    expect(legacyModules.map(({ config }) => config.space)).toEqual(
+      Array.from({ length: 5 }, () => 'world'),
+    );
+    expect(serializeEffect(loadEffect(canonicalLegacy))).toEqual(canonicalLegacy);
   });
 
   it('supports an explicit future migration registration point', () => {

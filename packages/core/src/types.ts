@@ -379,7 +379,7 @@ export interface VortexOptions {
   readonly center?: ValueInput<Vec3>;
   /** Optional acceleration towards the vortex axis. */
   readonly inwardStrength?: ValueInput<number>;
-  /** Coordinate space for axis and center. Defaults to world. */
+  /** Coordinate space for axis and center. Defaults to emitter. */
   readonly space?: 'emitter' | 'world';
   readonly strength: ValueInput<number>;
 }
@@ -388,9 +388,9 @@ export interface PointAttractorOptions {
   /** Power applied to distance attenuation. Defaults to 2. */
   readonly falloff?: ValueInput<number>;
   readonly position: ValueInput<Vec3>;
-  /** Optional world-space influence radius. */
+  /** Optional influence radius measured in the selected coordinate space. */
   readonly radius?: ValueInput<number>;
-  /** Coordinate space for position. Defaults to world. */
+  /** Coordinate space for position. Defaults to emitter. */
   readonly space?: 'emitter' | 'world';
   /** Positive values attract and negative values repel. */
   readonly strength: ValueInput<number>;
@@ -432,7 +432,7 @@ interface CollisionResponseOptions {
   /** Tangential velocity loss in the inclusive range [0, 1]. Defaults to 0. */
   readonly friction?: ValueInput<number>;
   readonly mode: CollisionMode;
-  /** Collider coordinate space. Defaults to world. */
+  /** Collider coordinate space. Defaults to emitter. */
   readonly space?: CollisionSpace;
 }
 

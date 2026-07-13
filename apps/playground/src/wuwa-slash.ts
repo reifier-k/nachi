@@ -405,7 +405,14 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     update: [
       gravity([0, -9.5, 0]),
       drag(1.1),
-      collidePlane({ bounce: 0.45, friction: 0.25, mode: 'bounce', normal: [0, 1, 0], offset: -0.92 }),
+      collidePlane({
+        bounce: 0.45,
+        friction: 0.25,
+        mode: 'bounce',
+        normal: [0, 1, 0],
+        offset: -0.92,
+        space: 'world',
+      }),
       sizeOverLife(curve([0, 0.055], [0.4, 0.03], [1, 0.004])),
       colorOverLife(gradient('#ffffff', '#ffe08a', '#ff8d2e', '#ff3a1000')),
     ],

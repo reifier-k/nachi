@@ -40,6 +40,10 @@ const STEP = 1 / 60;
 const SIMPLEX_EFFECTIVE_AMPLITUDE = 0.286;
 const TURBULENCE_STRENGTH = 2;
 const CURL_STRENGTH = 2;
+const WGSL_TRIG_ABSOLUTE_ERROR = 2 ** -11;
+// Two position-sampling trig terms can each cross four matrix/normalization components. Add a
+// 32-operation f32 roundoff allowance instead of comparing GPU results to an arbitrary epsilon.
+const MODULE_SPACE_ERROR_BUDGET = 8 * WGSL_TRIG_ABSOLUTE_ERROR + 32 * 2 ** -23;
 const root = document.documentElement;
 const query = new URLSearchParams(location.search);
 const headless = query.get('headless') === '1';
@@ -327,6 +331,74 @@ async function run(): Promise<void> {
   };
   const distanceBefore = meanDistance(attractorBefore, [5, 0, 0]);
   const distanceAfter = meanDistance(attractorAfter, [5, 0, 0]);
+
+  const runSpaceProbe = async (space: 'default' | 'emitter' | 'world') => {
+    const system = new VFXSystem(runtimeRenderer, undefined, {
+      aliveCountReadbackInterval: 1,
+      fixedTimeStep: { stepSeconds: STEP },
+    });
+    const module = pointAttractor({
+      falloff: 0,
+      position: [1, 0, 0],
+      ...(space === 'default' ? {} : { space }),
+      strength: 6,
+    });
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            init: [
+              positionSphere({ radius: 0 }),
+              velocityCone({ angle: 0, direction: [1, 0, 0], speed: 0 }),
+              lifetime(1),
+            ],
+            integration: 'none',
+            render: billboard({}),
+            spawn: burst({ count: 1 }),
+            update: [module],
+          }),
+        },
+      }),
+      { position: [4, 2, 0], rotation: [0, 0, Math.PI / 2], seed: 120 },
+    ) as RuntimeInstance;
+    const view = emitter(instance);
+    await system.update(0);
+    await system.update(STEP);
+    const velocity = (await readLogicalAttribute(
+      renderer,
+      view.program,
+      view.kernels,
+      'velocity',
+    )) as Float32Array;
+    return [velocity[0] ?? 0, velocity[1] ?? 0, velocity[2] ?? 0] as Vec3;
+  };
+  const defaultSpaceVelocity = await runSpaceProbe('default');
+  const explicitEmitterVelocity = await runSpaceProbe('emitter');
+  const explicitWorldVelocity = await runSpaceProbe('world');
+  const emitterExpectedVelocity: Vec3 = [0, 6 * STEP, 0];
+  const worldDirectionLength = Math.hypot(3, 2);
+  const worldExpectedVelocity: Vec3 = [
+    (-3 / worldDirectionLength) * 6 * STEP,
+    (-2 / worldDirectionLength) * 6 * STEP,
+    0,
+  ];
+  const maximumComponentError = (measured: Vec3, expected: Vec3) =>
+    Math.max(...measured.map((value, index) => Math.abs(value - expected[index]!)));
+  const defaultSpaceError = maximumComponentError(defaultSpaceVelocity, emitterExpectedVelocity);
+  const explicitEmitterSpaceError = maximumComponentError(
+    explicitEmitterVelocity,
+    emitterExpectedVelocity,
+  );
+  const explicitWorldSpaceError = maximumComponentError(
+    explicitWorldVelocity,
+    worldExpectedVelocity,
+  );
+  const defaultVsWorldSeparation = Math.hypot(
+    defaultSpaceVelocity[0] - explicitWorldVelocity[0],
+    defaultSpaceVelocity[1] - explicitWorldVelocity[1],
+    defaultSpaceVelocity[2] - explicitWorldVelocity[2],
+  );
 
   const placementSystem = new VFXSystem(runtimeRenderer, undefined, {
     aliveCountReadbackInterval: 1,
@@ -727,6 +799,11 @@ async function run(): Promise<void> {
     orientToVelocity: orientationError < 0.002,
     killVolume: aliveBefore === 6 && aliveAfter === 0,
     linearForce: linearError < 0.00001,
+    moduleSpaceDefault:
+      defaultSpaceError <= MODULE_SPACE_ERROR_BUDGET &&
+      explicitEmitterSpaceError <= MODULE_SPACE_ERROR_BUDGET &&
+      explicitWorldSpaceError <= MODULE_SPACE_ERROR_BUDGET &&
+      defaultVsWorldSeparation > MODULE_SPACE_ERROR_BUDGET * 8,
     overLifeCurves: curveError < 0.002 && partitionError < 0.002,
     pointAttractor: distanceAfter < distanceBefore - 0.001,
     positionSphereCenter: centerOnlyMaximumRadiusError < 0.001,
@@ -754,6 +831,24 @@ async function run(): Promise<void> {
     },
     killVolume: { aliveAfter, aliveBefore },
     linearForce: { error: linearError, expectedVelocity, measuredVelocity: [...linearVelocity] },
+    moduleSpaceDefault: {
+      defaultSpaceError,
+      defaultSpaceVelocity,
+      defaultVsWorldSeparation,
+      emitterExpectedVelocity,
+      explicitEmitterSpaceError,
+      explicitEmitterVelocity,
+      explicitWorldSpaceError,
+      explicitWorldVelocity,
+      tolerance: {
+        f32OperationCount: 32,
+        matrixAndNormalizationTrigTerms: 8,
+        maximumComponentError: MODULE_SPACE_ERROR_BUDGET,
+        wgslSinCosAbsoluteError: WGSL_TRIG_ABSOLUTE_ERROR,
+      },
+      transform: { position: [4, 2, 0], rotation: [0, 0, Math.PI / 2] },
+      worldExpectedVelocity,
+    },
     mode: headless ? 'headless' : 'visual',
     ok: Object.values(validation).every(Boolean),
     overLife: {

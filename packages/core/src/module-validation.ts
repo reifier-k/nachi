@@ -187,6 +187,24 @@ function collectBehaviorDiagnostics(
   path: string,
 ): VfxDiagnostic[] {
   const diagnostics: VfxDiagnostic[] = [];
+  if (
+    (type === 'core/vortex' ||
+      type === 'core/point-attractor' ||
+      type === 'core/collide-plane' ||
+      type === 'core/collide-sphere' ||
+      type === 'core/collide-box') &&
+    config.space !== undefined &&
+    config.space !== 'emitter' &&
+    config.space !== 'world'
+  ) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_MODULE_SPACE_INVALID',
+        'Module space must be "emitter" or "world" when specified.',
+        fieldPath(path, 'space'),
+      ),
+    );
+  }
   if (type === 'core/position-sphere') {
     if (config.center !== undefined && !isStaticFiniteVectorInput(config.center, 3)) {
       diagnostics.push(

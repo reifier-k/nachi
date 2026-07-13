@@ -2,7 +2,7 @@
 
 > Language: English (this page) / [日本語](./004-module-spaces.ja.md)
 
-- **Status:** Proposed; default-space decision accepted, implementation scheduled for H1-5
+- **Status:** Implemented in H1-5 on 2026-07-14
 - **Scope:** `@nachi/core` emitter modules and `@nachi/format` compatibility normalization
 - **Normative references:** [RFC 001](./001-api.md) §§4.3, 9; [RFC 003](./003-versioning.md) §§2-4
 - **Decision date:** 2026-07-13

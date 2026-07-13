@@ -1299,7 +1299,7 @@ function collisionEventEffect() {
     lifecycle: { duration: 1 },
     render: computeRender,
     spawn: burst({ count: 1 }),
-    update: [collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 1 })],
+    update: [collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 1, space: 'world' })],
   });
   const impact = defineEmitter({
     capacity: 1,

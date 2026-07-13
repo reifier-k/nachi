@@ -696,8 +696,7 @@ function createChargeEffect() {
     // render nothing in a core system (library bug found during this page).
     spawn: rate(150),
     update: [
-      // pointAttractor position is simulation-space: target the muzzle, not [0,0,0].
-      pointAttractor({ falloff: 1, position: [-2.3, 0.1, 0], strength: 30 }),
+      pointAttractor({ falloff: 1, position: [0, 0, 0], strength: 30 }),
       drag(0.5),
       sizeOverLife(curve([0, 0.07], [0.5, 0.14], [1, 0.03])),
       colorOverLife(gradient('#ffffff', '#e8fbff', '#8ce8ff', '#c86bff00')),
@@ -911,7 +910,14 @@ function createImpactEffect() {
     update: [
       gravity([0, -8, 0]),
       drag(1.2),
-      collidePlane({ bounce: 0.5, friction: 0.3, mode: 'bounce', normal: [0, 1, 0], offset: -0.92 }),
+      collidePlane({
+        bounce: 0.5,
+        friction: 0.3,
+        mode: 'bounce',
+        normal: [0, 1, 0],
+        offset: -0.92,
+        space: 'world',
+      }),
       sizeOverLife(curve([0, 0.02], [0.3, 0.05], [1, 0.004])),
       colorOverLife(gradient('#ffd9fa', '#ff5fd0', '#7a2ea800')),
     ],
@@ -961,7 +967,14 @@ function createImpactEffect() {
     update: [
       gravity([0, -9.8, 0]),
       drag(0.9),
-      collidePlane({ bounce: 0.4, friction: 0.3, mode: 'bounce', normal: [0, 1, 0], offset: -0.92 }),
+      collidePlane({
+        bounce: 0.4,
+        friction: 0.3,
+        mode: 'bounce',
+        normal: [0, 1, 0],
+        offset: -0.92,
+        space: 'world',
+      }),
       sizeOverLife(curve([0, 0.062], [0.35, 0.035], [1, 0.004])),
       colorOverLife(gradient('#ffffff', '#ffc2f4', '#ff5fd0', '#c86bff00')),
     ],
@@ -1003,7 +1016,14 @@ function createAfterglowEffect() {
     update: [
       gravity([0, -6.5, 0]),
       drag(0.6),
-      collidePlane({ bounce: 0.3, friction: 0.4, mode: 'bounce', normal: [0, 1, 0], offset: -0.92 }),
+      collidePlane({
+        bounce: 0.3,
+        friction: 0.4,
+        mode: 'bounce',
+        normal: [0, 1, 0],
+        offset: -0.92,
+        space: 'world',
+      }),
       sizeOverLife(curve([0, 0.036], [0.5, 0.02], [1, 0.003])),
       colorOverLife(gradient('#ffe3fb', '#ff5fd0', '#c86bff00')),
     ],

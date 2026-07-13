@@ -7,8 +7,11 @@ import {
   burst,
   compileEmitter,
   VfxDiagnosticError,
+  collideBox,
+  collidePlane,
   collideSceneDepth,
   collideSdf,
+  collideSphere,
   defineEmitter,
   curve,
   flipbook,
@@ -106,6 +109,102 @@ describe('three kernel adapter', () => {
         }),
       ),
     ).not.toThrow();
+  });
+
+  it('builds real WGSL for all emitter-default modules and preserves legacy explicit-world graphs', () => {
+    const renderer = {
+      backend: {
+        capabilities: { getUniformBufferLimit: () => 64 },
+        compatibilityMode: false,
+      },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      hasFeature: () => false,
+    };
+    const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const worldModules = [
+      vortex({ axis: [0, 1, 0], center: [0.25, 0, 0], space: 'world', strength: 2 }),
+      pointAttractor({ position: [0, 0.5, 0], space: 'world', strength: 3 }),
+      collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0, space: 'world' }),
+      collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1, space: 'world' }),
+      collideBox({ center: [0, 0, 0], mode: 'kill', size: [1, 1, 1], space: 'world' }),
+    ] as const;
+    const shaderFor = (module: (typeof worldModules)[number]) => {
+      const program = compileEmitter(
+        defineEmitter({
+          capacity: 1,
+          integration: 'none',
+          render: billboard({}),
+          spawn: burst({ count: 1 }),
+          update: [module],
+        }),
+      );
+      const kernels = program.buildKernels(createThreeKernelAdapter());
+      const builder = new NodeBuilder(kernels.update, renderer);
+      builder.build();
+      return builder.computeShader;
+    };
+    const emitterModulePairs = [
+      [
+        vortex({ axis: [0, 1, 0], center: [0.25, 0, 0], strength: 2 }),
+        vortex({ axis: [0, 1, 0], center: [0.25, 0, 0], space: 'emitter', strength: 2 }),
+      ],
+      [
+        pointAttractor({ position: [0, 0.5, 0], strength: 3 }),
+        pointAttractor({ position: [0, 0.5, 0], space: 'emitter', strength: 3 }),
+      ],
+      [
+        collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 }),
+        collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0, space: 'emitter' }),
+      ],
+      [
+        collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1 }),
+        collideSphere({
+          center: [0, 0, 0],
+          mode: 'stick',
+          radius: 1,
+          space: 'emitter',
+        }),
+      ],
+      [
+        collideBox({ center: [0, 0, 0], mode: 'kill', size: [1, 1, 1] }),
+        collideBox({
+          center: [0, 0, 0],
+          mode: 'kill',
+          size: [1, 1, 1],
+          space: 'emitter',
+        }),
+      ],
+    ] as const;
+    for (const [canonicalDefault, explicitEmitter] of emitterModulePairs) {
+      const { space: _space, ...omittedConfig } = canonicalDefault.config as Record<
+        string,
+        unknown
+      >;
+      void _space;
+      const lowLevelOmitted = {
+        ...canonicalDefault,
+        config: omittedConfig,
+      } as typeof canonicalDefault;
+      expect(canonicalDefault.config).toMatchObject({ space: 'emitter' });
+      expect(shaderFor(lowLevelOmitted)).toBe(shaderFor(explicitEmitter));
+    }
+    const hashes = worldModules.map((module) => {
+      return createHash('sha256').update(shaderFor(module)).digest('hex');
+    });
+
+    // Captured from the pre-H1-5 omitted-selector (world-space) implementation.
+    expect(hashes).toEqual([
+      'f32a84278aba8c428a216e0017c32f2bcc9b7eba95d4a097f53f6d80c192f8b6',
+      'b325810702c408ce0fe74e08cf5101ac72bf5826562d1558ac3441cb7d0589f1',
+      '8f447bd903cc1adea5f818c60c78ba2d40d459eb1a11c52de2a1599fcd15263d',
+      '310a7586c021522b5f81e3a94b17dc35237150878fdb6e78de65d1066d50090b',
+      'e730cef6a5c64a57a90000f8ed54ef801af0958288fcb59be1cd70d698ce9e73',
+    ]);
   });
 
   it('rejects M11 WebGL2 scale probes whose packed TF storage has multiple groups', () => {

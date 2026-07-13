@@ -4643,7 +4643,7 @@ function collisionFrame(
 ): { readonly position: KernelNode; readonly velocity: KernelNode } {
   const position = context.attribute('position');
   const velocity = context.attribute('velocity');
-  if (space !== 'emitter') return { position, velocity };
+  if ((space ?? 'emitter') === 'world') return { position, velocity };
   const inverseTransform = context.adapter.inverse(context.uniform('Emitter.transform'));
   return {
     position: inverseTransform.mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz,
@@ -4660,9 +4660,10 @@ function writeCollisionResponse(
   velocity: KernelNode,
 ): void {
   context.adapter.branch(collided, () => {
-    const transform = config.space === 'emitter' ? context.uniform('Emitter.transform') : undefined;
+    const space = config.space ?? 'emitter';
+    const transform = space === 'emitter' ? context.uniform('Emitter.transform') : undefined;
     const worldPosition =
-      config.space === 'emitter'
+      space === 'emitter'
         ? transform!.mul(
             context.adapter.vec4(correctedPosition.x, correctedPosition.y, correctedPosition.z, 1),
           ).xyz
@@ -4689,7 +4690,7 @@ function writeCollisionResponse(
         .add(normal.mul(outgoingNormalSpeed));
     }
     const worldVelocity =
-      config.space === 'emitter'
+      space === 'emitter'
         ? transform!.mul(
             context.adapter.vec4(responseVelocity.x, responseVelocity.y, responseVelocity.z, 0),
           ).xyz
@@ -5024,12 +5025,13 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     build(context) {
       const config = context.module.config as VortexOptions;
+      const space = config.space ?? 'emitter';
       const basis = normalizedBasis(config.axis);
       const center = context.value(config.center ?? [0, 0, 0], 'vec3', 1);
       const position = context.attribute('position');
       const transform = context.uniform('Emitter.transform');
       const samplePosition =
-        config.space === 'emitter'
+        space === 'emitter'
           ? context.adapter
               .inverse(transform)
               .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz
@@ -5067,7 +5069,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .mul(context.value(config.inwardStrength ?? 0, 'f32', 5));
       const localAcceleration = tangential.sub(inward);
       const acceleration =
-        config.space === 'emitter'
+        space === 'emitter'
           ? transform.mul(
               context.adapter.vec4(
                 localAcceleration.x,
@@ -5093,11 +5095,12 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     build(context) {
       const config = context.module.config as PointAttractorOptions;
+      const space = config.space ?? 'emitter';
       const target = context.value(config.position, 'vec3', 1);
       const position = context.attribute('position');
       const transform = context.uniform('Emitter.transform');
       const samplePosition =
-        config.space === 'emitter'
+        space === 'emitter'
           ? context.adapter
               .inverse(transform)
               .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz
@@ -5118,7 +5121,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .div(distance.pow(context.value(config.falloff ?? 2, 'f32', 5)));
       const localAcceleration = outward.div(distance).mul(magnitude).mul(-1);
       const acceleration =
-        config.space === 'emitter'
+        space === 'emitter'
           ? transform.mul(
               context.adapter.vec4(
                 localAcceleration.x,

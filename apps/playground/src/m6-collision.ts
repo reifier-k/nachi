@@ -307,7 +307,7 @@ async function run(): Promise<void> {
       defineEffect({
         elements: {
           particles: particleEmitter({
-            update: [collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 0 })],
+            update: [collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 0, space: 'world' })],
             velocity: [0, -1, 0],
           }),
         },
@@ -338,6 +338,7 @@ async function run(): Promise<void> {
                 mode: 'bounce',
                 normal: [0, 1, 0],
                 offset: 0,
+                space: 'world',
               }),
             ],
             velocity: [0, -1, 0],
@@ -350,6 +351,7 @@ async function run(): Promise<void> {
               mode: 'bounce',
               normal: [0, 1, 0],
               offset: 0,
+              space: 'world',
             }),
           ],
         }),
@@ -406,7 +408,7 @@ async function run(): Promise<void> {
   const planeCpu = cpuPlaneReference();
   const sphere = await runSingle(
     [0.25, 0, 0],
-    [collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1 })],
+    [collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1, space: 'world' })],
   );
   const spherePosition = (await readLogicalAttribute(
     renderer,
@@ -416,7 +418,7 @@ async function run(): Promise<void> {
   )) as Float32Array;
   const box = await runSingle(
     [0.2, 0, 0],
-    [collideBox({ center: [0, 0, 0], mode: 'stick', size: [2, 2, 2] })],
+    [collideBox({ center: [0, 0, 0], mode: 'stick', size: [2, 2, 2], space: 'world' })],
   );
   const boxPosition = (await readLogicalAttribute(
     renderer,
@@ -443,7 +445,7 @@ async function run(): Promise<void> {
   )) as Float32Array;
   const killed = await runSingle(
     [0, -0.1, 0],
-    [collidePlane({ mode: 'kill', normal: [0, 1, 0], offset: 0 })],
+    [collidePlane({ mode: 'kill', normal: [0, 1, 0], offset: 0, space: 'world' })],
     { exact: true },
   );
 
@@ -465,7 +467,7 @@ async function run(): Promise<void> {
         source: defineEmitter({
           ...particleEmitter({
             integration: 'none',
-            update: [collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 0 })],
+            update: [collidePlane({ mode: 'stick', normal: [0, 1, 0], offset: 0, space: 'world' })],
           }),
           events: { onCollision: emitTo('impacts', { inherit: ['position'] }) },
         }),

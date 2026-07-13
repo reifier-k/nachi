@@ -216,6 +216,7 @@ export function collectEmitterBehaviorConfigDiagnostics(
     ).filter(
       ({ code }) =>
         code.startsWith('NACHI_COLLISION_') ||
+        code === 'NACHI_MODULE_SPACE_INVALID' ||
         code.startsWith('NACHI_POSITION_SPHERE_') ||
         code === 'NACHI_VELOCITY_CONE_DIRECTION_INVALID' ||
         code === 'NACHI_VORTEX_AXIS_INVALID' ||

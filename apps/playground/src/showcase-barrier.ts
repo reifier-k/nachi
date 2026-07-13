@@ -391,9 +391,9 @@ interface EffectTextures {
 
 function createBarrierEffect(textures: EffectTextures, loop: boolean) {
   const motes = defineEmitter({
-    capacity: 320,
+    capacity: 160,
     init: [
-      positionSphere({ radius: 2.7, surfaceOnly: true }),
+      positionSphere({ arc: { thetaMax: 90 }, radius: 2.7, surfaceOnly: true }),
       lifetime(range(0.4, 0.62)),
     ],
     render: billboard({
@@ -401,7 +401,7 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
       blending: 'additive',
       map: GLOW_REF,
     }),
-    spawn: burst({ count: 72, cycles: 4, interval: 0.1 }),
+    spawn: burst({ count: 36, cycles: 4, interval: 0.1 }),
     update: [
       pointAttractor({ falloff: 1, position: [0, 0.4, 0], strength: 30 }),
       drag(0.45),
@@ -449,7 +449,14 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
     update: [
       gravity([0, -7.5, 0]),
       drag(1.1),
-      collidePlane({ bounce: 0.4, friction: 0.3, mode: 'bounce', normal: [0, 1, 0], offset: 0.03 }),
+      collidePlane({
+        bounce: 0.4,
+        friction: 0.3,
+        mode: 'bounce',
+        normal: [0, 1, 0],
+        offset: 0.03,
+        space: 'world',
+      }),
       sizeOverLife(curve([0, 0.055], [0.4, 0.028], [1, 0.004])),
       colorOverLife(gradient('#ffffff', '#bfe9ff', '#4fc8ff', '#2b6fff00')),
     ],

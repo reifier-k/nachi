@@ -818,17 +818,27 @@ export function curlNoise(options: CurlNoiseOptions): UpdateModule {
 }
 
 export function vortex(options: VortexOptions): UpdateModule {
-  return createModule('update', 'core/vortex', options, {
-    reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
-    writes: ['Particles.velocity'],
-  });
+  return createModule(
+    'update',
+    'core/vortex',
+    { ...options, space: options.space ?? 'emitter' },
+    {
+      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+  );
 }
 
 export function pointAttractor(options: PointAttractorOptions): UpdateModule {
-  return createModule('update', 'core/point-attractor', options, {
-    reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
-    writes: ['Particles.velocity'],
-  });
+  return createModule(
+    'update',
+    'core/point-attractor',
+    { ...options, space: options.space ?? 'emitter' },
+    {
+      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+  );
 }
 
 export function linearForce(options: LinearForceOptions): UpdateModule {
@@ -858,15 +868,30 @@ const COLLISION_ACCESS: ModuleAccess = {
 };
 
 export function collidePlane(options: CollidePlaneOptions): UpdateModule {
-  return createModule('update', 'core/collide-plane', options, COLLISION_ACCESS);
+  return createModule(
+    'update',
+    'core/collide-plane',
+    { ...options, space: options.space ?? 'emitter' },
+    COLLISION_ACCESS,
+  );
 }
 
 export function collideSphere(options: CollideSphereOptions): UpdateModule {
-  return createModule('update', 'core/collide-sphere', options, COLLISION_ACCESS);
+  return createModule(
+    'update',
+    'core/collide-sphere',
+    { ...options, space: options.space ?? 'emitter' },
+    COLLISION_ACCESS,
+  );
 }
 
 export function collideBox(options: CollideBoxOptions): UpdateModule {
-  return createModule('update', 'core/collide-box', options, COLLISION_ACCESS);
+  return createModule(
+    'update',
+    'core/collide-box',
+    { ...options, space: options.space ?? 'emitter' },
+    COLLISION_ACCESS,
+  );
 }
 
 export function collideSceneDepth(options: CollideSceneDepthOptions = {}): UpdateModule {

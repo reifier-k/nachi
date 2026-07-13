@@ -3443,16 +3443,24 @@ describe('emitter kernel compiler', () => {
     expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
   });
 
-  it('keeps analytic colliders world-space by default and serializes emitter-space opt-in', () => {
-    const world = collideSphere({ center: [0, 0, 0], mode: 'bounce', radius: 1 });
-    const local = collideSphere({
+  it.each([
+    vortex({ axis: [0, 1, 0], strength: 1 }),
+    pointAttractor({ position: [0, 0, 0], strength: 1 }),
+    collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 }),
+    collideSphere({ center: [0, 0, 0], mode: 'bounce', radius: 1 }),
+    collideBox({ center: [0, 0, 0], mode: 'bounce', size: [1, 1, 1] }),
+  ])('materializes the emitter-space authoring default in $type config', (module) => {
+    expect(module.config).toMatchObject({ space: 'emitter' });
+  });
+
+  it('preserves the explicit world-space collider selector', () => {
+    const world = collideSphere({
       center: [0, 0, 0],
       mode: 'bounce',
       radius: 1,
-      space: 'emitter',
+      space: 'world',
     });
-    expect(world.config).not.toHaveProperty('space');
-    expect(local.config).toMatchObject({ space: 'emitter' });
+    expect(world.config).toMatchObject({ space: 'world' });
   });
 
   it.each([
@@ -3645,8 +3653,44 @@ describe('emitter kernel compiler', () => {
     expect(vortex({ axis: [0, 1, 0], inwardStrength: 0.5, strength: 2 }).config).toEqual({
       axis: [0, 1, 0],
       inwardStrength: 0.5,
+      space: 'emitter',
       strength: 2,
     });
+  });
+
+  it('shares affected-module space diagnostics between helpers and direct compiler input', () => {
+    expect(() =>
+      pointAttractor({
+        position: [0, 0, 0],
+        space: 'camera' as never,
+        strength: 1,
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_MODULE_SPACE_INVALID' })],
+      }),
+    );
+
+    const program = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [
+          rawConfig(collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1 }), {
+            center: [0, 0, 0],
+            mode: 'stick',
+            radius: 1,
+            space: 'camera',
+          }),
+        ],
+      }),
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_MODULE_SPACE_INVALID',
+        path: 'update[0].config.space',
+      }),
+    );
+    expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
   });
 
   it('encodes positive attraction and negative repulsion without changing the manifest', () => {
