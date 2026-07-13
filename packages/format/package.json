@@ -36,6 +36,9 @@
   "dependencies": {
     "@nachi/core": "workspace:^"
   },
+  "devDependencies": {
+    "@nachi/trails": "workspace:^"
+  },
   "publishConfig": {
     "access": "public"
   }

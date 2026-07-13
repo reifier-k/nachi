@@ -64,6 +64,7 @@ import type {
   AttributeSnapshot,
   UserParameterKeys,
   VfxDiagnostic,
+  VfxGpuKernelKind,
   Grid2DDefinition,
   Grid2DRuntimeView,
   Grid3DDefinition,
@@ -140,6 +141,8 @@ export interface VfxSystemOptions {
    * completion and scaled logical capacity; WebGL2 still performs its required full readback.
    */
   readonly aliveCountReadbackInterval?: number;
+  /** Reports spawn-time compile and kernel-build diagnostics. Null disables reporting. */
+  readonly onBuildDiagnostic?: ((diagnostic: VfxDiagnostic) => void) | null;
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
   /** Maximum released resource bundles retained per effect definition. Defaults to 16. */
   readonly maxPoolSize?: number;
@@ -159,6 +162,23 @@ export interface VfxSystemOptions {
   readonly grid2DStageRegistry?: Grid2DStageRegistry;
   /** Registered serializable custom Grid3D stage functions. */
   readonly grid3DStageRegistry?: Grid3DStageRegistry;
+}
+
+function defaultBuildDiagnosticHandler(diagnostic: VfxDiagnostic): void {
+  const path = diagnostic.path === undefined ? '' : ` (${diagnostic.path})`;
+  const line = `[${diagnostic.code}] ${diagnostic.message}${path}`.replace(/[\r\n]+/g, ' ');
+  if (diagnostic.severity === 'error') console.error(line);
+  else console.warn(line);
+}
+
+function uniqueDiagnostics(diagnostics: readonly VfxDiagnostic[]): VfxDiagnostic[] {
+  const seen = new Set<string>();
+  return diagnostics.filter((diagnostic) => {
+    const key = `${diagnostic.code}\u0000${diagnostic.severity}\u0000${diagnostic.path ?? ''}\u0000${diagnostic.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export interface VfxSignificanceBudget {
@@ -641,6 +661,17 @@ function runtimeDiagnostic(
   };
 }
 
+class GpuSubmissionContextError extends Error {
+  constructor(
+    readonly emitterPath: string,
+    readonly kernel: VfxGpuKernelKind,
+    readonly original: unknown,
+  ) {
+    super(original instanceof Error ? original.message : String(original));
+    this.name = 'GpuSubmissionContextError';
+  }
+}
+
 function reverseZCameraDiagnostic(camera: VfxCameraState): VfxDiagnostic | undefined {
   // three.js WebGPU perspective and orthographic projections both store the depth scale and
   // offset at column-major elements 10 and 14. Both switch from negative to positive for reverse-z.
@@ -875,6 +906,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly #neighborGrids = new Map<string, NeighborGridRuntime>();
   readonly program: CompiledEmitterProgram;
   readonly #aliveCountReadbackInterval: number | undefined;
+  readonly #emitterPath: string;
   readonly #maxLifetime: number;
   readonly #onDiagnostic: (diagnostic: VfxDiagnostic) => void;
   readonly #onEventAggregate: (summary: EffectEventSummary) => void;
@@ -919,6 +951,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     seed: number,
     transform: readonly number[],
     parameters: Readonly<Record<string, unknown>>,
+    emitterPath: string,
     maxLifetime: number,
     aliveCountReadbackInterval: number | undefined,
     onDiagnostic: (diagnostic: VfxDiagnostic) => void,
@@ -933,6 +966,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#seed = seed >>> 0;
     this.#transform = transform;
     this.#parameters = { ...parameters };
+    this.#emitterPath = emitterPath;
     this.#maxLifetime = maxLifetime;
     this.#aliveCountReadbackInterval = aliveCountReadbackInterval;
     this.#onDiagnostic = onDiagnostic;
@@ -1177,15 +1211,19 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#renderer.prepareKernelsForPooling?.(this.kernels);
   }
 
-  async #submitCompute(kernel: KernelComputeNode): Promise<void> {
+  async #submitCompute(kernel: KernelComputeNode, kind: VfxGpuKernelKind): Promise<void> {
     this.#profileComputeDispatches += 1;
-    await this.#renderer.submitCompute(kernel);
+    try {
+      await this.#renderer.submitCompute(kernel);
+    } catch (error) {
+      throw new GpuSubmissionContextError(this.#emitterPath, kind, error);
+    }
   }
 
   async #rebuildNeighborGrids(): Promise<void> {
     for (const runtime of this.#neighborGrids.values()) {
       const submit = async (kernel: KernelComputeNode) => {
-        await this.#submitCompute(kernel);
+        await this.#submitCompute(kernel, 'neighbor-grid');
         runtime.recordSubmission();
       };
       for (const constraint of runtime.kernels.pbdIterations) {
@@ -1199,11 +1237,25 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     }
   }
 
-  async #submitComputeIndirect(kernel: KernelComputeNode, resource: unknown): Promise<void> {
+  async #submitComputeIndirect(
+    kernel: KernelComputeNode,
+    resource: unknown,
+    kind: VfxGpuKernelKind,
+  ): Promise<void> {
     const submit = this.#renderer.submitComputeIndirect;
-    if (!submit) throw new Error('Indirect compute submission is unavailable.');
+    if (!submit) {
+      throw new GpuSubmissionContextError(
+        this.#emitterPath,
+        kind,
+        new Error('Indirect compute submission is unavailable.'),
+      );
+    }
     this.#profileComputeDispatches += 1;
-    await submit.call(this.#renderer, kernel, resource);
+    try {
+      await submit.call(this.#renderer, kernel, resource);
+    } catch (error) {
+      throw new GpuSubmissionContextError(this.#emitterPath, kind, error);
+    }
   }
 
   async prepareEventFrame(writeBank: 0 | 1): Promise<void> {
@@ -1211,22 +1263,20 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventWriteBank', writeBank);
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.eventReadBank', 1 - writeBank);
     for (const output of Object.values(this.kernels.eventOutputs)) {
-      await this.#submitCompute(output.reset);
+      await this.#submitCompute(output.reset, 'event');
     }
   }
 
   async consumeEvents(): Promise<void> {
     if (this.kernels.eventInputs.length > 0) this.#forceReadbackThisFrame = true;
     for (const input of this.kernels.eventInputs) {
-      if (!this.#renderer.submitComputeIndirect) {
-        throw new Error('M5 event consumption requires indirect compute submission.');
-      }
-      await this.#submitCompute(input.prepare);
+      await this.#submitCompute(input.prepare, 'event');
       await this.#submitComputeIndirect(
         input.spawn,
         input.binding.resources.indirect.indirectResource,
+        'event',
       );
-      await this.#submitCompute(input.finalize);
+      await this.#submitCompute(input.finalize, 'event');
       this.#pendingGpuSpawnRequested += input.binding.queue.capacity;
     }
     if (this.kernels.eventInputs.length > 0) await this.#compactAlive();
@@ -1234,7 +1284,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
 
   async advance(deltaSeconds: number, context: AdvanceContext): Promise<void> {
     if (!this.#initialized) {
-      await this.#submitCompute(this.kernels.initialize);
+      await this.#submitCompute(this.kernels.initialize, 'init');
       this.#initialized = true;
       await this.#compactAlive();
     }
@@ -1282,7 +1332,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
             this.#pendingDistance = 0;
           }
           await this.#rebuildNeighborGrids();
-          await this.#submitCompute(this.kernels.update);
+          await this.#submitCompute(this.kernels.update, 'update');
           updated = true;
           this.#emitterAge += step;
           this.#simulationTime += step;
@@ -1299,7 +1349,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     // entered drain/completed state. Event consumption above compacts births even for dt=0.
     if (!updated && this.kernels.eventInputs.length > 0 && deltaSeconds > TIME_EPSILON) {
       this.#setFrameUniforms(deltaSeconds, context, this.controller.loopIndex);
-      await this.#submitCompute(this.kernels.update);
+      await this.#submitCompute(this.kernels.update, 'update');
       this.#emitterAge += deltaSeconds;
       this.#simulationTime += deltaSeconds;
       this.#drainRemaining = Math.max(0, this.#drainRemaining - deltaSeconds);
@@ -1422,17 +1472,25 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         !spawnDispatch ||
         !this.#renderer.submitComputeIndirect
       ) {
-        throw new Error('WebGPU lifecycle kernels require indirect compute submission.');
+        throw new GpuSubmissionContextError(
+          this.#emitterPath,
+          'spawn',
+          new Error('WebGPU lifecycle kernels require indirect compute submission.'),
+        );
       }
-      await this.#submitCompute(prepareSpawn);
-      await this.#submitComputeIndirect(this.kernels.spawn, spawnDispatch.indirectResource);
-      await this.#submitCompute(finalizeSpawn);
+      await this.#submitCompute(prepareSpawn, 'spawn');
+      await this.#submitComputeIndirect(
+        this.kernels.spawn,
+        spawnDispatch.indirectResource,
+        'spawn',
+      );
+      await this.#submitCompute(finalizeSpawn, 'spawn');
       this.#pendingGpuSpawnRequested += dispatchCount;
       if (this.program.attributeSchema.byName.spawnOrder !== undefined) {
         this.#trackSpawnOrderRequests(dispatchCount);
       }
     } else {
-      await this.#submitCompute(this.kernels.spawn);
+      await this.#submitCompute(this.kernels.spawn, 'spawn');
     }
   }
 
@@ -1476,18 +1534,22 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
       const { compact, finalizeIndirect, resetAliveCount } = this.kernels;
       if (!compact || !finalizeIndirect || !resetAliveCount) {
-        throw new Error('WebGPU lifecycle compaction kernels are missing.');
+        throw new GpuSubmissionContextError(
+          this.#emitterPath,
+          'compaction',
+          new Error('WebGPU lifecycle compaction kernels are missing.'),
+        );
       }
-      await this.#submitCompute(resetAliveCount);
-      await this.#submitCompute(compact);
-      await this.#submitCompute(finalizeIndirect);
+      await this.#submitCompute(resetAliveCount, 'compaction');
+      await this.#submitCompute(compact, 'compaction');
+      await this.#submitCompute(finalizeIndirect, 'compaction');
       if (this.kernels.prepareSort) {
-        await this.#submitCompute(this.kernels.prepareSort);
+        await this.#submitCompute(this.kernels.prepareSort, 'sort');
         // Each bitonic stage depends on all writes from the preceding stage. Keep stage boundaries
         // as distinct backend submissions: a single Three.js compute group records every dispatch
         // into one compute pass and provides no whole-grid storage barrier between them.
         for (const pass of this.kernels.sortPasses ?? []) {
-          await this.#submitCompute(pass);
+          await this.#submitCompute(pass, 'sort');
         }
       }
       if (
@@ -2204,6 +2266,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #fixedStep: FixedStepAccumulator | undefined;
   readonly #instances = new Map<string, VfxEffectInstance<RuntimeEffectDefinition>>();
   readonly #now: () => number;
+  readonly #onBuildDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
   readonly #maxPoolSize: number;
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
@@ -2235,6 +2298,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     this.#registry = options.registry;
     this.#grid2DStageRegistry = options.grid2DStageRegistry;
     this.#grid3DStageRegistry = options.grid3DStageRegistry;
+    this.#onBuildDiagnostic =
+      options.onBuildDiagnostic === undefined
+        ? defaultBuildDiagnosticHandler
+        : (options.onBuildDiagnostic ?? undefined);
     const runtimeRenderer = asRuntimeRenderer(renderer);
     const automaticSelection = selectDeviceQualityTier(
       options.deviceProfile ?? {
@@ -2416,6 +2483,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
     let pooled: PooledEffectResources | undefined;
     let runtimeRenderer: VfxRuntimeRenderer | undefined;
+    let compileDiagnostics: readonly VfxDiagnostic[] = [];
+    let buildDiagnosticsReported = false;
     const allocatedEventStorages = new Set<KernelStorageNode>();
     try {
       const parameterDiagnostics = validateSpawnParameterOverrides(
@@ -2429,6 +2498,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       }
       const materializationRenderer = runtimeRenderer;
       const compiled = this.#compile(definition, this.#qualitySelection.tier);
+      compileDiagnostics = compiled.emitters.flatMap(({ program }) => program.diagnostics);
       for (const grid of compiled.grids) {
         if (grid.definition.kind === 'grid2d') {
           instance.addGrid2D(
@@ -2438,6 +2508,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
               materializationRenderer,
               grid.stages,
               this.#grid2DStageRegistry,
+              (error) => new GpuSubmissionContextError(`elements.${grid.key}`, 'sim-stage', error),
             ),
           );
         } else {
@@ -2448,6 +2519,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
               materializationRenderer,
               grid.stages,
               this.#grid3DStageRegistry,
+              (error) => new GpuSubmissionContextError(`elements.${grid.key}`, 'sim-stage', error),
             ),
           );
         }
@@ -2494,6 +2566,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           seed,
           transform,
           parameters,
+          `elements.${entry.key}`,
           entry.maxLifetime,
           this.#aliveCountReadbackInterval,
           (diagnostic) => instance.recordDiagnostic(diagnostic),
@@ -2562,7 +2635,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           }
         }
       });
-      const diagnostics =
+      const failureDiagnostics =
         error instanceof VfxDiagnosticError
           ? error.diagnostics
           : [
@@ -2571,7 +2644,19 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
                 error instanceof Error ? error.message : String(error),
               ),
             ];
-      for (const diagnostic of diagnostics) instance.markError(diagnostic);
+      const diagnostics = uniqueDiagnostics([...compileDiagnostics, ...failureDiagnostics]);
+      for (const diagnostic of diagnostics) {
+        if (diagnostic.severity === 'error') instance.markError(diagnostic);
+        else instance.recordDiagnostic(diagnostic);
+        this.#reportBuildDiagnostic(instance, diagnostic);
+      }
+      buildDiagnosticsReported = true;
+    }
+    if (!buildDiagnosticsReported) {
+      for (const diagnostic of uniqueDiagnostics(compileDiagnostics)) {
+        instance.recordDiagnostic(diagnostic);
+        this.#reportBuildDiagnostic(instance, diagnostic);
+      }
     }
     this.#updateScalability();
     return instance;
@@ -3089,12 +3174,32 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     try {
       await operation();
     } catch (error) {
-      instance.markError(
-        runtimeDiagnostic(
-          'NACHI_GPU_SUBMISSION_FAILED',
-          error instanceof Error ? error.message : String(error),
-        ),
-      );
+      const emitterPath =
+        error instanceof GpuSubmissionContextError ? error.emitterPath : 'elements';
+      const kernel = error instanceof GpuSubmissionContextError ? error.kernel : 'unknown';
+      const original = error instanceof GpuSubmissionContextError ? error.original : error;
+      instance.markError({
+        code: 'NACHI_GPU_SUBMISSION_FAILED',
+        context: { emitterPath, kernel },
+        message: `GPU ${kernel} submission failed for ${emitterPath}: ${original instanceof Error ? original.message : String(original)}`,
+        path: emitterPath,
+        phase: 'runtime',
+        severity: 'error',
+      });
+    }
+  }
+
+  #reportBuildDiagnostic(instance: VfxEffectInstance, diagnostic: VfxDiagnostic): void {
+    try {
+      this.#onBuildDiagnostic?.(diagnostic);
+    } catch (error) {
+      instance.recordDiagnosticOnce({
+        code: 'NACHI_BUILD_DIAGNOSTIC_HANDLER_FAILED',
+        message: `VFXSystem.onBuildDiagnostic failed: ${error instanceof Error ? error.message : String(error)}`,
+        path: 'VFXSystem.onBuildDiagnostic',
+        phase: 'runtime',
+        severity: 'warning',
+      });
     }
   }
 

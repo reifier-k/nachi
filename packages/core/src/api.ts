@@ -5,6 +5,7 @@ import {
   collectEmitterModuleLabelDiagnostics,
   collectParameterDeclarationDiagnostics,
 } from './emitter-modules.js';
+import { collectCoreModuleConfigDiagnostics } from './module-validation.js';
 import type {
   AttributeDefinition,
   AttributeSchema,
@@ -180,6 +181,14 @@ function createModule<Stage extends ModuleStage, Config extends object>(
     type,
     version: 1,
   };
+
+  const diagnostics = collectCoreModuleConfigDiagnostics(
+    type,
+    config as Readonly<Record<string, unknown>>,
+    'config',
+  );
+  const errors = diagnostics.filter(({ severity }) => severity === 'error');
+  if (errors.length > 0) throw new VfxDiagnosticError(errors);
 
   return (
     normalizedAccess === undefined ? definition : { ...definition, access: normalizedAccess }
@@ -989,7 +998,14 @@ export function flipbook(
   texture: TextureRef,
   options: Omit<FlipbookDefinition, 'kind' | 'texture'>,
 ): FlipbookDefinition {
-  return { ...options, kind: 'flipbook', texture };
+  const definition = { ...options, kind: 'flipbook' as const, texture };
+  const errors = collectCoreModuleConfigDiagnostics(
+    'core/billboard',
+    { map: definition },
+    'config',
+  ).filter(({ severity }) => severity === 'error');
+  if (errors.length > 0) throw new VfxDiagnosticError(errors);
+  return definition;
 }
 
 export function billboard(options: BillboardOptions): RenderModule {

@@ -23,6 +23,7 @@ import {
   positionMeshSurface,
   rotationOverLife,
   turbulence,
+  tslModule,
   vectorField,
   velocityOverLife,
   velocityMeshNormal,
@@ -137,6 +138,47 @@ describe('three kernel adapter', () => {
     expect(shader(first.initialize)).not.toBe(shader(second.initialize));
     expect(shader(first.spawn)).not.toBe(shader(second.spawn));
     expect(shader(first.update)).not.toBe(shader(second.update));
+  });
+
+  it('lowers tslModule literals without retaining binding wrappers in Three WGSL codegen', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 1 }),
+        update: [
+          tslModule(({ velocity }) => {
+            const named = (
+              velocity as unknown as {
+                toVar(name: string): typeof velocity;
+              }
+            ).toVar('NachiTslVelocity');
+            return { velocity: named.add([0, 1, 0]) };
+          }),
+        ],
+      }),
+    );
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    const renderer = {
+      backend: {
+        capabilities: { getUniformBufferLimit: () => 64 },
+        compatibilityMode: false,
+      },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      hasFeature: () => false,
+    };
+    const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const builder = new NodeBuilder(kernels.update, renderer);
+
+    expect(program.diagnostics).toEqual([]);
+    expect(() => builder.build()).not.toThrow();
+    expect(builder.computeShader).toContain('NachiTslVelocity');
   });
 
   it('materializes a bounded PointLight pool and projection-box decal', async () => {
@@ -571,6 +613,7 @@ describe('three kernel adapter', () => {
       defineEmitter({
         capacity: 4,
         init: [positionSphere({ radius: 1 })],
+        lifecycle: { duration: 1 },
         render: billboard({}),
         spawn: burst({ count: 4 }),
         update: [

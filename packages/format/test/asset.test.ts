@@ -20,6 +20,8 @@ import {
   defineTslFunction,
   drag,
   boids,
+  compileEmitter,
+  createCoreKernelModuleRegistry,
   emitTo,
   gradient,
   gravity,
@@ -48,6 +50,7 @@ import {
   velocityCone,
   type TextureRef,
 } from '@nachi/core';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -162,6 +165,45 @@ function representativeEffect() {
 }
 
 describe('effect asset v1', () => {
+  it('keeps invalid JSON-loaded ribbon config on the compile-diagnostic path', () => {
+    const document = serializeEffect(
+      defineEffect({
+        elements: {
+          trail: defineEmitter({
+            attributes: { ribbonId: ribbonIdAttribute() },
+            capacity: 4,
+            init: [lifetime(1), ribbonId(0)],
+            integration: 'none',
+            render: ribbon({ width: 0.2 }),
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    const invalidDocument = JSON.parse(JSON.stringify(document)) as {
+      effect: {
+        elements: { trail: { render: { config: { taper?: { end: number; start: number } } } } };
+      };
+    };
+    invalidDocument.effect.elements.trail.render.config.taper = { end: 0.6, start: 0.6 };
+
+    const loaded = loadEffect(invalidDocument);
+    const loadedTrail = loaded.elements.trail;
+    expect(loadedTrail?.kind).toBe('emitter');
+    if (loadedTrail?.kind !== 'emitter') throw new Error('Expected the trail emitter to load.');
+    const program = compileEmitter(loadedTrail, {
+      registry: registerTrails(createCoreKernelModuleRegistry()),
+    });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_RIBBON_TAPER_INVALID',
+        path: 'render[0].config.taper',
+        phase: 'compile',
+      }),
+    );
+  });
+
   it('round-trips every module stage, render data, timeline, scalability, User.*, curves, and RGBA colors', () => {
     const definition = representativeEffect();
     const document = serializeEffect(definition);

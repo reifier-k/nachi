@@ -112,7 +112,85 @@ function builtin<Config extends object>(
   source: string,
   config: Config,
 ): Grid3DStageModuleDefinition<Config> {
+  const diagnostics = staticStageConfigDiagnostics(
+    source,
+    config as Readonly<Record<string, unknown>>,
+    'config',
+  );
+  if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   return { config, kind: 'grid3d-stage-module', source, version: 1 };
+}
+
+function staticStageConfigDiagnostics(
+  source: string,
+  config: Readonly<Record<string, unknown>>,
+  basePath: string,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  const add = (message: string, field: string) =>
+    diagnostics.push({
+      code: 'NACHI_GRID3D_STAGE_VALUE_INVALID',
+      message,
+      path: `${basePath}.${field}`,
+      phase: 'compile',
+      severity: 'error',
+    });
+  const finite = (value: unknown, field: string) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      add(`Grid3D ${field} must be finite.`, field);
+    }
+  };
+  const finiteValue = (value: unknown): boolean =>
+    (typeof value === 'number' && Number.isFinite(value)) ||
+    (Array.isArray(value) &&
+      value.length === 3 &&
+      value.every((item) => typeof item === 'number' && Number.isFinite(item)));
+
+  if (source === 'core/grid3d-inject') {
+    const center = config.center;
+    if (
+      !Array.isArray(center) ||
+      center.length !== 3 ||
+      center.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+    ) {
+      add('Grid3D inject center must be a finite vec3.', 'center');
+    }
+    finite(config.radius, 'radius');
+    if (typeof config.radius === 'number' && config.radius < 0) {
+      add('Grid3D inject radius must be non-negative.', 'radius');
+    }
+    const values = config.values;
+    if (typeof values !== 'object' || values === null || Array.isArray(values)) {
+      add('Grid3D inject values must be a channel map.', 'values');
+    } else {
+      for (const [name, value] of Object.entries(values)) {
+        if (!finiteValue(value)) {
+          add(
+            `Grid3D inject value for "${name}" must be a finite scalar or vec3.`,
+            `values.${name}`,
+          );
+        }
+      }
+    }
+  } else if (source === 'core/grid3d-advect') {
+    const dissipation = config.dissipation ?? {};
+    if (typeof dissipation !== 'object' || dissipation === null || Array.isArray(dissipation)) {
+      add('Grid3D dissipation must be a channel map.', 'dissipation');
+    } else {
+      for (const [name, value] of Object.entries(dissipation)) {
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+          add(
+            `Grid3D dissipation for "${name}" must be a non-negative finite rate.`,
+            `dissipation.${name}`,
+          );
+        }
+      }
+    }
+  } else if (source === 'core/grid3d-buoyancy') {
+    finite(config.densityWeight ?? 0.1, 'densityWeight');
+    finite(config.temperatureBuoyancy ?? 1, 'temperatureBuoyancy');
+  }
+  return diagnostics;
 }
 
 export interface Grid3DAdvectOptions {
@@ -425,11 +503,6 @@ function stageConfigDiagnostics(
       );
     }
   };
-  const finite = (value: unknown, field: string) => {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      add('NACHI_GRID3D_STAGE_VALUE_INVALID', `Grid3D ${field} must be finite.`, field);
-    }
-  };
   if (
     typeof source === 'string' &&
     source !== 'inline' &&
@@ -444,36 +517,21 @@ function stageConfigDiagnostics(
     });
     return diagnostics;
   }
+  diagnostics.push(
+    ...(typeof source === 'string'
+      ? staticStageConfigDiagnostics(source, config, `stages[${stageIndex}].update.config`)
+      : []),
+  );
   if (source === 'core/grid3d-inject') {
-    const center = config.center;
-    if (
-      !Array.isArray(center) ||
-      center.length !== 3 ||
-      center.some((value) => typeof value !== 'number' || !Number.isFinite(value))
-    ) {
-      add(
-        'NACHI_GRID3D_STAGE_VALUE_INVALID',
-        'Grid3D inject center must be a finite vec3.',
-        'center',
-      );
-    }
-    finite(config.radius, 'radius');
-    if (typeof config.radius === 'number' && config.radius < 0)
-      add(
-        'NACHI_GRID3D_STAGE_VALUE_INVALID',
-        'Grid3D inject radius must be non-negative.',
-        'radius',
-      );
     const values = config.values;
-    if (typeof values !== 'object' || values === null || Array.isArray(values)) {
-      add(
-        'NACHI_GRID3D_STAGE_VALUE_INVALID',
-        'Grid3D inject values must be a channel map.',
-        'values',
-      );
-    } else {
+    if (typeof values === 'object' && values !== null && !Array.isArray(values)) {
       for (const [name, value] of Object.entries(values)) {
         const type = definition.channels[name]?.type;
+        const staticallyValid =
+          (typeof value === 'number' && Number.isFinite(value)) ||
+          (Array.isArray(value) &&
+            value.length === 3 &&
+            value.every((item) => typeof item === 'number' && Number.isFinite(item)));
         const valid =
           type === 'f32'
             ? typeof value === 'number' && Number.isFinite(value)
@@ -481,7 +539,7 @@ function stageConfigDiagnostics(
               Array.isArray(value) &&
               value.length === 3 &&
               value.every((item) => typeof item === 'number' && Number.isFinite(item));
-        if (!valid)
+        if (staticallyValid && !valid)
           add(
             'NACHI_GRID3D_STAGE_VALUE_INVALID',
             `Grid3D inject value for "${name}" must match its declared channel type and contain only finite components.`,
@@ -492,19 +550,13 @@ function stageConfigDiagnostics(
   } else if (source === 'core/grid3d-advect') {
     channel(config.velocity ?? 'velocity', 'vec3', 'velocity');
     const dissipation = config.dissipation ?? {};
-    if (typeof dissipation !== 'object' || dissipation === null || Array.isArray(dissipation)) {
-      add(
-        'NACHI_GRID3D_STAGE_VALUE_INVALID',
-        'Grid3D dissipation must be a channel map.',
-        'dissipation',
-      );
-    } else {
+    if (typeof dissipation === 'object' && dissipation !== null && !Array.isArray(dissipation)) {
       for (const [name, value] of Object.entries(dissipation)) {
         if (
-          !definition.channels[name] ||
-          typeof value !== 'number' ||
-          !Number.isFinite(value) ||
-          value < 0
+          typeof value === 'number' &&
+          Number.isFinite(value) &&
+          value >= 0 &&
+          !definition.channels[name]
         )
           add(
             'NACHI_GRID3D_STAGE_VALUE_INVALID',
@@ -517,8 +569,6 @@ function stageConfigDiagnostics(
     channel(config.velocity ?? 'velocity', 'vec3', 'velocity');
     channel(config.density ?? 'density', 'f32', 'density');
     channel(config.temperature ?? 'temperature', 'f32', 'temperature');
-    finite(config.densityWeight ?? 0.1, 'densityWeight');
-    finite(config.temperatureBuoyancy ?? 1, 'temperatureBuoyancy');
   }
   return diagnostics;
 }
@@ -879,6 +929,7 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
   readonly #particleValue: KernelUniformNode;
   readonly #particleResolve = new Map<string, KernelComputeNode>();
   readonly #particleSample = new Map<string, KernelComputeNode>();
+  readonly #wrapSubmissionError: ((error: unknown) => unknown) | undefined;
   readonly memoryEstimate: Grid3DMemoryEstimate;
   #initialized = false;
   #submissionCount = 0;
@@ -888,7 +939,9 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
     renderer: GridRenderer,
     stages: readonly SimStageDefinition[],
     registry?: Grid3DStageRegistry,
+    wrapSubmissionError?: (error: unknown) => unknown,
   ) {
+    this.#wrapSubmissionError = wrapSubmissionError;
     const definitionDiagnostics = diagnosticsForDefinition(definition);
     const diagnostics = [...definitionDiagnostics];
     if (renderer.kernelAdapter.capabilities.backend !== 'webgpu') {
@@ -1288,7 +1341,11 @@ export class Grid3DRuntime implements Grid3DRuntimeView {
 
   async #submit(kernel: KernelComputeNode): Promise<void> {
     this.#submissionCount += 1;
-    await this.#renderer.submitCompute(kernel);
+    try {
+      await this.#renderer.submitCompute(kernel);
+    } catch (error) {
+      throw this.#wrapSubmissionError?.(error) ?? error;
+    }
   }
 }
 

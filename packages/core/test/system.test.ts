@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   EffectClock,
@@ -365,6 +365,18 @@ describe('M12 Grid2D runtime scheduling', () => {
   });
 
   it('validates built-in Grid2D/3D stage channel types, finite values, and source IDs', () => {
+    expect(() => gridInject({ center: [0, 0], radius: -1, values: { density: 1 } })).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_GRID2D_STAGE_VALUE_INVALID' })],
+      }),
+    );
+    expect(() =>
+      grid3DInject({ center: [0, 0, 0], radius: -1, values: { density: 1 } }),
+    ).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_GRID3D_STAGE_VALUE_INVALID' })],
+      }),
+    );
     const fluid = defineGrid2D({
       channels: {
         density: { type: 'f32' },
@@ -383,7 +395,10 @@ describe('M12 Grid2D runtime scheduling', () => {
           }),
           decay: defineSimStage({
             target: 'fluid',
-            update: gridAdvect({ dissipation: { density: Number.NaN } }),
+            update: {
+              ...gridAdvect(),
+              config: { dissipation: { density: Number.NaN } },
+            },
           }),
           buoyancy: defineSimStage({
             target: 'fluid',
@@ -426,7 +441,10 @@ describe('M12 Grid2D runtime scheduling', () => {
           }),
           decay: defineSimStage({
             target: 'volume',
-            update: grid3DAdvect({ dissipation: { density: Number.POSITIVE_INFINITY } }),
+            update: {
+              ...grid3DAdvect(),
+              config: { dissipation: { density: Number.POSITIVE_INFINITY } },
+            },
           }),
           buoyancy: defineSimStage({
             target: 'volume',
@@ -1213,6 +1231,44 @@ function runtimeEffect(
   return defineEffect({ elements: { particles: emitter } });
 }
 
+function lifetimeWithoutAgeEffect() {
+  return defineEffect({
+    elements: {
+      particles: defineEmitter({
+        capacity: 1,
+        init: [
+          tslModule(({ lifetime: value }) => ({ lifetime: value }), {
+            stage: 'init',
+          }),
+        ],
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 0 }),
+      }),
+    },
+  });
+}
+
+function invalidBuildEffect() {
+  const unsupportedSpawn: ModuleDefinition<'spawn', Record<string, never>> = {
+    access: { reads: [], writes: ['Emitter.spawnCount'] },
+    config: {},
+    kind: 'module',
+    stage: 'spawn',
+    type: 'test/unsupported-spawn',
+    version: 1,
+  };
+  return defineEffect({
+    elements: {
+      particles: defineEmitter({
+        capacity: 1,
+        render: computeRender,
+        spawn: unsupportedSpawn,
+      }),
+    },
+  });
+}
+
 function eventEffect(target = 'smokePuffs') {
   const sparks = defineEmitter({
     capacity: 4,
@@ -1427,6 +1483,93 @@ describe('emitter lifecycle state machine', () => {
 });
 
 describe('VFXSystem runtime scheduler', () => {
+  it('reports spawn-time build diagnostics to the default console handler one line at a time', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      new VFXSystem(new FakeRuntimeRenderer()).spawn(invalidBuildEffect());
+      new VFXSystem(new FakeRuntimeRenderer()).spawn(lifetimeWithoutAgeEffect());
+
+      expect(error.mock.calls.map(([line]) => line)).toContainEqual(
+        expect.stringContaining('[NACHI_MODULE_UNKNOWN]'),
+      );
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('[NACHI_LIFETIME_WITHOUT_AGE]'));
+      for (const [line] of [...error.mock.calls, ...warn.mock.calls]) {
+        expect(line).not.toMatch(/[\r\n]/);
+      }
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('allows spawn-time build diagnostic reporting to be disabled or replaced', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const diagnostics: string[] = [];
+    try {
+      new VFXSystem(new FakeRuntimeRenderer(), undefined, { onBuildDiagnostic: null }).spawn(
+        invalidBuildEffect(),
+      );
+      new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+        onBuildDiagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
+      }).spawn(lifetimeWithoutAgeEffect());
+
+      expect(error).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      expect(diagnostics).toEqual(['NACHI_LIFETIME_WITHOUT_AGE']);
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('contains spawn-time build diagnostic handler failures and keeps reporting diagnostics', () => {
+    const unsupportedUpdate: ModuleDefinition<'update', Record<string, never>> = {
+      access: { reads: [], writes: [] },
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/unsupported-update',
+      version: 1,
+    };
+    const invalid = invalidBuildEffect();
+    const particles = invalid.elements.particles!;
+    const delivered: string[] = [];
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      onBuildDiagnostic: (diagnostic) => {
+        delivered.push(diagnostic.code);
+        throw new Error('synthetic build diagnostic handler failure');
+      },
+    });
+
+    const instance = system.spawn(
+      defineEffect({
+        elements: {
+          particles: { ...particles, update: [unsupportedUpdate] },
+        },
+      }),
+    );
+
+    expect(instance.state).toBe('error');
+    expect(delivered).toEqual([
+      'NACHI_MODULE_UNKNOWN',
+      'NACHI_MODULE_UNKNOWN',
+      'NACHI_COMPILER_OWNED_WRITE',
+    ]);
+    expect(instance.diagnostics.filter(({ code }) => code === 'NACHI_MODULE_UNKNOWN')).toHaveLength(
+      2,
+    );
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BUILD_DIAGNOSTIC_HANDLER_FAILED',
+        path: 'VFXSystem.onBuildDiagnostic',
+        severity: 'warning',
+      }),
+    );
+  });
+
   it('warns without a camera and reverses stable coarse alpha render order with the view', async () => {
     class OrderRenderer extends FakeRuntimeRenderer {
       readonly orders: number[] = [];
@@ -1869,12 +2012,55 @@ describe('VFXSystem runtime scheduler', () => {
     await system.update(0);
     expect(instance.state).toBe('error');
     expect(instance.diagnostics).toContainEqual(
-      expect.objectContaining({ code: 'NACHI_GPU_SUBMISSION_FAILED', phase: 'runtime' }),
+      expect.objectContaining({
+        code: 'NACHI_GPU_SUBMISSION_FAILED',
+        context: { emitterPath: 'elements.particles', kernel: 'init' },
+        path: 'elements.particles',
+        phase: 'runtime',
+      }),
     );
+    expect(
+      instance.diagnostics.find(({ code }) => code === 'NACHI_GPU_SUBMISSION_FAILED')?.message,
+    ).toMatch(/init.*elements\.particles/);
     instance.release();
     expect(system.getPooledInstanceCount(instance.definition)).toBe(0);
     expect(renderer.releaseCount).toBe(1);
   });
+
+  it.each(['grid2d', 'grid3d'] as const)(
+    'attributes %s submission failures to the simulation-stage context',
+    async (kind) => {
+      const renderer = new FakeRuntimeRenderer();
+      const definition = defineEffect({
+        elements: {
+          grid:
+            kind === 'grid2d'
+              ? defineGrid2D({
+                  channels: { density: { type: 'f32' } },
+                  resolution: [2, 2],
+                })
+              : defineGrid3D({
+                  channels: { density: { type: 'f32' } },
+                  resolution: [2, 2, 2],
+                }),
+        },
+      });
+      const system = new VFXSystem(renderer);
+      const instance = system.spawn(definition);
+      renderer.failNextSubmission = true;
+
+      await expect(system.update(0)).resolves.toBeUndefined();
+
+      expect(instance.state).toBe('error');
+      expect(instance.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: 'NACHI_GPU_SUBMISSION_FAILED',
+          context: { emitterPath: 'elements.grid', kernel: 'sim-stage' },
+          path: 'elements.grid',
+        }),
+      );
+    },
+  );
 
   it('initializes effects spawned by an event callback before same-update event consumption', async () => {
     const renderer = new MappedReadbackRenderer();
@@ -3572,7 +3758,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
     const render: ModuleDefinition<'render', Record<string, never>> = {
       ...computeRender,
       access: {
-        reads: ['Particles.position', 'Particles.lifetime', 'Particles.size'],
+        reads: ['Particles.position', 'Particles.rotation', 'Particles.size'],
         writes: [],
       },
     };
@@ -3583,11 +3769,10 @@ describe('M11 VFXSystem scalability scheduling', () => {
     });
     const definition = defineEffect({ elements: { particles: emitter } });
     const program = compileEmitter(emitter);
-    const lifetimeAttribute = program.attributeSchema.byName.lifetime!;
-    const lifetimeStorage =
-      program.attributeSchema.storageArrays[lifetimeAttribute.physical.bufferIndex]!;
-    expect(lifetimeStorage.groupCount).toBe(2);
-    expect(lifetimeAttribute.physical).toMatchObject({ group: 0, offset: 3, packed: true });
+    const sizeAttribute = program.attributeSchema.byName.size!;
+    const sizeStorage = program.attributeSchema.storageArrays[sizeAttribute.physical.bufferIndex]!;
+    expect(sizeStorage.groupCount).toBe(2);
+    expect(sizeAttribute.physical).toMatchObject({ group: 0, offset: 3, packed: true });
     const renderer = new CacheRuntimeRenderer();
     Object.assign(renderer.kernelAdapter.capabilities, { backend: 'webgl2' });
     await expect(

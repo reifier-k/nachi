@@ -1282,9 +1282,25 @@ export type PolarUvFactory = () => PolarUvBuilder;
 
 export type DiagnosticPhase = 'compile' | 'deserialize' | 'runtime' | 'serialize';
 export type DiagnosticSeverity = 'error' | 'warning';
+export type VfxGpuKernelKind =
+  | 'compaction'
+  | 'event'
+  | 'init'
+  | 'neighbor-grid'
+  | 'sim-stage'
+  | 'sort'
+  | 'spawn'
+  | 'unknown'
+  | 'update';
+
+export interface VfxDiagnosticContext {
+  readonly emitterPath: string;
+  readonly kernel: VfxGpuKernelKind;
+}
 
 export interface VfxDiagnostic {
   readonly code: string;
+  readonly context?: VfxDiagnosticContext;
   readonly message: string;
   readonly path?: string;
   readonly phase: DiagnosticPhase;

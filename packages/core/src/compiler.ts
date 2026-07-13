@@ -1,12 +1,14 @@
 import {
   resolveAttributeSchema,
   resolvePackedAttributeAddress,
+  resolveTslBindingInputType,
   resolveTslStorageType,
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
 } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
-import { MAX_EMITTER_CAPACITY, MAX_PBD_ITERATIONS } from './limits.js';
+import { MAX_EMITTER_CAPACITY } from './limits.js';
 import { neighborGridCellCount, validateNeighborGridDefinition } from './neighbor-grid.js';
+import { collectCoreModuleConfigDiagnostics } from './module-validation.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
   collectEmitterBehaviorConfigDiagnostics,
@@ -1056,12 +1058,58 @@ function bindingPath(key: string): DataReference {
   ) as DataReference;
 }
 
-function traceExpression(): object {
+const tracedTslExpressions = new WeakSet<object>();
+
+function isTslNodeLike(value: unknown): boolean {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return false;
+  if (tracedTslExpressions.has(value)) return true;
+  const candidate = value as { readonly getNodeType?: unknown; readonly isNode?: unknown };
+  return candidate.isNode === true && typeof candidate.getNodeType === 'function';
+}
+
+function describeTslBindingInput(value: unknown): string {
+  if (Array.isArray(value)) return `array(length=${value.length})`;
+  if (value === null) return 'null';
+  return typeof value;
+}
+
+function isPlainObject(value: unknown): value is Readonly<Record<PropertyKey, unknown>> {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isInvalidTslBindingInput(value: unknown): boolean {
+  if (isTslNodeLike(value)) return false;
+  if (Array.isArray(value)) {
+    return (
+      value.every((component) => typeof component === 'number') &&
+      resolveTslBindingInputType(value) === undefined
+    );
+  }
+  return isPlainObject(value);
+}
+
+function traceExpression(
+  onInvalidInput: (operation: string, index: number, value: unknown) => void,
+  expressionPath: string,
+): object {
   const callable = () => proxy;
   const proxy: object = new Proxy(callable, {
-    apply: () => proxy,
-    get: (_target, property) => (property === 'then' ? undefined : proxy),
+    apply: (_target, _thisArgument, arguments_) => {
+      for (const [index, value] of arguments_.entries()) {
+        if (isInvalidTslBindingInput(value)) {
+          onInvalidInput(expressionPath, index, value);
+        }
+      }
+      return proxy;
+    },
+    get: (_target, property) =>
+      property === 'then'
+        ? undefined
+        : traceExpression(onInvalidInput, `${expressionPath}.${String(property)}`),
   });
+  tracedTslExpressions.add(proxy);
   return proxy;
 }
 
@@ -1093,7 +1141,15 @@ function traceTslModule(
       get: (_target, property) => {
         if (typeof property !== 'string') return undefined;
         reads.add(bindingPath(property));
-        return traceExpression();
+        return traceExpression((operation, index, value) => {
+          diagnostics.push(
+            diagnostic(
+              'NACHI_TSL_BINDING_INPUT_INVALID',
+              `TSL binding operation input must be a supported literal, TSL node, or passthrough operation metadata; received ${describeTslBindingInput(value)}.`,
+              `${path}.factory.${operation}[${index}]`,
+            ),
+          );
+        }, property);
       },
     },
   );
@@ -1467,93 +1523,44 @@ function validateSpawnConfigs(
 ): VfxDiagnostic[] {
   const diagnostics: VfxDiagnostic[] = [];
   for (const module of modules) {
-    if (module.type === 'core/rate' || module.type === 'core/per-distance') {
-      const value = (module.config as { rate?: unknown }).rate;
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-        diagnostics.push(
-          diagnostic(
-            'NACHI_SPAWN_RATE_INVALID',
-            `${module.type} rate must be a non-negative finite number.`,
-            `${module.path}.config.rate`,
-          ),
-        );
-      }
-    }
+    const configDiagnostics = collectCoreModuleConfigDiagnostics(
+      module.type,
+      module.config as Readonly<Record<string, unknown>>,
+      `${module.path}.config`,
+    );
+    diagnostics.push(...configDiagnostics);
     if (module.type === 'core/burst') {
-      const config = module.config as { count?: unknown; cycles?: unknown; interval?: unknown };
-      const invalidCount = (value: unknown): boolean =>
-        typeof value !== 'number' || !Number.isFinite(value) || value < 0;
-      let countInvalid = false;
+      const config = module.config as { count?: unknown };
       if (typeof config.count === 'object' && config.count !== null && 'kind' in config.count) {
-        if (config.count.kind === 'range') {
-          const range = config.count as { max?: unknown; min?: unknown };
-          countInvalid =
-            invalidCount(range.min) ||
-            invalidCount(range.max) ||
-            (range.min as number) > (range.max as number);
-        } else if (config.count.kind === 'parameter') {
+        if (config.count.kind === 'parameter') {
           const generator = config.count as { fallback?: unknown; path?: unknown };
           const parameterDefinition =
             typeof generator.path === 'string'
               ? parameters?.[generator.path as ParameterPath]
               : undefined;
-          countInvalid =
-            (generator.fallback !== undefined && invalidCount(generator.fallback)) ||
+          if (
             parameterDefinition === undefined ||
             !(['f32', 'i32', 'u32'] as const).includes(
               parameterDefinition.type as 'f32' | 'i32' | 'u32',
+            )
+          ) {
+            const parameterDiagnostic = diagnostic(
+              'NACHI_BURST_COUNT_INVALID',
+              'Burst count must be a non-negative finite number or a valid range/parameter generator.',
+              `${module.path}.config.count`,
             );
+            if (
+              !configDiagnostics.some(
+                (candidate) =>
+                  candidate.code === parameterDiagnostic.code &&
+                  candidate.path === parameterDiagnostic.path &&
+                  candidate.message === parameterDiagnostic.message,
+              )
+            ) {
+              diagnostics.push(parameterDiagnostic);
+            }
+          }
         }
-      } else {
-        countInvalid = invalidCount(config.count);
-      }
-      if (countInvalid) {
-        diagnostics.push(
-          diagnostic(
-            'NACHI_BURST_COUNT_INVALID',
-            'Burst count must be a non-negative finite number or a valid range/parameter generator.',
-            `${module.path}.config.count`,
-          ),
-        );
-      }
-      if (
-        config.cycles !== undefined &&
-        (!Number.isSafeInteger(config.cycles) || (config.cycles as number) <= 0)
-      ) {
-        diagnostics.push(
-          diagnostic(
-            'NACHI_BURST_CYCLES_INVALID',
-            'Burst cycles must be a positive safe integer.',
-            `${module.path}.config.cycles`,
-          ),
-        );
-      }
-      if (
-        config.interval !== undefined &&
-        (typeof config.interval !== 'number' ||
-          !Number.isFinite(config.interval) ||
-          config.interval <= 0)
-      ) {
-        diagnostics.push(
-          diagnostic(
-            'NACHI_BURST_INTERVAL_INVALID',
-            'Burst interval must be a positive finite number.',
-            `${module.path}.config.interval`,
-          ),
-        );
-      }
-      if (
-        (config.cycles as number | undefined) !== undefined &&
-        config.cycles !== 1 &&
-        config.interval === undefined
-      ) {
-        diagnostics.push(
-          diagnostic(
-            'NACHI_BURST_INTERVAL_REQUIRED',
-            'Burst interval is required when cycles is greater than one.',
-            `${module.path}.config.interval`,
-          ),
-        );
       }
     }
   }
@@ -2045,30 +2052,16 @@ function compileSpriteDraws(
   for (const { module, path } of renderModules) {
     if (module.type !== 'core/billboard') continue;
     const options = module.config as BillboardOptions;
+    diagnostics.push(
+      ...collectCoreModuleConfigDiagnostics(
+        module.type,
+        module.config as Readonly<Record<string, unknown>>,
+        `${path}.config`,
+      ),
+    );
     const blending = options.blending ?? 'alpha';
     const sorted = options.sorted === true;
     const coarseSortCenter = options.sortCenter ?? ([0, 0, 0] as const);
-    if (
-      coarseSortCenter.length !== 3 ||
-      coarseSortCenter.some((component) => !Number.isFinite(component))
-    ) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_PARTICLE_SORT_CENTER_INVALID',
-          'Emitter sortCenter must be a finite local-space vec3.',
-          `${path}.config.sortCenter`,
-        ),
-      );
-    }
-    if (sorted && blending !== 'alpha' && blending !== 'premultiplied') {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_PARTICLE_SORT_BLEND_UNSUPPORTED',
-          'Particle depth sorting is only meaningful for alpha or premultiplied blending.',
-          `${path}.config.sorted`,
-        ),
-      );
-    }
     if (sorted && definition.capacity > MAX_SORTED_PARTICLE_CAPACITY) {
       diagnostics.push(
         diagnostic(
@@ -2079,44 +2072,7 @@ function compileSpriteDraws(
       );
     }
     const alignment = options.alignment ?? { mode: 'camera-facing' as const };
-    if (alignment.mode === 'custom-axis') {
-      if (
-        alignment.axis.length !== 3 ||
-        alignment.axis.some((component) => !Number.isFinite(component)) ||
-        alignment.axis.every((component) => component === 0)
-      ) {
-        diagnostics.push(
-          diagnostic(
-            'NACHI_BILLBOARD_AXIS_INVALID',
-            'Billboard custom alignment axis must be a finite, non-zero vec3.',
-            `${path}.config.alignment.axis`,
-          ),
-        );
-      }
-    }
-    if (
-      alignment.mode === 'velocity-stretch' &&
-      alignment.factor !== undefined &&
-      (!Number.isFinite(alignment.factor) || alignment.factor < 0)
-    ) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_BILLBOARD_STRETCH_INVALID',
-          'Billboard velocity stretch factor must be a non-negative finite number.',
-          `${path}.config.alignment.factor`,
-        ),
-      );
-    }
     const cutoutVertices = options.cutout?.vertices ?? 4;
-    if (!Number.isInteger(cutoutVertices) || cutoutVertices < 4 || cutoutVertices > 8) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_BILLBOARD_CUTOUT_VERTICES_INVALID',
-          'Billboard cutout vertices must be an integer from 4 through 8.',
-          `${path}.config.cutout.vertices`,
-        ),
-      );
-    }
     const flipbook = options.map?.kind === 'flipbook' ? options.map : undefined;
     const litOptions = typeof options.lit === 'object' ? options.lit : undefined;
     const lit = options.lit
@@ -2126,77 +2082,12 @@ function compileSpriteDraws(
           roughness: litOptions?.roughness ?? 0.8,
         }
       : undefined;
-    if (lit && (!Number.isFinite(lit.metalness) || lit.metalness < 0 || lit.metalness > 1)) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_BILLBOARD_LIT_METALNESS_INVALID',
-          'Lit billboard metalness must be a finite number from zero through one.',
-          `${path}.config.lit.metalness`,
-        ),
-      );
-    }
-    if (lit && (!Number.isFinite(lit.roughness) || lit.roughness < 0 || lit.roughness > 1)) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_BILLBOARD_LIT_ROUGHNESS_INVALID',
-          'Lit billboard roughness must be a finite number from zero through one.',
-          `${path}.config.lit.roughness`,
-        ),
-      );
-    }
-    if (
-      flipbook &&
-      (!Number.isSafeInteger(flipbook.cols) ||
-        flipbook.cols <= 0 ||
-        !Number.isSafeInteger(flipbook.rows) ||
-        flipbook.rows <= 0)
-    ) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_FLIPBOOK_GRID_INVALID',
-          'Flipbook cols and rows must be positive safe integers.',
-          `${path}.config.map`,
-        ),
-      );
-    }
-    if (flipbook?.motionVectors === true && flipbook.interpolate !== false) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_FLIPBOOK_MOTION_VECTOR_FALLBACK',
-          'Flipbook motion-vector blending was requested without a motion-vector TextureRef; using plain frame interpolation.',
-          `${path}.config.map.motionVectors`,
-          'warning',
-        ),
-      );
-    }
-    if (flipbook?.motionVectors && flipbook.interpolate === false) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_FLIPBOOK_MOTION_VECTORS_IGNORED',
-          'Flipbook motion vectors require frame interpolation and are ignored when interpolate is false.',
-          `${path}.config.map.motionVectors`,
-          'warning',
-        ),
-      );
-    }
     const softFadeDistance =
       options.soft === true
         ? DEFAULT_SOFT_PARTICLE_FADE_DISTANCE
         : typeof options.soft === 'object'
           ? options.soft.fadeDistance
           : undefined;
-    if (
-      softFadeDistance !== undefined &&
-      (!Number.isFinite(softFadeDistance) || softFadeDistance <= 0)
-    ) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_BILLBOARD_SOFT_DISTANCE_INVALID',
-          'Billboard soft fadeDistance must be a positive finite number.',
-          `${path}.config.soft.fadeDistance`,
-        ),
-      );
-    }
     const attributes = [
       'position',
       'size',
@@ -2308,30 +2199,16 @@ function compileMeshDraws(
   for (const { module, path } of renderModules) {
     if (module.type !== 'core/mesh-renderer') continue;
     const options = module.config as MeshRendererOptions;
+    diagnostics.push(
+      ...collectCoreModuleConfigDiagnostics(
+        module.type,
+        module.config as Readonly<Record<string, unknown>>,
+        `${path}.config`,
+      ),
+    );
     const blending = options.blending ?? 'alpha';
     const sorted = options.sorted === true;
     const coarseSortCenter = options.sortCenter ?? ([0, 0, 0] as const);
-    if (
-      coarseSortCenter.length !== 3 ||
-      coarseSortCenter.some((component) => !Number.isFinite(component))
-    ) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_PARTICLE_SORT_CENTER_INVALID',
-          'Emitter sortCenter must be a finite local-space vec3.',
-          `${path}.config.sortCenter`,
-        ),
-      );
-    }
-    if (sorted && blending !== 'alpha' && blending !== 'premultiplied') {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_PARTICLE_SORT_BLEND_UNSUPPORTED',
-          'Particle depth sorting is only meaningful for alpha or premultiplied blending.',
-          `${path}.config.sorted`,
-        ),
-      );
-    }
     if (sorted && definition.capacity > MAX_SORTED_PARTICLE_CAPACITY) {
       diagnostics.push(
         diagnostic(
@@ -2342,33 +2219,6 @@ function compileMeshDraws(
       );
     }
     const alignment = options.alignment ?? { mode: 'none' as const };
-    if (
-      alignment.mode === 'custom-axis' &&
-      (alignment.axis.length !== 3 ||
-        alignment.axis.some((component) => !Number.isFinite(component)) ||
-        alignment.axis.every((component) => component === 0))
-    ) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_MESH_AXIS_INVALID',
-          'Mesh renderer custom alignment axis must be a finite, non-zero vec3.',
-          `${path}.config.alignment.axis`,
-        ),
-      );
-    }
-    if (
-      options.geometry.kind !== 'asset-ref' ||
-      options.geometry.assetType !== 'geometry' ||
-      options.geometry.uri.length === 0
-    ) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_MESH_GEOMETRY_INVALID',
-          'Mesh renderer geometry must be a non-empty GeometryRef.',
-          `${path}.config.geometry`,
-        ),
-      );
-    }
     const attributes = [
       'position',
       'scale',
@@ -2575,44 +2425,15 @@ function compileLightDraws(
   for (const { module, path } of collectEmitterModules(definition)) {
     if (module.stage !== 'render' || module.type !== 'core/light-renderer') continue;
     const options = module.config as LightRendererOptions;
+    const configDiagnostics = collectCoreModuleConfigDiagnostics(
+      module.type,
+      module.config as Readonly<Record<string, unknown>>,
+      `${path}.config`,
+    );
+    diagnostics.push(...configDiagnostics);
     const maxLights = options.maxLights ?? 8;
     const radiusScale = options.radiusScale ?? 1;
-    let valid = true;
-    if (!Number.isSafeInteger(maxLights) || maxLights <= 0 || maxLights > 64) {
-      valid = false;
-      diagnostics.push(
-        diagnostic(
-          'NACHI_LIGHT_COUNT_INVALID',
-          'Light renderer maxLights must be a positive safe integer no greater than 64.',
-          `${path}.config.maxLights`,
-        ),
-      );
-    }
-    if (!Number.isFinite(radiusScale) || radiusScale <= 0) {
-      valid = false;
-      diagnostics.push(
-        diagnostic(
-          'NACHI_LIGHT_RADIUS_INVALID',
-          'Light renderer radiusScale must be a positive finite number.',
-          `${path}.config.radiusScale`,
-        ),
-      );
-    }
-    if (
-      options.priority !== undefined &&
-      options.priority !== 'intensity' &&
-      options.priority !== 'intensity-radius'
-    ) {
-      valid = false;
-      diagnostics.push(
-        diagnostic(
-          'NACHI_LIGHT_PRIORITY_INVALID',
-          'Light renderer priority must be "intensity" or "intensity-radius".',
-          `${path}.config.priority`,
-        ),
-      );
-    }
-    if (!valid) continue;
+    if (configDiagnostics.some(({ severity }) => severity === 'error')) continue;
     const attributes = ['alive', 'color', 'intensity', 'position', 'size'];
     const storageBuffers = rendererAttributeBuffers(schema, attributes);
     if (!storageBuffers) continue;
@@ -2656,42 +2477,14 @@ function compileDecalDraws(
   for (const { module, path } of collectEmitterModules(definition)) {
     if (module.stage !== 'render' || module.type !== 'core/decal-renderer') continue;
     const options = module.config as DecalRendererOptions;
+    const configDiagnostics = collectCoreModuleConfigDiagnostics(
+      module.type,
+      module.config as Readonly<Record<string, unknown>>,
+      `${path}.config`,
+    );
+    diagnostics.push(...configDiagnostics);
     const sizeScale = options.sizeScale ?? 1;
-    let valid = true;
-    if (!Number.isFinite(sizeScale) || sizeScale <= 0) {
-      diagnostics.push(
-        diagnostic(
-          'NACHI_DECAL_SIZE_INVALID',
-          'Decal renderer sizeScale must be a positive finite number.',
-          `${path}.config.sizeScale`,
-        ),
-      );
-    }
-    if (
-      options.blending !== undefined &&
-      options.blending !== 'alpha' &&
-      options.blending !== 'premultiplied'
-    ) {
-      valid = false;
-      diagnostics.push(
-        diagnostic(
-          'NACHI_DECAL_BLENDING_INVALID',
-          'Decal renderer blending must be "alpha" or "premultiplied".',
-          `${path}.config.blending`,
-        ),
-      );
-    }
-    if (options.fadeOverLife !== undefined && typeof options.fadeOverLife !== 'boolean') {
-      valid = false;
-      diagnostics.push(
-        diagnostic(
-          'NACHI_DECAL_FADE_OVER_LIFE_INVALID',
-          'Decal renderer fadeOverLife must be a boolean.',
-          `${path}.config.fadeOverLife`,
-        ),
-      );
-    }
-    if (!valid) continue;
+    if (configDiagnostics.some(({ severity }) => severity === 'error')) continue;
     const attributes = ['color', 'normalizedAge', 'position', 'rotation', 'size'];
     const attributeBuffers = rendererAttributeBuffers(schema, attributes);
     if (!attributeBuffers) continue;
@@ -3380,9 +3173,79 @@ function createBuildKernels(
       },
     });
 
+    const createTslBindingNodeWrapper = (modulePath: string) => {
+      const cache = new WeakMap<object, KernelNode>();
+      const rawNodes = new WeakMap<object, KernelNode>();
+      // A Proxy passed directly to a top-level TSL helper can remain in its graph after this
+      // wrapper is deactivated. It is then behaviorally transparent but still has a distinct
+      // identity from the raw node; mixing both identities for one toVar() node could make
+      // NodeBuilder emit duplicate variable declarations. Wrapped-method arguments and module
+      // outputs are unwrapped below, but future top-level helper integration must preserve that
+      // invariant.
+      let active = true;
+      const unwrap = (value: unknown): unknown => {
+        if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+          return value;
+        }
+        return rawNodes.get(value) ?? value;
+      };
+      const wrap = (value: KernelNode, valuePath: string): KernelNode => {
+        const target = value as unknown as object;
+        const cached = cache.get(target);
+        if (cached) return cached;
+        const proxy = new Proxy(target, {
+          get(current, property, receiver) {
+            if (property === 'then') return undefined;
+            const result = Reflect.get(current, property, receiver) as unknown;
+            if (!active) return result;
+            if (typeof result === 'function') {
+              return (...arguments_: unknown[]) => {
+                const lowered = arguments_.map((input, index) => {
+                  const unwrapped = unwrap(input);
+                  if (unwrapped !== input) return unwrapped;
+                  const literalType = resolveTslBindingInputType(input);
+                  if (literalType !== undefined) return adapter.constant(input, literalType);
+                  if (isTslNodeLike(input)) return input;
+                  if (isInvalidTslBindingInput(input)) {
+                    throw new VfxDiagnosticError([
+                      diagnostic(
+                        'NACHI_TSL_BINDING_INPUT_INVALID',
+                        `TSL binding operation input must be a supported literal, TSL node, or passthrough operation metadata; received ${describeTslBindingInput(input)}.`,
+                        `${modulePath}.factory.${valuePath}.${String(property)}[${index}]`,
+                      ),
+                    ]);
+                  }
+                  return input;
+                });
+                const output = Reflect.apply(result, current, lowered) as unknown;
+                return (typeof output === 'object' || typeof output === 'function') &&
+                  output !== null
+                  ? wrap(output as KernelNode, `${valuePath}.${String(property)}`)
+                  : output;
+              };
+            }
+            return (typeof result === 'object' || typeof result === 'function') && result !== null
+              ? wrap(result as KernelNode, `${valuePath}.${String(property)}`)
+              : result;
+          },
+        }) as unknown as KernelNode;
+        cache.set(target, proxy);
+        rawNodes.set(proxy as unknown as object, value);
+        return proxy;
+      };
+      return {
+        deactivate: () => {
+          active = false;
+        },
+        unwrap,
+        wrap,
+      };
+    };
+
     const buildTslModule = (module: CompiledKernelModule, particleIndex: KernelNode): void => {
       const factory = factories.get(module.path);
       if (!factory) throw new Error(`TSL factory for ${module.path} is missing.`);
+      const wrapper = createTslBindingNodeWrapper(module.path);
       const bindings = new Proxy(
         {},
         {
@@ -3391,14 +3254,19 @@ function createBuildKernels(
             const name = property.startsWith('custom.')
               ? property.slice('custom.'.length)
               : property;
-            return attributeNode(name, particleIndex);
+            return wrapper.wrap(attributeNode(name, particleIndex), property);
           },
         },
       );
-      const outputs = factory(bindings as TslParticleBindings);
+      let outputs: ReturnType<TslModuleFactory>;
+      try {
+        outputs = factory(bindings as TslParticleBindings);
+      } finally {
+        wrapper.deactivate();
+      }
       for (const [key, value] of Object.entries(outputs)) {
         const name = key.startsWith('custom.') ? key.slice('custom.'.length) : key;
-        writeAttribute(name, value as unknown as KernelNode, particleIndex);
+        writeAttribute(name, wrapper.unwrap(value) as KernelNode, particleIndex);
       }
     };
 
@@ -4376,6 +4244,13 @@ export function compileEmitter<
     )
       continue;
     const config = module.config as Partial<BoidsOptions & PbdDistanceConstraintOptions>;
+    diagnostics.push(
+      ...collectCoreModuleConfigDiagnostics(
+        module.type,
+        module.config as Readonly<Record<string, unknown>>,
+        `update[${index}].config`,
+      ),
+    );
     if (typeof config.grid !== 'string' || options.neighborGrids?.[config.grid] === undefined) {
       diagnostics.push({
         code: 'NACHI_NEIGHBOR_GRID_TARGET_UNKNOWN',
@@ -4385,102 +4260,8 @@ export function compileEmitter<
         severity: 'error',
       });
     }
-    if (
-      config.radius !== undefined &&
-      (!Number.isSafeInteger(config.radius) || config.radius < 0)
-    ) {
-      diagnostics.push({
-        code: 'NACHI_NEIGHBOR_GRID_RADIUS_INVALID',
-        message: 'NeighborGrid search radius must be a non-negative safe integer in cell units.',
-        path: `update[${index}].config.radius`,
-        phase: 'compile',
-        severity: 'error',
-      });
-    }
-    if (module.type === 'core/boids') {
-      const flock = module.config as BoidsOptions;
-      for (const field of ['alignment', 'cohesion', 'maxAcceleration', 'separation'] as const) {
-        if (flock[field] !== undefined && !Number.isFinite(flock[field])) {
-          diagnostics.push({
-            code: 'NACHI_BOIDS_VALUE_INVALID',
-            message: `Boids ${field} must be finite.`,
-            path: `update[${index}].config.${field}`,
-            phase: 'compile',
-            severity: 'error',
-          });
-        }
-      }
-      if (
-        flock.separationRadius !== undefined &&
-        (!Number.isFinite(flock.separationRadius) || flock.separationRadius < 0)
-      ) {
-        diagnostics.push({
-          code: 'NACHI_BOIDS_VALUE_INVALID',
-          message: 'Boids separationRadius must be finite and non-negative in cell units.',
-          path: `update[${index}].config.separationRadius`,
-          phase: 'compile',
-          severity: 'error',
-        });
-      }
-      const searchRadius = flock.radius ?? 1;
-      if (
-        flock.separationRadius !== undefined &&
-        Number.isFinite(flock.separationRadius) &&
-        flock.separationRadius >= 0 &&
-        Number.isSafeInteger(searchRadius) &&
-        searchRadius >= 0 &&
-        flock.separationRadius > searchRadius
-      ) {
-        diagnostics.push({
-          code: 'NACHI_BOIDS_SEPARATION_RADIUS_EXCEEDS_SEARCH',
-          message: `Boids separationRadius ${flock.separationRadius} exceeds the search radius ${searchRadius}; separation is limited to neighbors inside the search radius.`,
-          path: `update[${index}].config.separationRadius`,
-          phase: 'compile',
-          severity: 'warning',
-        });
-      }
-    }
     if (module.type === 'core/pbd-distance-constraint') {
       const pbd = module.config as PbdDistanceConstraintOptions;
-      if (!Number.isFinite(pbd.distance) || pbd.distance <= 0) {
-        diagnostics.push({
-          code: 'NACHI_PBD_DISTANCE_INVALID',
-          message: 'PBD constraint distance must be positive and finite.',
-          path: `update[${index}].config.distance`,
-          phase: 'compile',
-          severity: 'error',
-        });
-      }
-      if (!Number.isSafeInteger(pbd.iterations ?? 1) || (pbd.iterations ?? 1) <= 0) {
-        diagnostics.push({
-          code: 'NACHI_PBD_ITERATIONS_INVALID',
-          message: 'PBD iterations must be a positive safe integer.',
-          path: `update[${index}].config.iterations`,
-          phase: 'compile',
-          severity: 'error',
-        });
-      } else if ((pbd.iterations ?? 1) > MAX_PBD_ITERATIONS) {
-        diagnostics.push({
-          code: 'NACHI_PBD_ITERATIONS_LIMIT_EXCEEDED',
-          message: `PBD iterations must not exceed ${MAX_PBD_ITERATIONS}.`,
-          path: `update[${index}].config.iterations`,
-          phase: 'compile',
-          severity: 'error',
-        });
-      }
-      if (
-        !Number.isFinite(pbd.stiffness ?? 1) ||
-        (pbd.stiffness ?? 1) < 0 ||
-        (pbd.stiffness ?? 1) > 1
-      ) {
-        diagnostics.push({
-          code: 'NACHI_PBD_STIFFNESS_INVALID',
-          message: 'PBD stiffness must be finite in [0, 1].',
-          path: `update[${index}].config.stiffness`,
-          phase: 'compile',
-          severity: 'error',
-        });
-      }
       const grid = typeof pbd.grid === 'string' ? options.neighborGrids?.[pbd.grid] : undefined;
       if (
         grid !== undefined &&
@@ -4513,6 +4294,21 @@ export function compileEmitter<
   const includeAgeModule =
     authorAttributeResult.value?.byName.age !== undefined &&
     authorAttributeResult.value.byName.lifetime !== undefined;
+  if (
+    authorAttributeResult.value?.byName.lifetime !== undefined &&
+    authorAttributeResult.value.byName.age === undefined &&
+    definition.lifecycle === undefined
+  ) {
+    diagnostics.push({
+      code: 'NACHI_LIFETIME_WITHOUT_AGE',
+      hint: 'Add an emitter lifecycle declaration or declare a Particles.age write alongside Particles.lifetime.',
+      message:
+        'Particles.lifetime is allocated without Particles.age, so particle aging and death are disabled. Add a lifecycle declaration or an age write.',
+      path: 'attributeSchema.byName.lifetime',
+      phase: 'compile',
+      severity: 'warning',
+    });
+  }
   const normalizedDefinition = includeAgeModule
     ? ({
         ...authorDefinition,

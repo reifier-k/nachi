@@ -1,4 +1,5 @@
 import {
+  VfxDiagnosticError,
   burst,
   compileEmitter,
   createCoreKernelModuleRegistry,
@@ -31,7 +32,39 @@ function compileRibbon(
   );
 }
 
+function compileRawRibbon(
+  options: Parameters<typeof ribbon>[0],
+  id: Parameters<typeof ribbonId>[0] = { count: 2, mode: 'alternating' },
+) {
+  const registry = registerTrails(createCoreKernelModuleRegistry());
+  const render = { ...ribbon({ width: 0.4 }), config: options };
+  const init = { ...ribbonId(0), config: { value: id } };
+  return compileEmitter(
+    defineEmitter({
+      attributes: { ribbonId: ribbonIdAttribute() },
+      capacity: 16,
+      init: [lifetime(1), init],
+      integration: 'none',
+      render,
+      spawn: burst({ count: 8 }),
+    }),
+    { registry },
+  );
+}
+
 describe('@nachi/trails renderer registration', () => {
+  it('throws taper diagnostics immediately from the ribbon factory', () => {
+    try {
+      ribbon({ taper: { end: 0.6, start: 0.6 }, width: 0.2 });
+      throw new Error('Expected ribbon() to reject an invalid taper.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(VfxDiagnosticError);
+      expect((error as VfxDiagnosticError).diagnostics).toContainEqual(
+        expect.objectContaining({ code: 'NACHI_RIBBON_TAPER_INVALID', path: 'config.taper' }),
+      );
+    }
+  });
+
   it('compiles through the core registry while retaining trails package ownership', () => {
     const program = compileRibbon();
 
@@ -51,7 +84,7 @@ describe('@nachi/trails renderer registration', () => {
   });
 
   it('emits structured diagnostics for invalid width, taper, ribbon count, and tiling', () => {
-    const program = compileRibbon({
+    const program = compileRawRibbon({
       maxRibbons: 0,
       taper: { end: 0.7, start: 0.7 },
       uv: { mode: 'tiled', tileLength: 0 },
@@ -69,7 +102,7 @@ describe('@nachi/trails renderer registration', () => {
   });
 
   it('diagnoses an alternating ribbonId count that would divide by zero on the GPU', () => {
-    const program = compileRibbon(undefined, { count: 0, mode: 'alternating' });
+    const program = compileRawRibbon({ width: 0.4 }, { count: 0, mode: 'alternating' });
 
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -80,7 +113,7 @@ describe('@nachi/trails renderer registration', () => {
   });
 
   it('diagnoses invalid ribbon blending instead of silently using normal blending', () => {
-    const program = compileRibbon({ blending: 'screen' as never, width: 0.4 });
+    const program = compileRawRibbon({ blending: 'screen' as never, width: 0.4 });
 
     expect(program.draws).toEqual([]);
     expect(program.diagnostics).toContainEqual(

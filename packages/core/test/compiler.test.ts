@@ -68,6 +68,7 @@ import {
   vortex,
   writeEventPayloadRecord,
 } from '../src/index.js';
+import { resolveTslBindingInputType } from '../src/attributes.js';
 
 function applyBitonicReference(
   values: readonly { depth: number; index: number }[],
@@ -92,6 +93,30 @@ function applyBitonicReference(
 }
 
 describe('M10 bitonic particle sort contract', () => {
+  it.each([
+    [
+      'billboard',
+      () => billboard({ alignment: { axis: [0, 0, 0], mode: 'custom-axis' } }),
+      'NACHI_BILLBOARD_AXIS_INVALID',
+    ],
+    [
+      'velocityCone',
+      () => velocityCone({ angle: 30, direction: [0, 0, 0], speed: 1 }),
+      'NACHI_VELOCITY_CONE_DIRECTION_INVALID',
+    ],
+    ['rate', () => rate(-1), 'NACHI_SPAWN_RATE_INVALID'],
+  ])('throws static %s factory diagnostics eagerly', (_name, factory, code) => {
+    try {
+      factory();
+      throw new Error(`Expected ${String(_name)} to throw.`);
+    } catch (error) {
+      expect(error).toBeInstanceOf(VfxDiagnosticError);
+      expect((error as VfxDiagnosticError).diagnostics).toContainEqual(
+        expect.objectContaining({ code }),
+      );
+    }
+  });
+
   it('pads to 2^n, keeps far sentinels in the skipped prefix, and breaks ties by index', () => {
     const alive = [
       { depth: -2, index: 7 },
@@ -119,7 +144,10 @@ describe('M10 bitonic particle sort contract', () => {
     const program = compileEmitter(
       defineEmitter({
         capacity: 1,
-        render: billboard({ blending: 'alpha', sortCenter: [0, Number.NaN, 0] }),
+        render: rawConfig(billboard({ blending: 'alpha' }), {
+          blending: 'alpha',
+          sortCenter: [0, Number.NaN, 0],
+        }),
         spawn: burst({ count: 1 }),
       }),
     );
@@ -132,7 +160,10 @@ describe('M10 bitonic particle sort contract', () => {
     const program = compileEmitter(
       defineEmitter({
         capacity: 1,
-        render: billboard({ blending: 'additive', sorted: true }),
+        render: rawConfig(billboard({ blending: 'additive' }), {
+          blending: 'additive',
+          sorted: true,
+        }),
         spawn: burst({ count: 1 }),
       }),
     );
@@ -164,7 +195,12 @@ describe('M12 neighbor-module diagnostic coverage', () => {
         capacity: 4,
         render: billboard({}),
         spawn: burst({ count: 1 }),
-        update: [boids({ alignment: Number.NaN, grid: 'neighbors' })],
+        update: [
+          rawConfig(boids({ grid: 'neighbors' }), {
+            alignment: Number.NaN,
+            grid: 'neighbors',
+          }),
+        ],
       }),
       { neighborGrids: { neighbors } },
     );
@@ -180,7 +216,7 @@ describe('M12 neighbor-module diagnostic coverage', () => {
         render: billboard({}),
         spawn: burst({ count: 1 }),
         update: [
-          pbdDistanceConstraint({
+          rawConfig(pbdDistanceConstraint({ distance: 1, grid: 'neighbors' }), {
             distance: 0,
             grid: 'neighbors',
             iterations: 0,
@@ -210,7 +246,13 @@ describe('M12 neighbor-module diagnostic coverage', () => {
         ...valid,
         capacity: 2 ** 22 + 1,
         lifecycle: { prewarm: 301 },
-        update: [pbdDistanceConstraint({ distance: 1, grid: 'neighbors', iterations: 65 })],
+        update: [
+          rawConfig(pbdDistanceConstraint({ distance: 1, grid: 'neighbors' }), {
+            distance: 1,
+            grid: 'neighbors',
+            iterations: 65,
+          }),
+        ],
       },
       { neighborGrids: { neighbors } },
     );
@@ -239,6 +281,7 @@ import type {
   KernelModuleImplementation,
   ModuleAccess,
   ModuleDefinition,
+  ModuleStage,
   TslModuleFactory,
   TslParticleBindings,
 } from '../src/index.js';
@@ -251,6 +294,13 @@ const computeRender: ModuleDefinition<'render', Record<string, never>> = {
   type: 'test/compute-only-render',
   version: 1,
 };
+
+function rawConfig<Module extends ModuleDefinition<ModuleStage, object>>(
+  module: Module,
+  config: object,
+): Module {
+  return { ...module, config } as Module;
+}
 
 class FakeNode implements KernelUniformNode {
   value: unknown;
@@ -361,6 +411,35 @@ class FakeStorage implements KernelStorageNode {
   }
   toAtomic(): KernelStorageNode {
     return this;
+  }
+}
+
+class BindingInputCaptureNode extends FakeNode {
+  constructor(private readonly inputs: unknown[]) {
+    super();
+  }
+
+  override add(value?: KernelNodeInput): KernelNode {
+    this.inputs.push(value);
+    return this;
+  }
+}
+
+class BindingInputCaptureStorage extends FakeStorage {
+  constructor(private readonly inputs: unknown[]) {
+    super();
+  }
+
+  override element(): KernelNode {
+    return new BindingInputCaptureNode(this.inputs);
+  }
+}
+
+class TslLikeFakeNode extends FakeNode {
+  readonly isNode = true;
+
+  getNodeType(): string {
+    return 'vec3';
   }
 }
 
@@ -1108,7 +1187,9 @@ describe('emitter kernel compiler', () => {
       compileEmitter(
         defineEmitter({
           capacity: 1,
-          render: billboard({ lit: { metalness: -0.1, roughness: 1.1 } }),
+          render: rawConfig(billboard({}), {
+            lit: { metalness: -0.1, roughness: 1.1 },
+          }),
           spawn: burst({ count: 1 }),
         }),
       ).diagnostics.map(({ code }) => code),
@@ -1265,7 +1346,7 @@ describe('emitter kernel compiler', () => {
     const invalid = compileEmitter(
       defineEmitter({
         capacity: 1,
-        render: billboard({ soft: { fadeDistance: 0 } }),
+        render: rawConfig(billboard({}), { soft: { fadeDistance: 0 } }),
         spawn: burst({ count: 1 }),
       }),
     );
@@ -1343,7 +1424,7 @@ describe('emitter kernel compiler', () => {
       defineEmitter({
         capacity: 1,
         integration: 'none',
-        render: lightRenderer({ maxLights: 0, radiusScale: -1 }),
+        render: rawConfig(lightRenderer(), { maxLights: 0, radiusScale: -1 }),
         spawn: burst({ count: 1 }),
       }),
     );
@@ -1358,7 +1439,7 @@ describe('emitter kernel compiler', () => {
       defineEmitter({
         capacity: 1,
         integration: 'none',
-        render: lightRenderer({ priority: 'distance' as never }),
+        render: rawConfig(lightRenderer(), { priority: 'distance' }),
         spawn: burst({ count: 1 }),
       }),
     );
@@ -1416,7 +1497,7 @@ describe('emitter kernel compiler', () => {
       defineEmitter({
         capacity: 1,
         integration: 'none',
-        render: decalRenderer({
+        render: rawConfig(decalRenderer(), {
           blending: 'additive' as never,
           fadeOverLife: 'yes' as never,
         }),
@@ -1463,7 +1544,7 @@ describe('emitter kernel compiler', () => {
     const invalid = compileEmitter(
       defineEmitter({
         capacity: 1,
-        render: meshRenderer({
+        render: rawConfig(meshRenderer({ geometry }), {
           alignment: { axis: [0, 0, 0], mode: 'custom-axis' },
           geometry,
         }),
@@ -1501,9 +1582,9 @@ describe('emitter kernel compiler', () => {
       defineEmitter({
         capacity: 1,
         init: [lifetime(1)],
-        render: billboard({
-          cutout: { vertices: 9 as 8 },
-          map: flipbook(atlas, { cols: 0, rows: 1 }),
+        render: rawConfig(billboard({}), {
+          cutout: { vertices: 9 },
+          map: { ...flipbook(atlas, { cols: 1, rows: 1 }), cols: 0 },
         }),
         spawn: burst({ count: 1 }),
       }),
@@ -1521,14 +1602,18 @@ describe('emitter kernel compiler', () => {
     const invalidAxis = compileEmitter(
       defineEmitter({
         capacity: 1,
-        render: billboard({ alignment: { axis: [0, 0, 0], mode: 'custom-axis' } }),
+        render: rawConfig(billboard({}), {
+          alignment: { axis: [0, 0, 0], mode: 'custom-axis' },
+        }),
         spawn: burst({ count: 1 }),
       }),
     );
     const invalidStretch = compileEmitter(
       defineEmitter({
         capacity: 1,
-        render: billboard({ alignment: { factor: -1, mode: 'velocity-stretch' } }),
+        render: rawConfig(billboard({}), {
+          alignment: { factor: -1, mode: 'velocity-stretch' },
+        }),
         spawn: burst({ count: 1 }),
       }),
     );
@@ -2072,21 +2157,30 @@ describe('emitter kernel compiler', () => {
   });
 
   it('diagnoses invalid rate spawn values', () => {
-    const program = compileEmitter({ ...baseEmitter(), spawn: rate({ rate: -1 }) });
+    const program = compileEmitter({
+      ...baseEmitter(),
+      spawn: rawConfig(rate(0), { rate: -1 }),
+    });
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_SPAWN_RATE_INVALID', path: 'spawn[0].config.rate' }),
     );
   });
 
   it('diagnoses invalid per-distance spawn values', () => {
-    const program = compileEmitter({ ...baseEmitter(), spawn: perDistance(Number.NaN) });
+    const program = compileEmitter({
+      ...baseEmitter(),
+      spawn: rawConfig(perDistance(0), { rate: Number.NaN }),
+    });
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_SPAWN_RATE_INVALID' }),
     );
   });
 
   it('diagnoses non-positive burst cycle counts', () => {
-    const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count: 1, cycles: 0 }) });
+    const program = compileEmitter({
+      ...baseEmitter(),
+      spawn: rawConfig(burst({ count: 1 }), { count: 1, cycles: 0 }),
+    });
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_BURST_CYCLES_INVALID' }),
     );
@@ -2095,7 +2189,10 @@ describe('emitter kernel compiler', () => {
   it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])(
     'diagnoses invalid burst count %s',
     (count) => {
-      const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count }) });
+      const program = compileEmitter({
+        ...baseEmitter(),
+        spawn: rawConfig(burst({ count: 1 }), { count }),
+      });
       expect(program.diagnostics).toContainEqual(
         expect.objectContaining({
           code: 'NACHI_BURST_COUNT_INVALID',
@@ -2128,8 +2225,33 @@ describe('emitter kernel compiler', () => {
     );
   });
 
+  it('does not duplicate an invalid burst parameter diagnostic when its fallback is also invalid', () => {
+    const program = compileEmitter({
+      ...baseEmitter(),
+      parameters: {
+        'User.count': defineParameter('User.count', {
+          default: [1, 2, 3],
+          type: 'vec3',
+        }),
+      },
+      spawn: rawConfig(burst({ count: 1 }), {
+        count: parameter('User.count', -1),
+      }),
+    });
+
+    expect(
+      program.diagnostics.filter(
+        ({ code, path }) =>
+          code === 'NACHI_BURST_COUNT_INVALID' && path === 'spawn[0].config.count',
+      ),
+    ).toHaveLength(1);
+  });
+
   it('requires an interval for multi-cycle bursts', () => {
-    const program = compileEmitter({ ...baseEmitter(), spawn: burst({ count: 1, cycles: 2 }) });
+    const program = compileEmitter({
+      ...baseEmitter(),
+      spawn: rawConfig(burst({ count: 1 }), { count: 1, cycles: 2 }),
+    });
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_BURST_INTERVAL_REQUIRED' }),
     );
@@ -2369,6 +2491,161 @@ describe('emitter kernel compiler', () => {
       writes: ['Particles.heat', 'Particles.velocity'],
     });
     expect(program.diagnostics).toEqual([]);
+  });
+
+  it('derives every supported plain binding-input shape from the attribute type table', () => {
+    expect([
+      resolveTslBindingInputType(true),
+      resolveTslBindingInputType(1),
+      resolveTslBindingInputType([1, 2]),
+      resolveTslBindingInputType([1, 2, 3]),
+      resolveTslBindingInputType([1, 2, 3, 4]),
+      resolveTslBindingInputType(Array.from({ length: 9 }, (_, index) => index)),
+      resolveTslBindingInputType(Array.from({ length: 16 }, (_, index) => index)),
+    ]).toEqual(['bool', 'f32', 'vec2', 'vec3', 'vec4', 'mat3', 'mat4']);
+    expect(resolveTslBindingInputType([1])).toBeUndefined();
+    expect(resolveTslBindingInputType([0, Number.NaN, 1])).toBeUndefined();
+  });
+
+  it('lowers plain vec3 binding inputs to the same node shape as an explicit vec3 node', () => {
+    const literalProgram = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [tslModule(({ velocity }) => ({ velocity: velocity.add([0, 1, 0]) }))],
+      }),
+    );
+    const literalInputs: unknown[] = [];
+    const constantCalls: Array<{ readonly type: string; readonly value: unknown }> = [];
+    let loweredNode: FakeNode | undefined;
+    literalProgram.buildKernels({
+      ...fakeAdapter(),
+      constant: (value, type) => {
+        const node = new FakeNode(value);
+        if (type === 'vec3' && Array.isArray(value) && value.join(',') === '0,1,0') {
+          constantCalls.push({ type, value });
+          loweredNode = node;
+        }
+        return node;
+      },
+      instancedArray: () => new BindingInputCaptureStorage(literalInputs),
+      vec3: () => new BindingInputCaptureNode(literalInputs),
+    });
+
+    const explicitNode = new TslLikeFakeNode([0, 1, 0]);
+    const explicitProgram = compileEmitter(
+      baseEmitter({
+        integration: 'none',
+        update: [
+          tslModule(({ velocity }) => ({
+            velocity: velocity.add(explicitNode as never),
+          })),
+        ],
+      }),
+    );
+    const explicitInputs: unknown[] = [];
+    explicitProgram.buildKernels({
+      ...fakeAdapter(),
+      instancedArray: () => new BindingInputCaptureStorage(explicitInputs),
+      vec3: () => new BindingInputCaptureNode(explicitInputs),
+    });
+
+    expect(constantCalls).toEqual([{ type: 'vec3', value: [0, 1, 0] }]);
+    expect(literalInputs).toContain(loweredNode);
+    expect(explicitInputs).toContain(explicitNode);
+    expect(loweredNode?.value).toEqual(explicitNode.value);
+  });
+
+  it('passes non-literal operation metadata through TSL tracing without false diagnostics', () => {
+    const custom = tslModule(({ velocity }) => {
+      const configured = (
+        velocity as unknown as {
+          configure(
+            name: string,
+            optional: undefined,
+            empty: null,
+            callback: () => void,
+          ): typeof velocity;
+        }
+      ).configure('namedVelocity', undefined, null, () => undefined);
+      return { velocity: configured };
+    });
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [custom] }));
+
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_TSL_BINDING_INPUT_INVALID',
+    );
+  });
+
+  it('rejects unsupported numeric-array binding inputs during tracing', () => {
+    const invalid = tslModule(({ velocity }) => ({
+      velocity: velocity.add([1] as never),
+    }));
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [invalid] }));
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_TSL_BINDING_INPUT_INVALID',
+        path: 'update[0].factory.velocity.add[0]',
+      }),
+    );
+  });
+
+  it('rejects non-finite numeric-array binding inputs during tracing', () => {
+    const invalid = tslModule(({ velocity }) => ({
+      velocity: velocity.add([0, Number.NaN, 0] as never),
+    }));
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [invalid] }));
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_TSL_BINDING_INPUT_INVALID',
+        path: 'update[0].factory.velocity.add[0]',
+      }),
+    );
+  });
+
+  it('rejects non-node binding inputs with the module path before materialization', () => {
+    const invalid = tslModule(({ velocity }) => ({
+      velocity: velocity.add({ x: 0, y: 1, z: 0 } as never),
+    }));
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [invalid] }));
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_TSL_BINDING_INPUT_INVALID',
+        path: 'update[0].factory.velocity.add[0]',
+        severity: 'error',
+      }),
+    );
+    expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
+  });
+
+  it('warns for lifetime without age unless lifecycle or an age write makes death explicit', () => {
+    const lifetimeOnly = tslModule(({ lifetime: value }) => ({ lifetime: value }), {
+      stage: 'init',
+    });
+    const withoutAge = compileEmitter(baseEmitter({ init: [lifetimeOnly], integration: 'none' }));
+    expect(withoutAge.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_LIFETIME_WITHOUT_AGE',
+        message: expect.stringContaining('lifecycle declaration or an age write'),
+        severity: 'warning',
+      }),
+    );
+
+    const lifecycle = compileEmitter({
+      ...baseEmitter({ init: [lifetimeOnly], integration: 'none' }),
+      lifecycle: { duration: 1 },
+    });
+    expect(lifecycle.diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_LIFETIME_WITHOUT_AGE',
+    );
+
+    const lifetimeAndAge = tslModule(({ age, lifetime: value }) => ({ age, lifetime: value }), {
+      stage: 'init',
+    });
+    const withAge = compileEmitter(baseEmitter({ init: [lifetimeAndAge], integration: 'none' }));
+    expect(withAge.diagnostics.map(({ code }) => code)).not.toContain('NACHI_LIFETIME_WITHOUT_AGE');
   });
 
   it('assigns spawnOrder before an init tslModule reads it', () => {
@@ -2947,10 +3224,24 @@ describe('emitter kernel compiler', () => {
       baseEmitter({
         integration: 'none',
         update: [
-          collidePlane({ bounce: 2, mode: 'bounce', normal: [0, 0, 0], offset: 0 }),
-          collideSphere({ center: [0, 0, 0], friction: -1, mode: 'stick', radius: 0 }),
-          collideBox({ center: [0, 0, 0], mode: 'kill', size: [1, 0, 1] }),
-          collideSceneDepth({ surfaceOffset: -1 }),
+          rawConfig(collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 }), {
+            bounce: 2,
+            mode: 'bounce',
+            normal: [0, 0, 0],
+            offset: 0,
+          }),
+          rawConfig(collideSphere({ center: [0, 0, 0], mode: 'stick', radius: 1 }), {
+            center: [0, 0, 0],
+            friction: -1,
+            mode: 'stick',
+            radius: 0,
+          }),
+          rawConfig(collideBox({ center: [0, 0, 0], mode: 'kill', size: [1, 1, 1] }), {
+            center: [0, 0, 0],
+            mode: 'kill',
+            size: [1, 0, 1],
+          }),
+          rawConfig(collideSceneDepth(), { surfaceOffset: -1 }),
         ],
       }),
     );
@@ -3069,7 +3360,10 @@ describe('emitter kernel compiler', () => {
 
   it('diagnoses invalid scene-depth thickness', () => {
     const program = compileEmitter(
-      baseEmitter({ integration: 'none', update: [collideSceneDepth({ thickness: 0 })] }),
+      baseEmitter({
+        integration: 'none',
+        update: [rawConfig(collideSceneDepth(), { thickness: 0 })],
+      }),
     );
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_COLLISION_DEPTH_THICKNESS_INVALID' }),
@@ -3097,7 +3391,13 @@ describe('emitter kernel compiler', () => {
       compileEmitter(
         baseEmitter({
           integration: 'none',
-          update: [collideSdf({ field, mode: 'stick', thickness: -1 })],
+          update: [
+            rawConfig(collideSdf({ field, mode: 'stick' }), {
+              field,
+              mode: 'stick',
+              thickness: -1,
+            }),
+          ],
         }),
       ).diagnostics,
     ).toContainEqual(expect.objectContaining({ code: 'NACHI_COLLISION_SDF_THICKNESS_INVALID' }));
@@ -3153,7 +3453,9 @@ describe('emitter kernel compiler', () => {
     velocityOverLife(curve([0, 1], [1, 0.5])),
     sizeOverLife(curve([0, 0], [1, 2])),
   ])('bakes an over-life module to the shared curve LUT path', (module) => {
-    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }));
+    const program = compileEmitter(
+      baseEmitter({ init: [lifetime(1)], integration: 'none', update: [module] }),
+    );
     expect(program.diagnostics).toEqual([]);
     expect(program.luts).toHaveLength(1);
     expect(program.luts[0]).toMatchObject({ channels: 1, kind: 'curve', width: 256 });
@@ -3204,13 +3506,38 @@ describe('emitter kernel compiler', () => {
       baseEmitter({
         integration: 'none',
         update: [
-          vortex({ axis: [0, 0, 0], strength: 1 }),
-          curlNoise({ frequency: 0, strength: 1 }),
-          turbulence({ frequency: -1, strength: 1 }),
-          pointAttractor({ position: [0, 0, 0], radius: -1, strength: 1 }),
-          killVolume({ mode: 'inside', normal: [0, 0, 0], shape: 'plane' }),
-          killVolume({ mode: 'inside', radius: -1, shape: 'sphere' }),
-          killVolume({ mode: 'inside', shape: 'box', size: [1, 0, 1] }),
+          rawConfig(vortex({ axis: [0, 1, 0], strength: 1 }), {
+            axis: [0, 0, 0],
+            strength: 1,
+          }),
+          rawConfig(curlNoise({ frequency: 1, strength: 1 }), {
+            frequency: 0,
+            strength: 1,
+          }),
+          rawConfig(turbulence({ frequency: 1, strength: 1 }), {
+            frequency: -1,
+            strength: 1,
+          }),
+          rawConfig(pointAttractor({ position: [0, 0, 0], strength: 1 }), {
+            position: [0, 0, 0],
+            radius: -1,
+            strength: 1,
+          }),
+          rawConfig(killVolume({ mode: 'inside', normal: [0, 1, 0], shape: 'plane' }), {
+            mode: 'inside',
+            normal: [0, 0, 0],
+            shape: 'plane',
+          }),
+          rawConfig(killVolume({ mode: 'inside', radius: 1, shape: 'sphere' }), {
+            mode: 'inside',
+            radius: -1,
+            shape: 'sphere',
+          }),
+          rawConfig(killVolume({ mode: 'inside', shape: 'box', size: [1, 1, 1] }), {
+            mode: 'inside',
+            shape: 'box',
+            size: [1, 0, 1],
+          }),
         ],
       }),
     );
@@ -3229,7 +3556,13 @@ describe('emitter kernel compiler', () => {
   it('diagnoses a statically degenerate velocity-cone direction', () => {
     const program = compileEmitter(
       baseEmitter({
-        init: [velocityCone({ angle: 30, direction: [0, 0, 0], speed: 1 })],
+        init: [
+          rawConfig(velocityCone({ angle: 30, direction: [0, 1, 0], speed: 1 }), {
+            angle: 30,
+            direction: [0, 0, 0],
+            speed: 1,
+          }),
+        ],
         integration: 'none',
       }),
     );

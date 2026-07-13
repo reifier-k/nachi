@@ -101,6 +101,10 @@ importers:
       '@nachi/core':
         specifier: workspace:^
         version: link:../core
+    devDependencies:
+      '@nachi/trails':
+        specifier: workspace:^
+        version: link:../trails
 
   packages/mesh-fx:
     dependencies:

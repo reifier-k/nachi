@@ -2,7 +2,17 @@
 export const VERSION = '0.0.0' as const;
 
 export * from './api.js';
-export * from './attributes.js';
+export {
+  BUILT_IN_ATTRIBUTE_DEFAULTS,
+  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
+  attributeStorageComponentIndex,
+  packedComponentIndex,
+  packedElementIndex,
+  resolveAttributeSchema,
+  resolvePackedAttributeAddress,
+  resolveTslStorageType,
+} from './attributes.js';
+export type { AttributeStorageBackend, PackedAttributeAddress } from './attributes.js';
 export * from './compiler.js';
 export * from './limits.js';
 export type {

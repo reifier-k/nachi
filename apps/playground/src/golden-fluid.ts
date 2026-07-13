@@ -300,7 +300,9 @@ async function run() {
   const runtime = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
 
   if (!webgpu) {
-    const instance = new VFXSystem(runtime).spawn(fluidEffect());
+    const instance = new VFXSystem(runtime, undefined, { onBuildDiagnostic: null }).spawn(
+      fluidEffect(),
+    );
     const unsupported = instance.diagnostics.some(
       ({ code }) => code === 'NACHI_GRID3D_WEBGL2_UNSUPPORTED',
     );

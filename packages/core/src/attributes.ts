@@ -16,22 +16,24 @@ import type {
 } from './types.js';
 
 type AttributeLayout = {
+  /** Plain authoring literal accepted by tslModule binding-operation lowering. */
+  readonly bindingInput?: 'boolean' | 'number' | AttributeComponentCount;
   readonly components: AttributeComponentCount;
   readonly storageType: TslStorageType;
 };
 
 const ATTRIBUTE_LAYOUTS: Readonly<Record<AttributeType, AttributeLayout>> = {
-  bool: { components: 1, storageType: 'uint' },
+  bool: { bindingInput: 'boolean', components: 1, storageType: 'uint' },
   color: { components: 4, storageType: 'vec4' },
-  f32: { components: 1, storageType: 'float' },
+  f32: { bindingInput: 'number', components: 1, storageType: 'float' },
   i32: { components: 1, storageType: 'int' },
-  mat3: { components: 9, storageType: 'mat3' },
-  mat4: { components: 16, storageType: 'mat4' },
+  mat3: { bindingInput: 9, components: 9, storageType: 'mat3' },
+  mat4: { bindingInput: 16, components: 16, storageType: 'mat4' },
   quat: { components: 4, storageType: 'vec4' },
   u32: { components: 1, storageType: 'uint' },
-  vec2: { components: 2, storageType: 'vec2' },
-  vec3: { components: 3, storageType: 'vec3' },
-  vec4: { components: 4, storageType: 'vec4' },
+  vec2: { bindingInput: 2, components: 2, storageType: 'vec2' },
+  vec3: { bindingInput: 3, components: 3, storageType: 'vec3' },
+  vec4: { bindingInput: 4, components: 4, storageType: 'vec4' },
 };
 
 /** GPU memory length in 4-byte elements, matching three.js getMemoryLengthFromType. */
@@ -141,6 +143,23 @@ function uniquePhysicalName(value: string, storages: readonly { readonly name: s
 
 export function resolveTslStorageType(type: AttributeType): TslStorageType {
   return ATTRIBUTE_LAYOUTS[type].storageType;
+}
+
+/** Resolves plain tslModule binding inputs from the same logical-type table as attributes. */
+export function resolveTslBindingInputType(value: unknown): AttributeType | undefined {
+  const inputShape =
+    typeof value === 'boolean'
+      ? 'boolean'
+      : typeof value === 'number' && Number.isFinite(value)
+        ? 'number'
+        : Array.isArray(value) &&
+            value.every((component) => typeof component === 'number' && Number.isFinite(component))
+          ? value.length
+          : undefined;
+  if (inputShape === undefined) return undefined;
+  return (Object.entries(ATTRIBUTE_LAYOUTS) as [AttributeType, AttributeLayout][]).find(
+    ([, layout]) => layout.bindingInput === inputShape,
+  )?.[0];
 }
 
 export const BUILT_IN_ATTRIBUTE_DEFAULTS = {

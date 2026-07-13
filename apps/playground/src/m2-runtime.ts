@@ -506,7 +506,9 @@ async function runSmoke(): Promise<void> {
 
   if (!backend.isWebGPUBackend) {
     statusValue.textContent = 'Verifying the WebGL2 lifecycle varying-budget diagnostic…';
-    const diagnosticSystem = new VFXSystem(runtimeRenderer);
+    const diagnosticSystem = new VFXSystem(runtimeRenderer, undefined, {
+      onBuildDiagnostic: null,
+    });
     const diagnosed = diagnosticSystem.spawn(webglInitializeBudgetEffect());
     const diagnostic = diagnosed.diagnostics.find(
       ({ code }) => code === 'NACHI_BACKEND_SPAWN_UNSUPPORTED',

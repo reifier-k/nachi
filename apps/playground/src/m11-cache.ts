@@ -342,7 +342,9 @@ async function run(): Promise<void> {
       mode: query.get('headless') === '1' ? 'headless' : 'visual',
       page: 'm11-cache',
     });
-    const performanceSystem = new VFXSystem(performanceRuntime);
+    const performanceSystem = new VFXSystem(performanceRuntime, undefined, {
+      onBuildDiagnostic: null,
+    });
     performanceSystem.spawn(singleShotEffect, spawn);
     await performanceSystem.update(0);
     await performanceSystem.update(1 / FRAME_RATE);
@@ -422,6 +424,7 @@ async function run(): Promise<void> {
     const diagnosticCounter = countedRuntime(baseRuntime);
     const diagnosticSystem = new VFXSystem(diagnosticCounter.runtime, undefined, {
       aliveCountReadbackInterval: 1,
+      onBuildDiagnostic: null,
     });
     const errorInstance = diagnosticSystem.spawn(singleShotEffect, spawn);
     const spawnState = errorInstance.state;
@@ -454,7 +457,7 @@ async function run(): Promise<void> {
     let replayDiagnosticMessage = '';
     try {
       await replaySimulation(
-        new VFXSystem(baseRuntime),
+        new VFXSystem(baseRuntime, undefined, { onBuildDiagnostic: null }),
         singleShotEffect,
         webglReplayDiagnosticCache(),
       );

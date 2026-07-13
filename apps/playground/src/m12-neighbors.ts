@@ -273,7 +273,9 @@ async function run() {
         mode: headless ? 'headless' : 'visual',
         page: '/m12-neighbors/',
       });
-      const performanceSystem = new VFXSystem(performanceRuntime);
+      const performanceSystem = new VFXSystem(performanceRuntime, undefined, {
+        onBuildDiagnostic: null,
+      });
       performanceSystem.spawn(countEffect);
       await performanceSystem.update(0);
       await performanceSystem.update(1 / 60);
@@ -295,7 +297,7 @@ async function run() {
       performanceRenderer.dispose();
     }
   };
-  const countSystem = new VFXSystem(runtime);
+  const countSystem = new VFXSystem(runtime, undefined, { onBuildDiagnostic: null });
   const countInstance = countSystem.spawn(countEffect);
   await countSystem.update(0);
   await countSystem.update(1 / 60);

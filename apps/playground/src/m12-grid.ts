@@ -190,7 +190,7 @@ async function run() {
   });
 
   if (!webgpu) {
-    const system = new VFXSystem(counter.runtime);
+    const system = new VFXSystem(counter.runtime, undefined, { onBuildDiagnostic: null });
     const instance = system.spawn(mainEffect());
     const unsupported = instance.diagnostics.some(
       ({ code }) => code === 'NACHI_GRID2D_WEBGL2_UNSUPPORTED',
