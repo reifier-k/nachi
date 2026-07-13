@@ -6,6 +6,7 @@ import {
   createSlashArcGeometry,
   fxMaterial,
   polarUV,
+  uvFlow,
 } from '@nachi/mesh-fx';
 import { polarUVCpu, uvFlowCpu } from '@nachi/tsl-kit/math';
 import * as THREE from 'three/webgpu';
@@ -264,6 +265,42 @@ async function run(): Promise<void> {
     fresnelMaterial,
   );
   const fresnelPixels = await render(fresnelCylinder);
+
+  const opacityGeometry = new THREE.PlaneGeometry(1, 1);
+  const opacityPhases = async (blending: 'additive' | 'alpha') => {
+    const material = fxMaterial({ blending, color: '#ffffff' });
+    const mesh = new THREE.Mesh(opacityGeometry, material);
+    material.fx.setOpacity(1);
+    const full = await render(mesh);
+    material.fx.setOpacity(0.5);
+    const half = await render(mesh);
+    const center = SIZE / 2;
+    const result = {
+      full: energy(full, center, center),
+      half: energy(half, center, center),
+    };
+    material.dispose();
+    return result;
+  };
+  const alphaOpacity = await opacityPhases('alpha');
+  const additiveOpacity = await opacityPhases('additive');
+
+  const uvSeparationGeometry = new THREE.PlaneGeometry(2, 2);
+  const uvSeparationMaterial = fxMaterial({
+    dissolve: {
+      edgeWidth: 0,
+      overLife: 0.5,
+      texture: noise,
+      uv: 'static',
+    },
+    map,
+    uv: uvFlow({ speed: [0.5, 0] }),
+  });
+  const uvSeparationMesh = new THREE.Mesh(uvSeparationGeometry, uvSeparationMaterial);
+  uvSeparationMaterial.fx.setTime(0);
+  const uvSeparationAtZero = await render(uvSeparationMesh);
+  uvSeparationMaterial.fx.setTime(1);
+  const uvSeparationAtOne = await render(uvSeparationMesh);
   renderer.setRenderTarget(null);
 
   // Start from a barycentric interior point, then snap to the covered pixel center and interpolate
@@ -308,6 +345,13 @@ async function run(): Promise<void> {
   const mirrorAtZero = energy(arcAtZero, sampleX, mirrorRow);
   const fresnelCenter = energy(fresnelPixels, SIZE / 2, SIZE / 2);
   const fresnelEdge = energy(fresnelPixels, 21, SIZE / 2);
+  const uvSeparationSampleX = 72;
+  const uvSeparationSampleRow = readbackRow(0, isWebGpu);
+  const uvSeparationSourceU = (uvSeparationSampleX + 0.5) / SIZE;
+  const uvSeparationAtZeroRgb = rgb(uvSeparationAtZero, uvSeparationSampleX, uvSeparationSampleRow);
+  const uvSeparationAtOneRgb = rgb(uvSeparationAtOne, uvSeparationSampleX, uvSeparationSampleRow);
+  const opacityRatio = (sample: { readonly full: number; readonly half: number }) =>
+    sample.half / sample.full;
 
   const ratios = [
     arcAtZero,
@@ -347,9 +391,17 @@ async function run(): Promise<void> {
     dissolveOverLife:
       sampleAtOne > 60 && sampleDissolved < 12 && ratios[1]! > foregroundRatio(arcDissolved) * 2,
     fresnelEdge: fresnelCenter < 30 && fresnelEdge > fresnelCenter + 80,
+    opacityRuntime:
+      alphaOpacity.full > 700 &&
+      additiveOpacity.full > 700 &&
+      Math.abs(opacityRatio(alphaOpacity) - 0.5) < 0.04 &&
+      Math.abs(opacityRatio(additiveOpacity) - 0.5) < 0.04,
     renderedGeometry: ratios.slice(2, 6).every((ratio) => ratio > 0.04 && ratio < 0.7),
     visualReadback:
       ratios.every((ratio) => ratio < 0.72) && ratios.filter((ratio) => ratio > 0.01).length >= 6,
+    uvSeparation:
+      rgbMatches(uvSeparationAtZeroRgb, sampleIrregularTexture(uvSeparationSourceU)) &&
+      rgbMatches(uvSeparationAtOneRgb, sampleIrregularTexture(uvSeparationSourceU + 0.5)),
   };
 
   paintPanels(
@@ -389,6 +441,14 @@ async function run(): Promise<void> {
         transformedAtZero,
       },
       fresnel: { center: fresnelCenter, edge: fresnelEdge },
+      opacity: { additive: additiveOpacity, alpha: alphaOpacity },
+      uvSeparation: {
+        actualAtOne: uvSeparationAtOneRgb,
+        actualAtZero: uvSeparationAtZeroRgb,
+        expectedAtOne: sampleIrregularTexture(uvSeparationSourceU + 0.5),
+        expectedAtZero: sampleIrregularTexture(uvSeparationSourceU),
+        sourceU: uvSeparationSourceU,
+      },
       source: 'cpu-buffer-attributes+offscreen-render-target-readback',
     },
     validation,
@@ -408,9 +468,11 @@ async function run(): Promise<void> {
     coneGeometry,
     magicGeometry,
     fresnelCylinder.geometry,
+    opacityGeometry,
+    uvSeparationGeometry,
   ].forEach((geometry) => geometry.dispose());
-  [arcMaterial, uvMaterial, magicMaterial, fresnelMaterial].forEach((material) =>
-    material.dispose(),
+  [arcMaterial, uvMaterial, magicMaterial, fresnelMaterial, uvSeparationMaterial].forEach(
+    (material) => material.dispose(),
   );
 }
 

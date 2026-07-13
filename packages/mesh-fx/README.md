@@ -8,6 +8,7 @@ import { fxMaterial, polarUV, slashArc } from '@nachi/mesh-fx';
 
 const material = fxMaterial({
   color: '#66ddff',
+  map: effectTexture,
   uv: polarUV().flow({ speed: [0.35, 0] }),
   dissolve: {
     texture: noiseTexture,
@@ -16,6 +17,9 @@ const material = fxMaterial({
       [1, 1],
     ],
     edgeColor: '#ffffff',
+    edgeIntensity: 0.8,
+    edgeModulate: 'map',
+    uv: 'static',
   },
   fresnel: { color: '#2aa8ff', power: 2 },
   blending: 'additive',
@@ -32,6 +36,7 @@ const arc = slashArc({
 
 material.fx.setTime(2);
 material.fx.setNormalizedLife(0.4);
+material.fx.setOpacity(0.6);
 scene.add(arc);
 ```
 
@@ -41,10 +46,22 @@ Factories include `slashArc`, `ring`, open `cylinder`, open `cone`, and `magicCi
 uses centered Cartesian primary UVs for `polarUV()` and publishes concentric angle/radius islands
 as `uv1`.
 
-`fxMaterial` creates writable time and normalized-life uniforms when they are omitted. Pass TSL
-nodes through `time` and `normalizedLife` for standalone externally owned bindings. The
+`fxMaterial` creates writable time and normalized-life uniforms when they are omitted. A numeric or
+omitted `opacity` likewise creates a writable opacity uniform; a TSL opacity node is composed at
+compile time instead, and `setOpacity()` rejects mutation. Pass TSL nodes through `time` and
+`normalizedLife` for standalone externally owned bindings. The
 `@nachi/timeline` adapter drives its effect-local clock through the writable controls, so timeline
 materials must omit `time`; no wall clock is read implicitly.
+
+By default, `dissolve` samples the same authored UV as `map`, preserving the original composition.
+Set `dissolve.uv: 'static'` for the geometry's unmodified UV, or provide a separate `polarUV()` /
+`uvFlow()` authoring value. `edgeIntensity` scales edge emission, while `edgeModulate: 'map'`
+multiplies it by map luminance (`map` is required); both default to the previous unmodulated edge.
+
+For a stable hold phase, put the dissolve hold threshold below the minimum value of the noise
+texture, so a bright edge contour does not remain across the mesh. Match noise frequency to mesh
+scale: large meshes need correspondingly finer noise, while small meshes need coarser noise to keep
+the same apparent feature size.
 
 Three.js is an exact `three@0.185.1` peer. The package is ESM-only and declares
 `sideEffects: false`.

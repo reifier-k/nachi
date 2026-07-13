@@ -185,6 +185,8 @@ export type TimelineFxDissolveConfig = Omit<FxDissolveConfig, 'overLife'> & {
 };
 export type TimelineFxMaterialConfig = Omit<FxMaterialConfig, 'dissolve'> & {
   readonly dissolve?: TimelineFxDissolveConfig;
+  /** Drives the package-owned opacity uniform from mesh normalized life. */
+  readonly opacityOverLife?: TimelineOverLifeInput;
 };
 
 export function lowerCurve(input: CurveGenerator<number>): OverLifeCurve {
@@ -252,25 +254,60 @@ export function lowerCurve(input: CurveGenerator<number>): OverLifeCurve {
 }
 
 export function fxMaterial(config: TimelineFxMaterialConfig = {}): FxNodeMaterial {
-  const lowered = config.dissolve
-    ? {
-        ...config,
-        dissolve: {
-          ...config.dissolve,
-          overLife: isCoreCurve(config.dissolve.overLife)
-            ? lowerCurve(config.dissolve.overLife)
-            : config.dissolve.overLife,
-        },
-      }
-    : config;
+  if (config.opacity !== undefined && config.opacityOverLife !== undefined) {
+    throw new VfxDiagnosticError([
+      diagnostic(
+        'NACHI_MESH_FX_OPACITY_BINDING_CONFLICT',
+        'opacity and opacityOverLife both own the mesh-fx opacity channel.',
+        'fxMaterial.opacityOverLife',
+      ),
+    ]);
+  }
+  const opacityOverLife =
+    config.opacityOverLife === undefined
+      ? undefined
+      : normalizeOpacityOverLife(config.opacityOverLife);
+  const meshConfig = { ...config };
+  delete meshConfig.opacityOverLife;
+  const lowered = {
+    ...meshConfig,
+    ...(opacityOverLife === undefined
+      ? {}
+      : {
+          opacity:
+            typeof opacityOverLife === 'number' || Array.isArray(opacityOverLife)
+              ? evaluateOverLife(opacityOverLife, 0)
+              : opacityOverLife,
+        }),
+    ...(config.dissolve
+      ? {
+          dissolve: {
+            ...config.dissolve,
+            overLife: isCoreCurve(config.dissolve.overLife)
+              ? lowerCurve(config.dissolve.overLife)
+              : config.dissolve.overLife,
+          },
+        }
+      : {}),
+  };
   const storedConfig = Object.freeze({
-    ...lowered,
+    ...config,
+    ...(opacityOverLife === undefined ? {} : { opacityOverLife }),
     ...(lowered.dissolve === undefined ? {} : { dissolve: Object.freeze({ ...lowered.dissolve }) }),
     ...(lowered.fresnel === undefined ? {} : { fresnel: Object.freeze({ ...lowered.fresnel }) }),
   }) as TimelineFxMaterialConfig;
-  const material = createMeshFxMaterial(storedConfig as FxMaterialConfig);
+  const material = createMeshFxMaterial(lowered as FxMaterialConfig);
   materialConfigs.set(material, storedConfig);
   return material;
+}
+
+/** @internal Applies timeline-owned life and opacity controls to a cloned material instance. */
+export function setTimelineFxMaterialLife(material: FxNodeMaterial, normalizedLife: number): void {
+  material.fx.setNormalizedLife(normalizedLife);
+  const input = materialConfigs.get(material)?.opacityOverLife;
+  if (typeof input === 'number' || Array.isArray(input)) {
+    material.fx.setOpacity(evaluateOverLife(input, normalizedLife));
+  }
 }
 
 export function cloneTimelineFxMaterial(
@@ -455,6 +492,28 @@ function asMeshFxResource(element: TimelineAuthoringElement): MeshFxRuntimeResou
 
 function isCoreCurve(input: TimelineOverLifeInput): input is CurveGenerator<number> {
   return typeof input === 'object' && input !== null && 'kind' in input && input.kind === 'curve';
+}
+
+function normalizeOpacityOverLife(input: TimelineOverLifeInput): OverLifeInput {
+  if (isCoreCurve(input)) return lowerCurve(input);
+  if (!Array.isArray(input)) return input;
+  return lowerCurve({
+    keys: input.map(([time, value]) => ({ time, value })),
+    kind: 'curve',
+  });
+}
+
+function evaluateOverLife(input: number | OverLifeCurve, normalizedLife: number): number {
+  if (typeof input === 'number') return input;
+  const life = Math.min(1, Math.max(0, normalizedLife));
+  for (let index = 0; index < input.length - 1; index += 1) {
+    const [startTime, startValue] = input[index]!;
+    const [endTime, endValue] = input[index + 1]!;
+    if (life > endTime) continue;
+    const phase = (life - startTime) / (endTime - startTime);
+    return startValue + (endValue - startValue) * phase;
+  }
+  return input.at(-1)![1];
 }
 
 function requirePositive(value: number, path: string): void {

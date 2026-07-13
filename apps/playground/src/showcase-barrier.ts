@@ -37,7 +37,6 @@ import {
   VFXSystem,
   type CameraShakeSample,
 } from '@nachi/timeline';
-import { uniform } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -531,7 +530,7 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
         overLife: curve([0, 1], [0.14, 0.2], [0.6, 0.24], [0.9, 0.6], [1, 1]),
         texture: textures.noise,
       },
-      opacity: 0.26,
+      opacityOverLife: curve([0, 0.26], [0.82, 0.26], [1, 0]),
     }),
     outerRadius: 1.12,
     segments: 96,
@@ -550,7 +549,7 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
         texture: textures.noise,
       },
       map: textures.runes,
-      opacity: 0.9,
+      opacityOverLife: curve([0, 0.9], [0.82, 0.9], [1, 0]),
       uv: uvFlow({ speed: [0.07, 0] }),
     }),
     outerRadius: 2.16,
@@ -570,7 +569,7 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
         texture: textures.noise,
       },
       map: textures.ticks,
-      opacity: 0.85,
+      opacityOverLife: curve([0, 0.85], [0.82, 0.85], [1, 0]),
       uv: uvFlow({ speed: [-0.13, 0] }),
     }),
     outerRadius: 1.44,
@@ -593,7 +592,7 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
         overLife: curve([0, 0.9], [0.06, 0.08], [0.85, 0.14], [1, 1]),
         texture: textures.noise,
       },
-      opacity: 0.85,
+      opacityOverLife: curve([0, 0.85], [0.78, 0.85], [1, 0]),
     }),
     outerRadius: DOME_RADIUS + 0.07,
     segments: 128,
@@ -613,7 +612,7 @@ function createBarrierEffect(textures: EffectTextures, loop: boolean) {
         overLife: curve([0, 0.08], [0.5, 0.38], [1, 1]),
         texture: textures.noise,
       },
-      opacity: 0.5,
+      opacityOverLife: curve([0, 0.5], [0.35, 0.45], [0.75, 0.12], [1, 0]),
     }),
     outerRadius: 1.0,
     segments: 96,
@@ -739,9 +738,8 @@ async function run(): Promise<void> {
   scene.add(ground, new THREE.HemisphereLight(0x4a6f9f, 0x060a14, 1.1), pool);
 
   // The hero: a self-managed hemispherical energy dome. It is deliberately not
-  // a timeline element — scale, dissolve life, uv time, and fresnel breathing
+  // a timeline element — scale, dissolve life, uv time, and opacity breathing
   // are all driven per-frame from the page loop.
-  const domeBreath = uniform(2.55);
   const domeMaterial = meshFxMaterial({
     blending: 'additive',
     dissolve: {
@@ -756,7 +754,7 @@ async function run(): Promise<void> {
       ],
       texture: textures.noise,
     },
-    fresnel: { color: '#a8a4ff', power: domeBreath },
+    fresnel: { color: '#a8a4ff', power: 2.55 },
     map: hexShellTexture(),
     opacity: 0.85,
     uv: uvFlow({ speed: [0.02, 0.006] }),
@@ -878,7 +876,7 @@ async function run(): Promise<void> {
       clamp01((local - DEPLOY_TIME) / (EFFECT_DURATION - DEPLOY_TIME)),
     );
     domeMaterial.fx.setTime(local);
-    domeBreath.value = 2.55 + Math.sin(Math.max(0, local - 0.95) * 4.2) * 0.5;
+    domeMaterial.fx.setOpacity(0.85 + Math.sin(Math.max(0, local - 0.95) * 4.2) * 0.08);
     const shockState = instance.getElementState('shock');
     const shockClone = findMeshFx('barrier-shock');
     if (shockClone && shockState?.playing) {
@@ -887,9 +885,7 @@ async function run(): Promise<void> {
       shockClone.scale.setScalar(scale);
     }
     if (latestShake) {
-      camera.position
-        .copy(cameraBasePosition)
-        .add(new THREE.Vector3(...latestShake.translation));
+      camera.position.copy(cameraBasePosition).add(new THREE.Vector3(...latestShake.translation));
       camera.rotation.set(
         cameraBaseRotation.x + latestShake.rotation[0],
         cameraBaseRotation.y + latestShake.rotation[1],

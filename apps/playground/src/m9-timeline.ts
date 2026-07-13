@@ -55,6 +55,7 @@ const root = document.documentElement;
 const query = new URLSearchParams(location.search);
 const headless = query.get('headless') === '1';
 const disableOverLifeProbe = query.get('disableOverLife') === '1';
+const disableOpacityOverLifeProbe = query.get('disableOpacityOverLife') === '1';
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -329,6 +330,104 @@ async function meshFxOverLifeGpuProbe(
   };
 }
 
+async function meshFxOpacityOverLifeGpuProbe(
+  renderer: THREE.WebGPURenderer,
+  runtime: ReturnType<typeof createThreeRuntimeRenderer>,
+) {
+  const noiseValue = 140;
+  const noise = new THREE.DataTexture(
+    new Uint8Array([noiseValue, noiseValue, noiseValue, 255]),
+    1,
+    1,
+    THREE.RGBAFormat,
+  );
+  noise.colorSpace = THREE.NoColorSpace;
+  noise.magFilter = THREE.NearestFilter;
+  noise.minFilter = THREE.NearestFilter;
+  noise.needsUpdate = true;
+  const probe = defineEffect({
+    elements: {
+      ring: meshFxElement(
+        ring({
+          innerRadius: 0.55,
+          material: fxMaterial({
+            blending: 'additive',
+            color: '#2070ff',
+            dissolve: {
+              edgeColor: '#ffffff',
+              edgeWidth: 0.2,
+              overLife: curve([0, 0.1], [0.5, 0.4], [1, 0.7]),
+              texture: noise,
+            },
+            opacityOverLife: disableOpacityOverLifeProbe
+              ? 1
+              : curve([0, 0.5], [0.4, 0.5], [0.5, 0.04], [1, 0]),
+          }),
+          outerRadius: 0.9,
+          segments: 64,
+        }),
+        { duration: 1 },
+      ),
+    },
+    timeline: timeline([at(0, play('ring'))], { duration: 1 }),
+  });
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0);
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  camera.position.z = 5;
+  const target = new THREE.RenderTarget(OVER_LIFE_PROBE_SIZE, OVER_LIFE_PROBE_SIZE, {
+    depthBuffer: true,
+  });
+  target.texture.colorSpace = THREE.NoColorSpace;
+  const system = new VFXSystem(runtime, scene);
+  system.spawn(probe);
+  await system.update(0);
+  const capture = async (): Promise<Rgb> => {
+    renderer.setRenderTarget(target);
+    renderer.render(scene, camera);
+    const pixels = compactRgba8Readback(
+      new Uint8Array(
+        await renderer.readRenderTargetPixelsAsync(
+          target,
+          0,
+          0,
+          OVER_LIFE_PROBE_SIZE,
+          OVER_LIFE_PROBE_SIZE,
+        ),
+      ),
+      OVER_LIFE_PROBE_SIZE,
+      OVER_LIFE_PROBE_SIZE,
+      true,
+    );
+    return rgb(pixels, 56, 32, OVER_LIFE_PROBE_SIZE);
+  };
+  const initial = await capture();
+  await system.update(0.5);
+  const edgePhase = await capture();
+  await system.update(0.25);
+  const faded = await capture();
+  const energy = (value: Rgb) => value[0] + value[1] + value[2];
+  const energies = {
+    edgePhase: energy(edgePhase),
+    faded: energy(faded),
+    initial: energy(initial),
+  };
+  const ok =
+    energies.initial > 40 &&
+    energies.edgePhase > 0 &&
+    energies.edgePhase < energies.initial &&
+    energies.faded < energies.edgePhase;
+  target.dispose();
+  noise.dispose();
+  return {
+    actual: { edgePhase, faded, initial },
+    disabled: disableOpacityOverLifeProbe,
+    energies,
+    noise: noiseValue / 255,
+    ok,
+  };
+}
+
 function paint(pixels: Uint8Array): void {
   const output = new Uint8ClampedArray(pixels.length);
   for (let y = 0; y < HEIGHT; y += 1) {
@@ -538,6 +637,7 @@ async function run(): Promise<void> {
   const arcSecond = await capture();
   const curveChanged = changedPixels(arcFirst, arcSecond);
   const overLifeGpu = await meshFxOverLifeGpuProbe(renderer, runtime);
+  const opacityOverLifeGpu = await meshFxOpacityOverLifeGpuProbe(renderer, runtime);
   await system.update(0.15);
   const stopEffects = {
     arcHidden: instance.getElementState('arc')?.visible === false,
@@ -575,6 +675,7 @@ async function run(): Promise<void> {
       Math.abs(loop.localTime) < 1e-8,
     markerCallback: markerCount === 1,
     meshFxOverLifeGpu: overLifeGpu.ok,
+    meshFxOpacityOverLifeGpu: opacityOverLifeGpu.ok,
     playEffects: flashDeferredUntilUpdate && arcVisibleAtPlay && shockwaveVisible,
     stopEffects: Object.values(stopEffects).every(Boolean),
     stress600:
@@ -594,6 +695,7 @@ async function run(): Promise<void> {
       curveGpu: {
         changedPixels: curveChanged,
         expectedTexelSample: overLifeGpu,
+        opacityFadeSample: opacityOverLifeGpu,
         times: [0.05, 0.3],
       },
       hitStopSeparation,

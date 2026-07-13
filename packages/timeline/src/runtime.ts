@@ -32,6 +32,7 @@ import type { FxNodeMaterial, MeshFxMesh } from '@nachi/mesh-fx';
 import {
   cloneTimelineFxMaterial,
   getMeshFxResources,
+  setTimelineFxMaterialLife,
   type MeshFxRuntimeResource,
 } from './authoring.js';
 
@@ -312,8 +313,8 @@ function setMeshTransform(
   );
 }
 
-function materialControls(mesh: MeshFxMesh): FxNodeMaterial['fx'][] {
-  return 'fx' in mesh.material ? [(mesh.material as FxNodeMaterial).fx] : [];
+function fxMaterials(mesh: MeshFxMesh): FxNodeMaterial[] {
+  return 'fx' in mesh.material ? [mesh.material as FxNodeMaterial] : [];
 }
 
 export class TimelineEffectInstance<Definition extends RuntimeDefinition = RuntimeDefinition> {
@@ -648,9 +649,9 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       if (!runtime.playing) continue;
       runtime.elapsed += localDelta;
       const normalizedLife = Math.min(1, runtime.elapsed / runtime.duration);
-      for (const controls of materialControls(runtime.mesh)) {
-        controls.setTime(this.#localTime);
-        controls.setNormalizedLife(normalizedLife);
+      for (const material of fxMaterials(runtime.mesh)) {
+        material.fx.setTime(this.#localTime);
+        setTimelineFxMaterialLife(material, normalizedLife);
       }
       if (runtime.elapsed + EPSILON >= runtime.duration) {
         runtime.playing = false;
@@ -725,9 +726,9 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       mesh.elapsed = 0;
       mesh.playing = true;
       mesh.mesh.visible = true;
-      for (const controls of materialControls(mesh.mesh)) {
-        controls.setTime(this.#localTime);
-        controls.setNormalizedLife(0);
+      for (const material of fxMaterials(mesh.mesh)) {
+        material.fx.setTime(this.#localTime);
+        setTimelineFxMaterialLife(material, 0);
       }
       return undefined;
     }

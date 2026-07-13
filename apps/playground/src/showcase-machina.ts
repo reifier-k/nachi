@@ -194,6 +194,17 @@ function fineNoiseTexture(): THREE.DataTexture {
   return grayscaleDataTexture([128, 128], (u, v) => fbm(noise, u * 21, v * 21));
 }
 
+/** Static bottom-to-top reveal ramp; frequency is tuned for the column's 3.2-unit height. */
+function columnRampTexture(): THREE.DataTexture {
+  const noise = createValueNoise(0xc071);
+  const texture = grayscaleDataTexture(
+    [64, 256],
+    (u, v) => 0.08 + (1 - v) * 0.84 + fbm(noise, u * 7, v * 15) * 0.05,
+  );
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  return texture;
+}
+
 function canvasTexture(
   width: number,
   height: number,
@@ -353,7 +364,7 @@ function circuitColumnTexture(): THREE.CanvasTexture {
     context.fillStyle = '#ff9a2e';
     for (const railY of [64, 192, 320, 448]) context.fillRect(0, railY, 512, 2);
     context.globalAlpha = 1;
-    const laneX = (lane: number) => ((lane * 36.5 + 10) % 512 + 512) % 512;
+    const laneX = (lane: number) => (((lane * 36.5 + 10) % 512) + 512) % 512;
     for (let run = 0; run < 38; run += 1) {
       let lane = Math.floor(random() * 14);
       let y = random() * 512;
@@ -389,23 +400,15 @@ function circuitColumnTexture(): THREE.CanvasTexture {
       context.fillStyle = '#ffe9b0';
       context.fillRect(x - 1.5, y, 3, 8 + random() * 8);
     }
-    context.globalAlpha = 1;
-  });
-}
-
-/** Thin cyan data streams for the counter-scrolling inner column. */
-function innerStreamTexture(): THREE.CanvasTexture {
-  const random = createSeededRandom(0x1cee);
-  return canvasTexture(256, 512, true, (context) => {
-    context.globalCompositeOperation = 'lighter';
+    // Fold the former counter-scroll element into the column map. The combined
+    // strip now gets one map scroll while its reveal samples an independent UV.
     for (let lane = 0; lane < 14; lane += 1) {
-      const x = lane * 18.3 + 4;
+      const x = lane * 36.5 + 8;
       let y = random() * 512;
-      while (y < 512 + 64) {
+      while (y < 576) {
         const length = 24 + random() * 46;
-        const pick = random();
-        context.fillStyle = pick < 0.55 ? '#54e0ff' : pick < 0.85 ? '#2a8fc0' : '#9ef4ff';
-        context.globalAlpha = 0.35 + random() * 0.5;
+        context.fillStyle = random() < 0.7 ? '#54e0ff' : '#9ef4ff';
+        context.globalAlpha = 0.3 + random() * 0.45;
         context.fillRect(x, y % 512, 2.5, length);
         context.globalAlpha = 0.7;
         context.fillStyle = '#e8fdff';
@@ -523,12 +526,12 @@ interface EffectTextures {
   readonly beam: THREE.Texture;
   readonly beamFinal: THREE.Texture;
   readonly circuit: THREE.Texture;
+  readonly columnRamp: THREE.Texture;
   readonly dashes: THREE.Texture;
   readonly fineNoise: THREE.Texture;
   readonly noise: THREE.Texture;
   readonly pcb: THREE.Texture;
   readonly polygon: THREE.Texture;
-  readonly streams: THREE.Texture;
 }
 
 function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
@@ -720,41 +723,24 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
       blending: 'additive',
       dissolve: {
         edgeColor: '#ffe9b0',
+        edgeIntensity: 0.7,
+        edgeModulate: 'map',
         edgeWidth: 0.035,
-        // Hold thresholds sit below the fbm floor so the edge highlight only
-        // flares during the in/out sweeps instead of etching contour lines.
-        overLife: curve([0, 1], [0.06, 0.02], [0.6, 0.05], [1, 1]),
-        texture: textures.fineNoise,
+        // 0.02 is below the ramp/noise floor: no contour plate during the hold.
+        overLife: curve([0, 1], [0.16, 0.02], [0.82, 0.02], [1, 1]),
+        texture: textures.columnRamp,
+        uv: 'static',
       },
       map: textures.circuit,
-      opacity: 0.62,
+      opacity: 0.7,
       uv: uvFlow({ speed: [0, -1.15] }),
     }),
     radialSegments: 48,
-    radius: 0.72,
+    radius: 0.62,
   });
   columnMesh.name = 'machina-column';
-  // Keep the base-pivot bake: clone scale animates the column's vertical growth.
+  // Keep the base pivot; the independent static dissolve ramp now owns growth.
   columnMesh.geometry.translate(0, 1.61, 0);
-  const columnInnerMesh = cylinder({
-    height: 3.0,
-    material: fxMaterial({
-      blending: 'additive',
-      dissolve: {
-        edgeColor: '#9adfff',
-        edgeWidth: 0.03,
-        overLife: curve([0, 1], [0.04, 0.02], [0.55, 0.06], [1, 1]),
-        texture: textures.fineNoise,
-      },
-      map: textures.streams,
-      opacity: 0.7,
-      uv: uvFlow({ speed: [0, 0.85] }),
-    }),
-    radialSegments: 40,
-    radius: 0.4,
-  });
-  columnInnerMesh.name = 'machina-column-inner';
-  columnInnerMesh.geometry.translate(0, 1.51, 0);
 
   const laserMesh = (index: number, radius: number, final: boolean) => {
     const mesh = cylinder({
@@ -816,7 +802,6 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
       circleMid: meshFxElement(circleMidMesh, { duration: 2.75 }),
       circleOuter: meshFxElement(circleOuterMesh, { duration: 2.75 }),
       column: meshFxElement(columnMesh, { duration: 2.05 }),
-      columnInner: meshFxElement(columnInnerMesh, { duration: 1.95 }),
       coreLight,
       embers,
       finalLight,
@@ -871,7 +856,6 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
           cameraShake({ duration: 0.35, frequency: 16, strength: 0.05 }),
           marker('charge'),
         ),
-        at(0.56, play('columnInner')),
         at(
           BARRAGE_START,
           play('laser0'),
@@ -1034,12 +1018,12 @@ async function run(): Promise<void> {
     beam: beamTexture(),
     beamFinal: finalBeamTexture(),
     circuit: circuitColumnTexture(),
+    columnRamp: columnRampTexture(),
     dashes: dataDashTexture(),
     fineNoise: fineNoiseTexture(),
     noise: noiseTexture(),
     pcb: pcbTraceTexture(),
     polygon: polygonTickTexture(),
-    streams: innerStreamTexture(),
   };
   const spark = sparkSpriteTexture();
   const glow = glowSpriteTexture();
@@ -1151,22 +1135,10 @@ async function run(): Promise<void> {
       (child): child is THREE.Mesh => child instanceof THREE.Mesh && child.name === name,
     );
 
-  // Clone scale/position are choreographed per frame: scale drives the column
-  // climb and laser width pulses, and position moves origin-baked laser and
+  // Clone scale/position are choreographed per frame: scale drives laser width
+  // pulses, and position moves origin-baked laser and
   // shock geometry to each strike point after the runtime transform reset.
   const animateClones = () => {
-    const columnState = instance.getElementState('column');
-    const columnClone = findMeshFx('machina-column');
-    if (columnClone && columnState?.playing) {
-      const p = Math.min(1, columnState.localTime / 0.26);
-      columnClone.scale.set(1, 0.04 + 0.96 * easeOutCubic(p), 1);
-    }
-    const innerState = instance.getElementState('columnInner');
-    const innerClone = findMeshFx('machina-column-inner');
-    if (innerClone && innerState?.playing) {
-      const p = Math.min(1, innerState.localTime / 0.22);
-      innerClone.scale.set(1, 0.04 + 0.96 * easeOutCubic(p), 1);
-    }
     const strikeClones = (
       laserName: string,
       shockName: string,
@@ -1203,7 +1175,15 @@ async function run(): Promise<void> {
         1.5,
       );
     });
-    strikeClones('machina-laser-final', 'machina-shock-final', 'laserFinal', 'shockFinal', 0, 0, 1.4);
+    strikeClones(
+      'machina-laser-final',
+      'machina-shock-final',
+      'laserFinal',
+      'shockFinal',
+      0,
+      0,
+      1.4,
+    );
   };
 
   const post = createPostPipeline(renderer, scene, camera, {
@@ -1244,9 +1224,7 @@ async function run(): Promise<void> {
     for (const { draw } of lightDraws.values()) await draw.update(renderer);
     animateClones();
     if (latestShake) {
-      camera.position
-        .copy(cameraBasePosition)
-        .add(new THREE.Vector3(...latestShake.translation));
+      camera.position.copy(cameraBasePosition).add(new THREE.Vector3(...latestShake.translation));
       camera.rotation.set(
         cameraBaseRotation.x + latestShake.rotation[0],
         cameraBaseRotation.y + latestShake.rotation[1],
@@ -1347,7 +1325,6 @@ async function runHeadless(
     'circleMid',
     'circleOuter',
     'column',
-    'columnInner',
     'embers',
     'haze',
     'impactSparks0',

@@ -7,7 +7,7 @@ import {
   RGBAFormat,
 } from 'three';
 import type Node from 'three/src/nodes/core/Node.js';
-import { float } from 'three/tsl';
+import { context, float } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
@@ -39,6 +39,42 @@ function texture(): DataTexture {
   );
   result.needsUpdate = true;
   return result;
+}
+
+function materialWgsl(material: THREE.MeshBasicNodeMaterial): string {
+  const renderer = {
+    backend: {
+      capabilities: { getUniformBufferLimit: () => 64 },
+      compatibilityMode: false,
+      utils: {
+        getTextureSampleData: () => ({ isMSAA: false, primarySamples: 1, samples: 1 }),
+      },
+    },
+    contextNode: context({}),
+    coordinateSystem: THREE.WebGPUCoordinateSystem,
+    getMRT: () => null,
+    getRenderTarget: () => null,
+    hasFeature: () => false,
+    library: new THREE.BasicNodeLibrary(),
+    lighting: { enabled: false },
+  };
+  const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+    object: unknown,
+    renderer: unknown,
+  ) => {
+    build(): void;
+    camera: THREE.Camera;
+    fragmentShader: string;
+    scene: THREE.Scene;
+  };
+  const builder = new NodeBuilder(
+    new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material),
+    renderer,
+  );
+  builder.camera = new THREE.PerspectiveCamera();
+  builder.scene = new THREE.Scene();
+  builder.build();
+  return builder.fragmentShader;
 }
 
 function expectCounts(
@@ -371,8 +407,23 @@ describe('@nachi/mesh-fx fxMaterial', () => {
     expect(graphSize).toBeGreaterThan(20);
     material.fx.setTime(2);
     material.fx.setNormalizedLife(0.65);
+    material.fx.setOpacity(0.5);
     expect(material.fx.time?.value).toBe(2);
     expect(material.fx.normalizedLife?.value).toBe(0.65);
+    expect(material.fx.opacity?.value).toBe(0.5);
+  });
+
+  it('updates package-owned opacity immediately for alpha and additive blending', () => {
+    for (const blending of ['alpha', 'additive'] as const) {
+      const material = fxMaterial({ blending, opacity: 0.25 });
+      expect(material.fx.opacity?.value).toBe(0.25);
+      material.fx.setOpacity(0.5);
+      expect(material.fx.opacity?.value).toBe(0.5);
+    }
+
+    const external = fxMaterial({ opacity: float(0.4) });
+    expect(external.fx.opacity).toBeNull();
+    expect(() => external.fx.setOpacity(0.5)).toThrow(MeshFxDiagnosticError);
   });
 
   it('accepts externally bound effect time and rejects standalone mutation', () => {
@@ -392,6 +443,59 @@ describe('@nachi/mesh-fx fxMaterial', () => {
     expect(graphSize).toBeGreaterThan(8);
   });
 
+  it('separates dissolve UV authoring while preserving omitted UV sharing', () => {
+    const map = texture();
+    const noise = texture();
+    const flow = uvFlow({ speed: [0.5, 0] });
+    const shared = fxMaterial({
+      dissolve: { overLife: 0.5, texture: noise },
+      map,
+      uv: flow,
+    });
+    const independent = fxMaterial({
+      dissolve: { overLife: 0.5, texture: noise, uv: 'static' },
+      map,
+      uv: flow,
+    });
+    const textureLoads = (material: THREE.MeshBasicNodeMaterial) =>
+      materialWgsl(material)
+        .split('\n')
+        .filter((line) => line.includes('textureLoad'));
+    const sharedLoads = textureLoads(shared);
+    const independentLoads = textureLoads(independent);
+    expect(sharedLoads).toHaveLength(2);
+    expect(sharedLoads.every((line) => line.includes('nodeVar0'))).toBe(true);
+    expect(materialWgsl(shared)).toContain('vec2<f32>( 0.5, 0.0 )');
+    expect(independentLoads).toHaveLength(2);
+    expect(independentLoads.filter((line) => line.includes('vec2<f32>( 0.5, 0.0 )'))).toHaveLength(
+      1,
+    );
+  });
+
+  it('builds enhanced dissolve and opacity graphs through real Three WGSL codegen', () => {
+    const material = fxMaterial({
+      dissolve: {
+        edgeColor: '#ff8040',
+        edgeIntensity: 0.6,
+        edgeModulate: 'map',
+        edgeWidth: 0.05,
+        overLife: [
+          [0, 0.1],
+          [1, 0.9],
+        ],
+        texture: texture(),
+        uv: 'static',
+      },
+      map: texture(),
+      opacity: 0.75,
+      uv: uvFlow({ speed: [0.5, -0.25] }),
+    });
+    const shader = materialWgsl(material);
+    expect(shader).toContain('@fragment');
+    expect(shader.match(/textureLoad/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(materialWgsl(fxMaterial({ opacity: float(0.25) }))).toContain('@fragment');
+  });
+
   it('reports stable synchronous diagnostics for invalid authoring data', () => {
     const invalidCases = [
       () => createSlashArcGeometry({ angle: 0 }),
@@ -403,6 +507,7 @@ describe('@nachi/mesh-fx fxMaterial', () => {
       () => fxMaterial({ blending: 'screen' as never }),
       () => fxMaterial({ time: Number.NaN }),
       () => fxMaterial({ normalizedLife: 1.1 }),
+      () => fxMaterial({ opacity: 1.1 }),
       () =>
         fxMaterial({
           dissolve: {
@@ -424,6 +529,22 @@ describe('@nachi/mesh-fx fxMaterial', () => {
           },
         }),
       () => fxMaterial({ fresnel: { power: 0 } }),
+      () =>
+        fxMaterial({
+          dissolve: {
+            edgeIntensity: -1,
+            overLife: 0,
+            texture: texture(),
+          },
+        }),
+      () =>
+        fxMaterial({
+          dissolve: {
+            edgeModulate: 'map',
+            overLife: 0,
+            texture: texture(),
+          },
+        }),
     ];
     for (const build of invalidCases) expect(build).toThrow(MeshFxDiagnosticError);
   });

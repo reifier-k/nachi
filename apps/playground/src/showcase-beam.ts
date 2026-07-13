@@ -228,7 +228,7 @@ function canvasTexture(
   return texture;
 }
 
-/** White-hot inner core: uniform around the circumference, soft ends. */
+/** White-hot visual core: uniform around the circumference with soft axial ends. */
 function beamCoreTexture(): THREE.CanvasTexture {
   return canvasTexture(64, 512, (context) => {
     const body = context.createLinearGradient(0, 0, 0, 512);
@@ -449,24 +449,19 @@ interface EffectTextures {
 
 /** Timeline effect: the beam itself plus the caster circle and both shock rings. */
 function createPlasmaLance(textures: EffectTextures, loop: boolean) {
+  // Pure visual layer: the sheath below remains the sole owner of directional
+  // ramp reveal plus scrolling-map composition.
   const beamCoreMesh = cylinder({
     height: BEAM_LENGTH,
     material: fxMaterial({
       blending: 'additive',
-      dissolve: {
-        edgeColor: '#fff0ff',
-        edgeWidth: 0.05,
-        overLife: curve([0, 1], [0.075, 0.04], [0.94, 0.06], [1, 1]),
-        texture: textures.ramp,
-      },
       map: textures.beamCore,
+      opacityOverLife: curve([0, 0], [0.075, 0], [0.11, 1], [0.92, 1], [1, 0]),
     }),
     radialSegments: 40,
     radius: 0.13,
   });
   beamCoreMesh.name = 'beam-core';
-  // rotateZ(-PI/2) lays the cylinder along +X with UV v = 0 at the caster, so
-  // the V-ramp dissolve sweeps caster -> enemy and uvFlow scrolls the same axis.
   beamCoreMesh.rotation.z = -Math.PI / 2;
   beamCoreMesh.position.y = 0.05;
 
@@ -476,9 +471,13 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
       blending: 'additive',
       dissolve: {
         edgeColor: '#ff5fd0',
+        edgeIntensity: 0.75,
+        edgeModulate: 'map',
         edgeWidth: 0.09,
-        overLife: curve([0, 1], [0.05, 0.1], [0.93, 0.14], [1, 1]),
-        texture: textures.noise,
+        // The hold threshold stays below the ramp's 0.2 floor.
+        overLife: curve([0, 1], [0.075, 0.04], [0.94, 0.06], [1, 1]),
+        texture: textures.ramp,
+        uv: 'static',
       },
       map: textures.sheath,
       opacity: 0.95,
@@ -621,7 +620,7 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
 
   return defineEffect({
     elements: {
-      beamCore: meshFxElement(beamCoreMesh, { duration: 1.06 }),
+      beamCore: meshFxElement(beamCoreMesh, { duration: 1.0 }),
       beamGlow: meshFxElement(beamGlowMesh, { duration: 1.08 }),
       beamResidual: meshFxElement(beamResidualMesh, { duration: 0.75 }),
       beamSheath: meshFxElement(beamSheathMesh, { duration: 1.0 }),
@@ -636,15 +635,13 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
         at(
           FIRE_TIME,
           play('beamCore'),
+          play('beamSheath'),
           play('beamGlow'),
           play('muzzleRing'),
           cameraShake({ duration: 0.42, frequency: 30, strength: 0.5 }),
           marker('fire'),
         ),
         at(FIRE_TIME + 0.03, hitStop(70)),
-        // The sheath wraps the core just after the extension sweep finishes,
-        // so the lance front stays a clean ramp reveal instead of noise blobs.
-        at(FIRE_TIME + 0.06, play('beamSheath')),
         at(FIRE_TIME + 0.08, play('impactRing')),
         at(0.95, cameraShake({ duration: 0.55, frequency: 13, strength: 0.07 })),
         at(
@@ -859,15 +856,9 @@ function stableRateInit(options: {
         age: float(0) as unknown as TslExpression<number>,
         lifetime: lifetimeValue as unknown as TslExpression<number>,
         position: vec3(
-          cos(positionAzimuth)
-            .mul(positionHorizontal)
-            .mul(positionDistance)
-            .add(options.origin[0]),
+          cos(positionAzimuth).mul(positionHorizontal).mul(positionDistance).add(options.origin[0]),
           positionZ.mul(positionDistance).add(options.origin[1]),
-          sin(positionAzimuth)
-            .mul(positionHorizontal)
-            .mul(positionDistance)
-            .add(options.origin[2]),
+          sin(positionAzimuth).mul(positionHorizontal).mul(positionDistance).add(options.origin[2]),
         ) as unknown as TslExpression<Vec3>,
         velocity: vec3(component(0), component(1), component(2)).mul(
           speed,
@@ -877,12 +868,7 @@ function stableRateInit(options: {
     {
       access: {
         reads: ['Particles.spawnOrder'],
-        writes: [
-          'Particles.age',
-          'Particles.lifetime',
-          'Particles.position',
-          'Particles.velocity',
-        ],
+        writes: ['Particles.age', 'Particles.lifetime', 'Particles.position', 'Particles.velocity'],
       },
       stage: 'init',
     },

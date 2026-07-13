@@ -20,6 +20,7 @@ import {
 } from '@nachi/core';
 import { fxMaterial as meshFxMaterial, ring, slashArc } from '@nachi/mesh-fx';
 import * as THREE from 'three';
+import { float } from 'three/tsl';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -169,6 +170,39 @@ describe('@nachi/timeline authoring', () => {
 
     const clone = cloneTimelineFxMaterial(material);
     expect(clone.fx.time).not.toBeNull();
+  });
+
+  it('lowers opacityOverLife curves through the writable opacity control', async () => {
+    const authoredMaterial = fxMaterial({
+      opacityOverLife: curve([0, 0.5], [0.2, 0.5], [1, 0]),
+    });
+    const authoredMesh = ring({ material: authoredMaterial });
+    authoredMesh.name = 'opacity-over-life-probe';
+    const effect = defineEffect({
+      elements: { ring: meshFxElement(authoredMesh, { duration: 1 }) },
+      timeline: [at(0, play('ring'))],
+    });
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    system.spawn(effect);
+
+    await system.update(0);
+    const clone = scene.getObjectByName('opacity-over-life-probe') as THREE.Mesh;
+    const material = clone.material as ReturnType<typeof fxMaterial>;
+    expect(material.fx.opacity?.value).toBe(0.5);
+    await system.update(0.6);
+    expect(material.fx.opacity?.value).toBeCloseTo(0.25, 8);
+    await system.update(0.2);
+    expect(material.fx.opacity?.value).toBeCloseTo(0.125, 8);
+  });
+
+  it('keeps opacityOverLife nodes compile-time bound and rejects dual opacity ownership', () => {
+    const external = fxMaterial({ opacityOverLife: float(0.4) });
+    expect(external.fx.opacity).toBeNull();
+    expect(() => external.fx.setOpacity(0.5)).toThrow();
+    expect(() => fxMaterial({ opacity: 0.5, opacityOverLife: curve([0, 1], [1, 0]) })).toThrow(
+      'both own the mesh-fx opacity channel',
+    );
   });
 
   it('returns an error instance and removes already-added meshes when construction fails', () => {

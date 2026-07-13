@@ -13,7 +13,7 @@ import {
   type ColorRepresentation,
 } from 'three';
 import * as THREE from 'three/webgpu';
-import { float, mix, select, texture, uniform, uv, vec3 } from 'three/tsl';
+import { float, luminance, mix, select, texture, uniform, uv, vec3 } from 'three/tsl';
 import type Node from 'three/src/nodes/core/Node.js';
 import type UniformNode from 'three/src/nodes/core/UniformNode.js';
 
@@ -91,8 +91,12 @@ export type FxBlending = 'additive' | 'alpha' | 'multiply' | 'premultiplied';
 export interface FxDissolveConfig {
   readonly texture: TextureInput;
   readonly overLife: OverLifeInput;
+  /** Omit to share the material map UV. Use `static` for the geometry's unmodified UV. */
+  readonly uv?: PolarUvAuthoring | CartesianUvFlowAuthoring | 'static';
   readonly edgeColor?: ColorInput;
   readonly edgeWidth?: ScalarInput;
+  readonly edgeIntensity?: number;
+  readonly edgeModulate?: 'none' | 'map';
 }
 
 export interface FxFresnelConfig {
@@ -107,7 +111,11 @@ export interface FxMaterialConfig {
   readonly dissolve?: FxDissolveConfig;
   readonly fresnel?: FxFresnelConfig;
   readonly blending?: FxBlending;
-  readonly opacity?: number;
+  /**
+   * Numeric/omitted values create a package-owned writable uniform. A node is composed at compile
+   * time and makes `fx.setOpacity()` unavailable.
+   */
+  readonly opacity?: ScalarInput;
   /** Standalone clock input. Omit to receive a writable uniform in `material.fx.time`. */
   readonly time?: ScalarInput;
   /** Effect-local normalized age. Omit to receive a writable standalone uniform. */
@@ -116,8 +124,10 @@ export interface FxMaterialConfig {
 }
 
 export interface FxMaterialControls {
+  readonly opacity: UniformNode<'float', number> | null;
   readonly time: UniformNode<'float', number> | null;
   readonly normalizedLife: UniformNode<'float', number> | null;
+  setOpacity(value: number): void;
   setTime(value: number): void;
   setNormalizedLife(value: number): void;
 }
@@ -126,6 +136,10 @@ export type FxNodeMaterial = THREE.MeshBasicNodeMaterial & { readonly fx: FxMate
 
 export function fxMaterial(config: FxMaterialConfig = {}): FxNodeMaterial {
   validateConfig(config);
+  const opacityUniform =
+    config.opacity === undefined || typeof config.opacity === 'number'
+      ? uniform(config.opacity ?? 1)
+      : null;
   const timeUniform = config.time === undefined ? uniform(0) : null;
   const lifeUniform = config.normalizedLife === undefined ? uniform(0) : null;
   const timeNode = config.time ?? timeUniform!;
@@ -135,17 +149,28 @@ export function fxMaterial(config: FxMaterialConfig = {}): FxNodeMaterial {
     ? texture(requiredTexture(config.map, 'fxMaterial.map'), uvNode).rgb
     : rimLight({ baseColor: config.color ?? 0xffffff, intensity: 0 });
   let composed: Node<'vec3'> = vec3(base);
-  let opacityNode: Node<'float'> = float(config.opacity ?? 1);
+  let opacityNode: Node<'float'> = opacityUniform ?? (config.opacity as Node<'float'>).toFloat();
 
   if (config.dissolve) {
+    const dissolveUvNode =
+      config.dissolve.uv === undefined
+        ? uvNode
+        : config.dissolve.uv === 'static'
+          ? uv()
+          : lowerUv(config.dissolve.uv, timeNode, 'fxMaterial.dissolve.uv');
     const cut = dissolve({
       noiseTexture: requiredTexture(config.dissolve.texture, 'fxMaterial.dissolve.texture'),
       threshold: lowerOverLife(config.dissolve.overLife, lifeNode),
-      uv: uvNode,
+      uv: dissolveUvNode,
       ...(config.dissolve.edgeColor === undefined ? {} : { edgeColor: config.dissolve.edgeColor }),
       ...(config.dissolve.edgeWidth === undefined ? {} : { edgeWidth: config.dissolve.edgeWidth }),
     });
-    composed = composed.add(cut.rgb);
+    let edge = cut.rgb;
+    if (config.dissolve.edgeIntensity !== undefined) {
+      edge = edge.mul(config.dissolve.edgeIntensity);
+    }
+    if (config.dissolve.edgeModulate === 'map') edge = edge.mul(luminance(base));
+    composed = composed.add(edge);
     opacityNode = opacityNode.mul(cut.a);
   }
   if (config.fresnel) {
@@ -171,8 +196,15 @@ export function fxMaterial(config: FxMaterialConfig = {}): FxNodeMaterial {
     configurable: false,
     enumerable: true,
     value: Object.freeze({
+      opacity: opacityUniform,
       time: timeUniform,
       normalizedLife: lifeUniform,
+      setOpacity(value: number): void {
+        if (!opacityUniform) {
+          invalid('fxMaterial.opacity', 'is externally bound and cannot be assigned');
+        }
+        opacityUniform.value = unit(value, 'fxMaterial.opacity');
+      },
       setTime(value: number): void {
         if (!timeUniform) invalid('fxMaterial.time', 'is externally bound and cannot be assigned');
         timeUniform.value = finite(value, 'fxMaterial.time');
@@ -191,12 +223,13 @@ export function fxMaterial(config: FxMaterialConfig = {}): FxNodeMaterial {
 function lowerUv(
   authoring: PolarUvAuthoring | CartesianUvFlowAuthoring | undefined,
   time: ScalarInput,
+  path = 'fxMaterial.uv',
 ): Node<'vec2'> {
   if (!authoring) return uv();
   if (authoring.kind === 'uvFlow') {
     return uvFlowNode({ uv: uv(), speed: authoring.speed, time });
   }
-  if (authoring.kind !== 'polarUV') invalid('fxMaterial.uv.kind', 'must be "polarUV"');
+  if (authoring.kind !== 'polarUV') invalid(`${path}.kind`, 'must be "polarUV" or "uvFlow"');
   let node = polarUvNode({
     ...(authoring.center === undefined ? {} : { center: authoring.center }),
     ...(authoring.rotation === undefined ? {} : { rotation: authoring.rotation }),
@@ -225,7 +258,7 @@ function lowerOverLife(input: OverLifeInput, life: ScalarInput): ScalarInput {
 }
 
 function validateConfig(config: FxMaterialConfig): void {
-  if (config.opacity !== undefined) unit(config.opacity, 'fxMaterial.opacity');
+  if (typeof config.opacity === 'number') unit(config.opacity, 'fxMaterial.opacity');
   if (typeof config.time === 'number') finite(config.time, 'fxMaterial.time');
   if (typeof config.normalizedLife === 'number') {
     unit(config.normalizedLife, 'fxMaterial.normalizedLife');
@@ -242,6 +275,18 @@ function validateConfig(config: FxMaterialConfig): void {
       validateCurve(config.dissolve.overLife as OverLifeCurve);
     if (typeof config.dissolve.edgeWidth === 'number') {
       nonNegative(config.dissolve.edgeWidth, 'fxMaterial.dissolve.edgeWidth');
+    }
+    if (config.dissolve.edgeIntensity !== undefined) {
+      nonNegative(config.dissolve.edgeIntensity, 'fxMaterial.dissolve.edgeIntensity');
+    }
+    if (
+      config.dissolve.edgeModulate !== undefined &&
+      !['none', 'map'].includes(config.dissolve.edgeModulate)
+    ) {
+      invalid('fxMaterial.dissolve.edgeModulate', 'must be "none" or "map"');
+    }
+    if (config.dissolve.edgeModulate === 'map' && config.map === undefined) {
+      invalid('fxMaterial.dissolve.edgeModulate', 'requires fxMaterial.map');
     }
   }
   if (typeof config.fresnel?.power === 'number')
