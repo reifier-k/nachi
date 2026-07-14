@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/format",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Versioned JSON effect assets, validation, migration, and inheritance for nachi",
   "keywords": [
     "three.js",
