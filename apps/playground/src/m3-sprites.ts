@@ -9,6 +9,7 @@ import {
   gradient,
   lifetime,
   positionSphere,
+  rate,
   range,
   velocityCone,
 } from '@nachi/core';
@@ -212,7 +213,9 @@ async function indirectCount(renderer: THREE.WebGPURenderer, view: VfxEmitterRun
 }
 
 async function run(): Promise<void> {
-  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: true });
+  // This page is a long-running correctness suite. Timestamp capture belongs on a separate short
+  // performance renderer so repeated lifecycle/readback rigs cannot exhaust Three's query pool.
+  const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: false });
   renderer.setPixelRatio(1);
   renderer.setSize(headless ? WIDTH : innerWidth, headless ? HEIGHT : innerHeight);
   if (!headless) sceneHost.append(renderer.domElement);
@@ -568,6 +571,120 @@ async function run(): Promise<void> {
   );
   const burstCycleIndirectAlive = await indirectCount(renderer, burstCycleView);
   const burstCyclePixels = comparePixels(await render(burstCycleMesh), baseline);
+
+  const rateReuseEffect = (capacity: number) =>
+    defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity,
+          init: [
+            positionSphere({ radius: 0.8 }),
+            velocityCone({ angle: 55, direction: [0, 1, 0], speed: range(0.4, 1.8) }),
+            lifetime(range(0.12, 0.18)),
+          ],
+          integration: 'none',
+          lifecycle: { duration: 0.8 },
+          render: billboard({}),
+          spawn: rate(80),
+        }),
+      },
+    });
+  const captureRateReuse = async (capacity: number) => {
+    const system = new VFXSystem(runtimeRenderer, undefined, {
+      aliveCountReadbackInterval: 1,
+      fixedTimeStep: { stepSeconds: STEP },
+    });
+    const instance = system.spawn(rateReuseEffect(capacity), {
+      seed: 0x51a7_0e11,
+    }) as RuntimeInstance;
+    const view = emitter(instance);
+    await system.update(0);
+    for (let frame = 0; frame < 40; frame += 1) await system.update(STEP);
+    const [alive, spawnGeneration, spawnOrder, position, velocity, lifetimeValues, age] =
+      await Promise.all([
+        readLogicalAttribute(renderer, view.program, view.kernels, 'alive') as Promise<Uint32Array>,
+        readLogicalAttribute(
+          renderer,
+          view.program,
+          view.kernels,
+          'spawnGeneration',
+        ) as Promise<Uint32Array>,
+        readLogicalAttribute(
+          renderer,
+          view.program,
+          view.kernels,
+          'spawnOrder',
+        ) as Promise<Uint32Array>,
+        readLogicalAttribute(
+          renderer,
+          view.program,
+          view.kernels,
+          'position',
+        ) as Promise<Float32Array>,
+        readLogicalAttribute(
+          renderer,
+          view.program,
+          view.kernels,
+          'velocity',
+        ) as Promise<Float32Array>,
+        readLogicalAttribute(
+          renderer,
+          view.program,
+          view.kernels,
+          'lifetime',
+        ) as Promise<Float32Array>,
+        readLogicalAttribute(renderer, view.program, view.kernels, 'age') as Promise<Float32Array>,
+      ]);
+    const records = Array.from({ length: alive.length }, (_, physicalSlot) => physicalSlot)
+      .filter((physicalSlot) => alive[physicalSlot] !== 0)
+      .map((physicalSlot) => [
+        spawnOrder[physicalSlot]!,
+        position[physicalSlot * 3]!,
+        position[physicalSlot * 3 + 1]!,
+        position[physicalSlot * 3 + 2]!,
+        velocity[physicalSlot * 3]!,
+        velocity[physicalSlot * 3 + 1]!,
+        velocity[physicalSlot * 3 + 2]!,
+        lifetimeValues[physicalSlot]!,
+        age[physicalSlot]!,
+      ])
+      .sort((left, right) => left[0]! - right[0]!);
+    const float = new Float32Array(1);
+    const word = new Uint32Array(float.buffer);
+    let hash = 0x811c9dc5;
+    for (const [order, ...values] of records) {
+      hash = Math.imul((hash ^ order!) >>> 0, 0x01000193) >>> 0;
+      for (const value of values) {
+        float[0] = value!;
+        hash = Math.imul((hash ^ word[0]!) >>> 0, 0x01000193) >>> 0;
+      }
+    }
+    return {
+      alive: records.length,
+      hash: hash.toString(16).padStart(8, '0'),
+      records,
+      successfulBirths: [...spawnGeneration].reduce((total, generation) => total + generation, 0),
+    };
+  };
+  const equalRateReuseRecords = (
+    left: Awaited<ReturnType<typeof captureRateReuse>>,
+    right: Awaited<ReturnType<typeof captureRateReuse>>,
+  ) =>
+    left.records.length === right.records.length &&
+    left.records.every((record, index) =>
+      record.every((value, component) => Object.is(value, right.records[index]?.[component])),
+    );
+  const rateReuseFirst = await captureRateReuse(32);
+  const rateReuseSecond = await captureRateReuse(32);
+  // A one-slot capacity perturbation changes every initial physical allocation while preserving
+  // birth order and spawn schedule. This catches a regression that keeps spawnOrder allocated but
+  // accidentally feeds physical slot identity back into Init randomness.
+  const rateReusePerturbed = await captureRateReuse(33);
+  const rateReuseRecordsEqual = equalRateReuseRecords(rateReuseFirst, rateReuseSecond);
+  const rateReusePhysicalLayoutInvariant = equalRateReuseRecords(
+    rateReuseFirst,
+    rateReusePerturbed,
+  );
   const blendBrightness = Object.fromEntries(
     Object.entries(blendMetrics).map(([mode, metrics]) => [mode, metrics.meanForegroundBrightness]),
   );
@@ -612,6 +729,15 @@ async function run(): Promise<void> {
     m2NumericRegression:
       regressionView.program.meta.storageBufferCount <= 8 &&
       Math.abs(movementDelta - STEP) < 0.0002,
+    rateReuseInitDeterminism:
+      rateReuseFirst.successfulBirths > 32 &&
+      rateReuseFirst.successfulBirths === rateReuseSecond.successfulBirths &&
+      rateReuseFirst.alive > 0 &&
+      rateReuseFirst.hash === rateReuseSecond.hash &&
+      rateReuseRecordsEqual &&
+      rateReuseFirst.successfulBirths === rateReusePerturbed.successfulBirths &&
+      rateReuseFirst.hash === rateReusePerturbed.hash &&
+      rateReusePhysicalLayoutInvariant,
     respawnReflected: respawned,
     premultipliedTranslucentTexture:
       translucentPremultiplied.mesh.material.premultipliedAlpha &&
@@ -666,6 +792,26 @@ async function run(): Promise<void> {
     m2Regression: {
       movementDelta,
       storageBufferCount: regressionView.program.meta.storageBufferCount,
+    },
+    rateReuseInitDeterminism: {
+      first: {
+        alive: rateReuseFirst.alive,
+        hash: rateReuseFirst.hash,
+        successfulBirths: rateReuseFirst.successfulBirths,
+      },
+      recordsEqual: rateReuseRecordsEqual,
+      physicalLayoutInvariant: rateReusePhysicalLayoutInvariant,
+      perturbedCapacity: {
+        alive: rateReusePerturbed.alive,
+        capacity: 33,
+        hash: rateReusePerturbed.hash,
+        successfulBirths: rateReusePerturbed.successfulBirths,
+      },
+      second: {
+        alive: rateReuseSecond.alive,
+        hash: rateReuseSecond.hash,
+        successfulBirths: rateReuseSecond.successfulBirths,
+      },
     },
     mode: headless ? 'headless' : 'visual',
     ok: Object.values(validation).every(Boolean),

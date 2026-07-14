@@ -661,7 +661,9 @@ function createGlacialRequiem(textures: EffectTextures, loop: boolean) {
     ],
   });
   const snow = defineEmitter({
-    capacity: 150,
+    // Eight complete cycles are intentional; keep capacity aligned so none of the 176 flakes are
+    // dropped before the earliest 1.3s lifetime can expire.
+    capacity: 176,
     init: [
       positionSphere({ radius: 1.7 }),
       offsetInit([0, 0.95, 0]),

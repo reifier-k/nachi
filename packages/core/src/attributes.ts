@@ -363,9 +363,24 @@ export function resolveAttributeSchema<
 
   const usedBuiltIns = new Set<string>();
   // Lifecycle identity is always physical particle data. spawnOrder is the deterministic birth
-  // key used by order-sensitive renderer extensions and never follows alive compaction order.
+  // key used by Init RNG and order-sensitive renderers; it never follows alive compaction order.
   usedBuiltIns.add('alive');
   usedBuiltIns.add('spawnGeneration');
+  if (
+    [...customAttributes.values()].some(({ default: defaultValue }) => {
+      const visited = new WeakSet<object>();
+      const containsRange = (value: unknown): boolean => {
+        if (typeof value !== 'object' || value === null || visited.has(value)) return false;
+        visited.add(value);
+        if ('kind' in value && value.kind === 'range') return true;
+        return Object.values(value).some(containsRange);
+      };
+      return containsRange(defaultValue);
+    })
+  ) {
+    // Compiler-owned attribute defaults execute in Init and share its spawn-order RNG contract.
+    usedBuiltIns.add('spawnOrder');
+  }
   for (const { module, path } of collectEmitterModules(config)) {
     const requiredAccesses = [
       ['reads', module.access?.reads],

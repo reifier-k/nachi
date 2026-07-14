@@ -82,15 +82,16 @@ describe('deterministic PCG random', () => {
       uint32ToUnitFloat: 1 / 2 ** 32,
     });
 
+    const spawnOrder = 123;
     const operations: TraceOperation[] = [];
     const nodeValue = pcgRandomFloatNode<TraceFloat, TraceUint>(
-      new TraceUint(123, operations),
+      new TraceUint(spawnOrder, operations),
       new TraceUint(456, operations),
       9,
       new TraceUint(7, operations),
     );
 
-    expect(nodeValue.value).toBe(pcgRandomFloat(123, 456, 9, 7));
+    expect(nodeValue.value).toBe(pcgRandomFloat(spawnOrder, 456, 9, 7));
     expect(operations.map(([name]) => name)).toEqual([
       'uint.mul',
       'uint.mul',
@@ -116,6 +117,10 @@ describe('deterministic PCG random', () => {
     expect(operations[6]?.[1]).toBe(747_796_405);
     expect(operations[7]?.[1]).toBe(2_891_336_453);
     expect(operations[12]?.[1]).toBe(277_803_737);
+  });
+
+  it('preserves existing bits when spawn order equals the former particle key', () => {
+    expect(pcgRandomFloat(0, 42, 9, 0)).toBe(0.6018068888224661);
   });
 
   it('returns deterministic values for identical inputs', () => {
@@ -178,6 +183,17 @@ describe('deterministic PCG random', () => {
       0,
     );
     expect(offsetSample).not.toBe(distantParticle);
+  });
+
+  it('keeps adjacent spawn-order and sample-stream cells distinct', () => {
+    const moduleSlot = 17;
+    const samples = Array.from({ length: 256 }, (_, spawnOrder) =>
+      Array.from({ length: 8 }, (_unused, stream) =>
+        pcgRandomFloat(spawnOrder, 73, resolveRandomSampleSlot(moduleSlot, stream), 0),
+      ),
+    ).flat();
+
+    expect(new Set(samples).size).toBe(samples.length);
   });
 
   it('changes streams when the spawn generation changes', () => {

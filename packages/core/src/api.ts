@@ -239,9 +239,9 @@ function addEventQueueWrite(module: EventModule, eventName: string): EventModule
 }
 
 export function range<T extends number | Vec2 | Vec3 | Vec4>(min: T, max: T): RangeGenerator<T> {
-  // The stage compiler resolves this with pcgRandomFloatNode(particleIndex, emitterSeed,
-  // moduleSlot, Particles.spawnGeneration). Spawn-policy ranges use their emission-batch
-  // generation on CPU because no physical particle has been allocated at that stage yet.
+  // Init resolves its stable key from Particles.spawnOrder. Update retains the physical particle
+  // key plus Particles.spawnGeneration, while pre-allocation Spawn ranges use their emission-batch
+  // generation on CPU because no particle birth has been allocated at that stage yet.
   return { distribution: 'uniform', kind: 'range', max, min };
 }
 
@@ -707,21 +707,21 @@ export function perDistance(options: PerDistanceSpawnOptions | number): SpawnMod
 
 export function positionSphere(options: PositionSphereOptions): InitModule {
   return createModule('init', 'core/position-sphere', options, {
-    reads: ['Emitter.spawnInterpolatedTransform', 'Emitter.seed', 'Particles.spawnGeneration'],
+    reads: ['Emitter.spawnInterpolatedTransform', 'Emitter.seed', 'Particles.spawnOrder'],
     writes: ['Particles.position'],
   });
 }
 
 export function positionMeshSurface(options: PositionMeshSurfaceOptions): InitModule {
   return createModule('init', 'core/position-mesh-surface', options, {
-    reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnGeneration'],
+    reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnOrder'],
     writes: ['Particles.position', 'Particles.surfaceNormal'],
   });
 }
 
 export function velocityCone(options: VelocityConeOptions): InitModule {
   return createModule('init', 'core/velocity-cone', options, {
-    reads: ['Emitter.seed', 'Particles.spawnGeneration'],
+    reads: ['Emitter.seed', 'Particles.spawnOrder'],
     writes: ['Particles.velocity'],
   });
 }

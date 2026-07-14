@@ -27,6 +27,7 @@ import {
   positionSphere,
   positionMeshSurface,
   perDistance,
+  range,
   rate,
   rotationOverLife,
   turbulence,
@@ -100,7 +101,7 @@ describe('three kernel adapter', () => {
     expect(builder.computeShader).toContain('if (');
   });
 
-  it('keeps legacy positionSphere WGSL bit-identical and builds center/arc codegen', () => {
+  it('pins spawn-order-keyed positionSphere Init WGSL and builds center/arc codegen', () => {
     const renderer = {
       backend: {
         capabilities: { getUniformBufferLimit: () => 64 },
@@ -133,7 +134,7 @@ describe('three kernel adapter', () => {
 
     const legacyShader = shaderFor(positionSphere({ radius: 1 }));
     expect(createHash('sha256').update(legacyShader).digest('hex')).toBe(
-      'f757f0a873c00cd93b0a1d780dba75f69ae1600a9caf58247227a010a8b39074',
+      '1caf028fc8005f58531b31f85f8c4847b1330b4d50c4776cf878e505e2bdb343',
     );
     expect(() =>
       shaderFor(
@@ -145,6 +146,39 @@ describe('three kernel adapter', () => {
         }),
       ),
     ).not.toThrow();
+  });
+
+  it('pins spawn-order-keyed Init randomness in the real Three spawn WGSL', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 32,
+        init: [positionSphere({ radius: 1 }), lifetime(range(0.1, 0.2))],
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn: rate(80),
+      }),
+    );
+    const kernels = program.buildKernels(createThreeKernelAdapter({ backend: 'webgpu' }));
+    const renderer = {
+      backend: {
+        capabilities: { getUniformBufferLimit: () => 64 },
+        compatibilityMode: false,
+      },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      hasFeature: () => false,
+    };
+    const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const builder = new NodeBuilder(kernels.spawn, renderer);
+    builder.build();
+
+    expect(createHash('sha256').update(builder.computeShader).digest('hex')).toBe(
+      '138c12265a60f2db722ec488ef11822c40f6d0f1763ddbc47c8f6ec5f93ade3d',
+    );
   });
 
   it('builds real WGSL for all emitter-default modules and preserves legacy explicit-world graphs', () => {

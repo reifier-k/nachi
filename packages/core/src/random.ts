@@ -74,13 +74,13 @@ export function pcgHashUint32(input: number): number {
 }
 
 export function pcgRandomFloat(
-  particleIndex: number,
+  randomKey: number,
   emitterSeed: number,
   moduleSlot: number,
   spawnGeneration: number,
 ): number {
   const mixedInput =
-    (Math.imul(particleIndex >>> 0, PCG_RANDOM_CONSTANTS.particleIndexMix) ^
+    (Math.imul(randomKey >>> 0, PCG_RANDOM_CONSTANTS.particleIndexMix) ^
       Math.imul(emitterSeed >>> 0, PCG_RANDOM_CONSTANTS.emitterSeedMix) ^
       moduleSlotSalt(moduleSlot) ^
       Math.imul(spawnGeneration >>> 0, PCG_RANDOM_CONSTANTS.spawnGenerationMix)) >>>
@@ -99,12 +99,12 @@ export function pcgRandomFloatNode<
   FloatNode extends TslPcgFloatNode<FloatNode>,
   UintNode extends TslPcgUintNode<UintNode, FloatNode>,
 >(
-  particleIndex: UintNode,
+  randomKey: UintNode,
   emitterSeed: UintNode,
   moduleSlot: number,
   spawnGeneration: UintNode,
 ): FloatNode {
-  const mixedInput = particleIndex
+  const mixedInput = randomKey
     .mul(PCG_RANDOM_CONSTANTS.particleIndexMix)
     .bitXor(emitterSeed.mul(PCG_RANDOM_CONSTANTS.emitterSeedMix))
     .bitXor(moduleSlotSalt(moduleSlot))

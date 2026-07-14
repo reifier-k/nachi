@@ -651,7 +651,9 @@ function traceCoreImplementation(
     emitEvent: () => undefined,
     random: () => {
       trace.reads.add('Emitter.seed');
-      trace.reads.add('Particles.spawnGeneration');
+      trace.reads.add(
+        implementation.stage === 'init' ? 'Particles.spawnOrder' : 'Particles.spawnGeneration',
+      );
       return new FakeNode();
     },
     sampleLut: (_id, coordinate) => {
@@ -985,7 +987,7 @@ describe('emitter kernel compiler', () => {
     );
     expect(
       program.kernels.init.modules.find(({ type }) => type === 'core/velocity-cone')?.access.reads,
-    ).toEqual(['Emitter.seed', 'Particles.spawnGeneration']);
+    ).toEqual(['Emitter.seed', 'Particles.spawnOrder']);
   });
 
   it('resolves integration attributes and carries built-in defaults', () => {
@@ -2726,12 +2728,74 @@ describe('emitter kernel compiler', () => {
     ]);
   });
 
-  it('keeps random sample offsets off the particle-index axis during TSL construction', () => {
+  it('keeps random sample offsets off the spawn-order axis during TSL construction', () => {
     const program = compileEmitter(
       baseEmitter({ init: [positionSphere({ radius: 1 })], integration: 'none' }),
     );
 
     expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
+  });
+
+  it('diagnoses external Init random implementations that omit spawnOrder access', () => {
+    const legacyAccess: ModuleAccess = {
+      reads: ['Emitter.seed', 'Particles.spawnGeneration'],
+      writes: ['Particles.intensity'],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access: legacyAccess,
+      build(context) {
+        context.write('intensity', context.random());
+      },
+      stage: 'init',
+      type: 'test/legacy-init-random',
+      version: 1,
+    });
+    const module: ModuleDefinition<'init', Record<string, never>> = {
+      access: legacyAccess,
+      config: {},
+      kind: 'module',
+      stage: 'init',
+      type: 'test/legacy-init-random',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ init: [module], integration: 'none' }), {
+      registry,
+    });
+    let thrown: unknown;
+    try {
+      program.buildKernels(fakeAdapter());
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(VfxDiagnosticError);
+    expect((thrown as VfxDiagnosticError).diagnostics).toContainEqual({
+      code: 'NACHI_INIT_RANDOM_SPAWN_ORDER_ACCESS_REQUIRED',
+      message: expect.stringContaining('Add "Particles.spawnOrder" to access.reads'),
+      path: 'init[0].access.reads',
+      phase: 'compile',
+      severity: 'error',
+    });
+
+    const moduleOnlyFixed: ModuleDefinition<'init', Record<string, never>> = {
+      ...module,
+      access: {
+        ...legacyAccess,
+        reads: [...legacyAccess.reads, 'Particles.spawnOrder'],
+      },
+    };
+    const implementationMismatch = compileEmitter(
+      baseEmitter({ init: [moduleOnlyFixed], integration: 'none' }),
+      { registry },
+    );
+    expect(() => implementationMismatch.buildKernels(fakeAdapter())).toThrowError(
+      expect.objectContaining({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'NACHI_INIT_RANDOM_SPAWN_ORDER_ACCESS_REQUIRED' }),
+        ]),
+      }),
+    );
   });
 
   it('diagnoses traced write keys that are absent from the attribute schema', () => {

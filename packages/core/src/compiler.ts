@@ -1224,7 +1224,13 @@ function deriveConfigReads(config: object, stage: ModuleDefinition['stage']): Da
     const kind = 'kind' in value ? value.kind : undefined;
     if (kind === 'range') {
       reads.add('Emitter.seed');
-      reads.add(stage === 'spawn' ? 'Emitter.spawnGeneration' : 'Particles.spawnGeneration');
+      reads.add(
+        stage === 'spawn'
+          ? 'Emitter.spawnGeneration'
+          : stage === 'init'
+            ? 'Particles.spawnOrder'
+            : 'Particles.spawnGeneration',
+      );
     } else if (kind === 'parameter' && 'path' in value && typeof value.path === 'string') {
       reads.add(value.path as DataReference);
     }
@@ -3189,13 +3195,37 @@ function createBuildKernels(
       module: CompiledKernelModule,
       particleIndex: KernelNode,
       sampleOffset: number,
-    ): KernelNode =>
-      pcgRandomFloatNode<KernelNode, KernelNode>(
-        adapter.uint(particleIndex),
+      requireImplementationAccess = false,
+    ): KernelNode => {
+      // Init randomness follows deterministic birth identity, never the physical free-list slot
+      // or its allocation generation. Other stages retain the M1 physical-slot contract.
+      const initRandom = module.stage === 'init';
+      const implementation = requireImplementationAccess
+        ? registry.resolve(module.type, module.version)
+        : undefined;
+      if (
+        initRandom &&
+        (!module.access.reads.includes('Particles.spawnOrder') ||
+          (requireImplementationAccess &&
+            !implementation?.access.reads.includes('Particles.spawnOrder')))
+      ) {
+        throw new VfxDiagnosticError([
+          diagnostic(
+            'NACHI_INIT_RANDOM_SPAWN_ORDER_ACCESS_REQUIRED',
+            `Init module ${module.type} called context.random() without declaring Particles.spawnOrder. Add "Particles.spawnOrder" to access.reads on the module definition and its registered implementation.`,
+            `${module.path}.access.reads`,
+          ),
+        ]);
+      }
+      return pcgRandomFloatNode<KernelNode, KernelNode>(
+        adapter.uint(initRandom ? attributeNode('spawnOrder', particleIndex) : particleIndex),
         adapter.uint(uniformNode('Emitter.seed')),
         resolveRandomSampleSlot(module.slot, sampleOffset),
-        adapter.uint(attributeNode('spawnGeneration', particleIndex)),
+        initRandom
+          ? adapter.uint(adapter.constant(0, 'u32'))
+          : adapter.uint(attributeNode('spawnGeneration', particleIndex)),
       );
+    };
 
     const buildValue = (
       input: unknown,
@@ -3260,7 +3290,7 @@ function createBuildKernels(
         const resources = eventOutputResources[eventName];
         if (queue && resources) appendEvent(queue, resources, particleIndex);
       },
-      random: (sampleOffset = 0) => randomNode(module, particleIndex, sampleOffset),
+      random: (sampleOffset = 0) => randomNode(module, particleIndex, sampleOffset, true),
       sampleLut: (id, coordinate) => {
         const texture = lutTextures[id];
         const lut = program.luts.find((candidate) => candidate.id === id);
@@ -4882,7 +4912,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.spawnInterpolatedTransform', 'Emitter.seed', 'Particles.spawnGeneration'],
+      reads: ['Emitter.spawnInterpolatedTransform', 'Emitter.seed', 'Particles.spawnOrder'],
       writes: ['Particles.position'],
     },
     build(context) {
@@ -4943,7 +4973,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnGeneration'],
+      reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnOrder'],
       writes: ['Particles.position', 'Particles.surfaceNormal'],
     },
     build(context) {
@@ -4972,7 +5002,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.seed', 'Particles.spawnGeneration'],
+      reads: ['Emitter.seed', 'Particles.spawnOrder'],
       writes: ['Particles.velocity'],
     },
     build(context) {
