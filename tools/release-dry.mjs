@@ -61,11 +61,11 @@ async function verifyReleasePlan(packages) {
     }
     const invalid = releases.filter(
       ({ newVersion, oldVersion, type }) =>
-        type !== 'major' || oldVersion !== '0.0.0' || newVersion !== '1.0.0',
+        type !== 'minor' || oldVersion !== '0.0.0' || newVersion !== '0.1.0',
     );
     if (invalid.length > 0) {
       throw new Error(
-        `Every public package must have a major 0.0.0 -> 1.0.0 release plan: ${invalid
+        `Every public package must have a minor 0.0.0 -> 0.1.0 release plan: ${invalid
           .map(
             ({ name, newVersion, oldVersion, type }) =>
               `${name} (${type} ${oldVersion} -> ${newVersion})`,
@@ -74,7 +74,7 @@ async function verifyReleasePlan(packages) {
       );
     }
     console.log(
-      `Changeset release plan verified: ${releases.length} public packages, all major 0.0.0 -> 1.0.0.`,
+      `Changeset release plan verified: ${releases.length} public packages, all minor 0.0.0 -> 0.1.0.`,
     );
   } finally {
     await rm(path.join(root, output), { force: true });

@@ -1,19 +1,21 @@
 ---
-'@nachi/core': major
-'@nachi/format': major
-'@nachi/mesh-fx': major
-'@nachi/post': major
-'@nachi/react': major
-'@nachi/three': major
-'@nachi/timeline': major
-'@nachi/trails': major
-'@nachi/tsl-kit': major
+'@nachi/core': minor
+'@nachi/format': minor
+'@nachi/mesh-fx': minor
+'@nachi/post': minor
+'@nachi/react': minor
+'@nachi/three': minor
+'@nachi/timeline': minor
+'@nachi/trails': minor
+'@nachi/tsl-kit': minor
 ---
 
-Release the complete independently versioned nachi package set as 1.0.0. The initial public
+Release the complete independently versioned nachi package set as the heavily experimental 0.1.0
+preview. The initial public
 surface includes the staged GPU particle runtime, strict versioned assets, simulation caches and
 data interfaces, timeline and trail composition, TSL/mesh/post rendering tools, the public Three.js
-runtime/materialization adapter, and the React Three Fiber lifecycle binding. It also establishes
-stable diagnostics, documented backend residuals, package ESM/dry-run gates, and FA
-compatibility/reporting contracts. This changeset records the coordinated major release plan only;
-the version bump is intentionally left to the release owner.
+runtime/materialization adapter, and the React Three Fiber lifecycle binding. This release does not
+promise production readiness or API, behavior, performance, compatibility, or package-boundary
+stability. It includes documented backend residuals, package ESM/dry-run gates, and FA reporting
+contracts. This changeset records the coordinated initial release plan only; the version bump is
+intentionally left to the release owner.

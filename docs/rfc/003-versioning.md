@@ -2,7 +2,7 @@
 
 > Language: English (this page) / [日本語](./003-versioning.ja.md)
 
-- **Status:** Proposed for the 1.0 release gate
+- **Status:** Adopted for the heavily experimental 0.1 line; the 1.0 stability contract remains proposed
 - **Scope:** All public `@nachi/*` packages and the `nachi-effect` asset format
 - **Normative references:** [RFC 001](./001-api.md), especially §12, §13, and §16
 
@@ -19,8 +19,9 @@ documented code-first surface, structured diagnostics, and version-1 asset docum
 on according to the rules below. Unsupported RFC 001 §16 capabilities do not become implied by the
 version number.
 
-The initial changeset requests `major` for all packages while they are still `0.0.0`, producing the
-coordinated `1.0.0` release plan. The release owner applies that plan after FA; this RFC does not
+The initial changeset requests `minor` for all packages while they are still `0.0.0`, producing the
+coordinated `0.1.0` release plan. Version 0.1.0 is a heavily experimental preview and does not grant
+the 1.0 compatibility contract. The release owner applies that plan after FA; this RFC does not
 perform a version bump.
 
 ## 2. Package SemVer policy
@@ -33,9 +34,10 @@ perform a version bump.
   required bump. A dependent package also bumps when its public types or runtime compatibility
   range must change.
 
-Pre-1.0 packages follow the same classification in changesets even though the resulting numeric
-version uses the `0.x` convention. Changesets must describe user-observable impact rather than only
-the implementation diff.
+For pre-1.0 packages, breaking changes use a `minor` changeset so the resulting numeric version
+stays on the `0.x` line; compatible fixes use `patch`. The changeset text must still identify the
+change as breaking and describe its user-observable impact. After 1.0, the classifications above
+map directly to patch, minor, and major releases.
 
 ## 3. Breaking changes
 
@@ -81,18 +83,21 @@ registration/reference boundary, and simulation-cache embedding is not part of t
 
 ## 5. Experimental API
 
-The 1.0 candidate currently has **no public export marked experimental**. Code-only TSL scratch
+The complete 0.1 line is **heavily experimental**. No public export should be treated as
+production-ready or as carrying the future 1.0 compatibility contract. Code-only TSL scratch
 surfaces (`tslModule()`, `gridTslModule()`, `grid3DTslModule()`, and
-`neighborGridTslModule()`) are escape hatches, but their authoring/serialization boundary is already
-normative in RFC 001 and they are therefore not exempt from SemVer.
+`neighborGridTslModule()`) are escape hatches, but the same pre-1.0 release policy applies to them.
 
-RFC 001 §16 items are deferred capabilities, not experimental promises. If a future experimental
-surface is needed, it must be visibly exported through an `experimental` subpath or use an
+RFC 001 §16 items are deferred capabilities, not experimental promises. At or after 1.0, an API
+that remains experimental must be visibly exported through an `experimental` subpath or use an
 `unstable_` prefix, carry an `@experimental` documentation tag, and be listed here. Experimental
 APIs may change in a minor release, but their removal still requires release notes and at least one
 minor release of notice when practical.
 
 ## 6. Deprecation procedure
+
+The following procedure is required after 1.0 and is a best-effort migration policy during the
+heavily experimental 0.x line:
 
 1. Record the replacement and motivation in an accepted RFC or a normative amendment to RFC 001.
 2. Mark TypeScript declarations with `@deprecated`, update package/root documentation, and add a

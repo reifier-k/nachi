@@ -102,10 +102,10 @@ H1-5はRFC 003 §3.1と§3.5に基づく **`@nachi/core` のmajor変更** であ
 明示出力に対する **minor** changesetを必要とする。legacy v1の意味を保持するため、asset envelopeの
 major/version bumpは不要である。
 
-パッケージはまだ1.0として実publishされておらず、協調された1.0 major changesetは適用待ちである。
-release ownerはH1-5を初回release plan適用前にlandし、この裁定を1.0.0へ含められる。ただし重大度は
-downgradeされない。RFC 003は1.0未満でも同じpatch/minor/major分類を要求する。H1-5が1.0.0 publish後に
-landする場合、`@nachi/core` は次のmajor releaseを必要とする。
+パッケージはまだ実publishされていないため、release ownerはH1-5を初回release plan適用前にlandし、
+HEAVY EXPERIMENTALな0.1.0プレビューへ含められる。この変更は意味上は破壊的なままだが、RFC 003は0.x系の
+破壊的変更を `minor` changesetで表す。後続の0.xリリースでは次のminorが、1.0以降では
+`@nachi/core` の次のmajorリリースが必要になる。
 
 現在のH1-4バッチは追加的であり、`@nachi/core` と `@nachi/format` に別々の **minor** changesetを持つ。
 

@@ -1,10 +1,13 @@
 # Changelog
 
 This repository uses Changesets and independent package versions. The release owner will move the
-prepared entries into concrete version headings during the 1.0 versioning pass; no version bump is
+prepared entries into concrete version headings during the 0.1.0 versioning pass; no version bump is
 part of this FA preparation batch.
 
-## Unreleased — 1.0 release candidate
+## Unreleased — 0.1.0 heavily experimental preview
+
+This preview is not production-ready. APIs, behavior, performance, compatibility, and package
+boundaries may change significantly between releases.
 
 ### Runtime and authoring
 
@@ -26,7 +29,7 @@ part of this FA preparation batch.
 ### Release readiness
 
 - Added dry-run packaging and ESM import gates, a seven-effect documentation gallery, FA parity,
-  bundle/tree-shaking, dependency-license reports, robust multi-sample GPU timing, and the 1.0
-  versioning/deprecation policy.
+  bundle/tree-shaking, dependency-license reports, robust multi-sample GPU timing, and a documented
+  future 1.0 versioning/deprecation policy.
 - Documented explicit WebGL2 and advanced-feature residuals. Unsupported paths continue to fail
   with structured `NACHI_*` diagnostics instead of silent semantic fallbacks.

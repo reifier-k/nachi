@@ -107,11 +107,11 @@ public default and deterministic results for the same code-first definition. `@n
 a **minor** changeset for additive compatibility normalization and canonical explicit output; the
 asset envelope does not need a major/version bump because legacy v1 semantics are preserved.
 
-The packages have not yet been publicly released as 1.0; the coordinated 1.0 major changeset is
-still pending. That fact allows the release owner to land H1-5 before applying the initial release
-plan and include the decision in 1.0.0. It does not downgrade the classification: RFC 003 requires
-pre-1.0 work to use the same patch/minor/major severity. If H1-5 lands after 1.0.0 is published,
-`@nachi/core` requires its next major release.
+The packages have not yet been publicly released. The release owner can therefore land H1-5 before
+the initial release and include the decision in the heavily experimental 0.1.0 preview. The change
+remains semantically breaking, but RFC 003 represents breaking changes on the 0.x line with a
+`minor` changeset. A later 0.x release would require the next minor; after 1.0, `@nachi/core` would
+require its next major release.
 
 The current H1-4 batch remains additive and carries separate **minor** changesets for
 `@nachi/core` and `@nachi/format`.

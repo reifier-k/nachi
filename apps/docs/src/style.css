@@ -44,6 +44,27 @@ nav .brand {
   padding: 110px 0 150px;
   max-width: 900px;
 }
+.experimental-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-bottom: 42px;
+  padding: 17px 20px;
+  border: 1px solid #ff9a2e;
+  border-left-width: 4px;
+  background: rgb(255 154 46 / 9%);
+  color: #d8dee9;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.experimental-banner strong {
+  color: #ffb45e;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.experimental-banner span {
+  flex: 1 1 34rem;
+}
 .eyebrow {
   color: #79d6ff;
   text-transform: uppercase;
