@@ -30,7 +30,6 @@ import {
   cameraShake,
   defineEffect,
   fxMaterial,
-  hitStop,
   marker,
   meshFxElement,
   play,
@@ -85,7 +84,7 @@ const CAPTURE_LABELS = [
   'charge · circuit column',
   'barrage · first strikes',
   'barrage · full volley',
-  'final strike · hit stop',
+  'final strike · impact flash',
   'afterglow · light shafts',
 ] as const;
 const root = document.documentElement;
@@ -919,7 +918,6 @@ function createMachinaJudgment(textures: EffectTextures, loop: boolean) {
           cameraShake({ duration: 0.45, frequency: 30, strength: 0.4 }),
           marker('final'),
         ),
-        at(1.62, hitStop(80)),
         at(AFTERGLOW_TIME, play('embers'), marker('afterglow')),
         at(1.78, play('haze')),
       ],

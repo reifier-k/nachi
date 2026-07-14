@@ -32,7 +32,6 @@ import {
   cameraShake,
   defineEffect,
   fxMaterial,
-  hitStop,
   marker,
   meshFxElement,
   play,
@@ -646,7 +645,6 @@ function createPlasmaLance(textures: EffectTextures, loop: boolean) {
           cameraShake({ duration: 0.42, frequency: 30, strength: 0.5 }),
           marker('fire'),
         ),
-        at(FIRE_TIME + 0.03, hitStop(70)),
         at(FIRE_TIME + 0.08, play('impactRing')),
         at(0.95, cameraShake({ duration: 0.55, frequency: 13, strength: 0.07 })),
         at(
@@ -1176,7 +1174,7 @@ async function run(): Promise<void> {
   const localNow = () => instance.localTime % EFFECT_DURATION;
 
   // Sub-stepping keeps the fire/cutoff triggers tight against the timeline's
-  // hit-stopped local clock while core-system particles run on world time.
+  // local clock while core-system particles run on world time.
   const SUBSTEPS = 4;
   const step = async (delta: number) => {
     for (let subStep = 0; subStep < SUBSTEPS; subStep += 1) {

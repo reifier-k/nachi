@@ -18,4 +18,14 @@ describe('companion socket phase', () => {
     phase.releaseAfterParentAdvance(0.513333333333);
     expect(phase.driveLocalTime(0.513333333333)).toBeCloseTo(0.513333333333, 12);
   });
+
+  it('releases when a looping parent wraps its local time', () => {
+    const phase = createCompanionSocketPhase(1.98);
+
+    phase.beginHitStop(1.99);
+    expect(phase.driveLocalTime(1.99)).toBeCloseTo(1.98, 12);
+
+    phase.releaseAfterParentAdvance(0.01);
+    expect(phase.driveLocalTime(0.01)).toBeCloseTo(0.01, 12);
+  });
 });

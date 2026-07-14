@@ -11,7 +11,7 @@ interface ShowcaseEntry {
 const SHOWCASES: readonly ShowcaseEntry[] = [
   {
     accent: '#5fe6ff',
-    blurb: 'Twin crescent slashes with blade trails, sparks, shockwave, and hit stop.',
+    blurb: 'Twin crescent slashes with blade trails, sparks, and a layered shockwave.',
     eyebrow: 'Stylized action',
     id: 'slash',
     title: 'Resonance Slash',
@@ -39,7 +39,7 @@ const SHOWCASES: readonly ShowcaseEntry[] = [
   },
   {
     accent: '#9fe8ff',
-    blurb: 'An erupting forest of ice spikes, a hit-stop center pillar, then a glittering crumble.',
+    blurb: 'An erupting forest of ice spikes, a great center pillar, then a glittering crumble.',
     eyebrow: 'Ultimate freeze',
     id: 'ice',
     title: 'Glacial Requiem',

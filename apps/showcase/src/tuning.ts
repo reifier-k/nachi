@@ -23,6 +23,8 @@ export interface ShowcaseTuningOptions {
   /** The point the camera orbits around. It moves along with viewport panning. */
   readonly cameraTarget: THREE.Vector3;
   readonly instance: TuneableInstance;
+  /** Lets integrations latch companion state before a manually requested hit stop. */
+  readonly onBeforeHitStop?: () => void;
   readonly renderer: THREE.WebGPURenderer;
 }
 
@@ -77,7 +79,9 @@ export function attachShowcaseTuning(options: ShowcaseTuningOptions): void {
     .on('change', applyPlayback);
   playback.addBinding(settings, 'paused').on('change', applyPlayback);
   playback.addButton({ title: `hit stop ${HIT_STOP_MS}ms` }).on('click', () => {
-    if (!settings.paused) instance.applyHitStop(HIT_STOP_MS);
+    if (settings.paused) return;
+    options.onBeforeHitStop?.();
+    instance.applyHitStop(HIT_STOP_MS);
   });
 
   const view = pane.addFolder({ expanded: true, title: 'Camera / render' });

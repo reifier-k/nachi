@@ -33,7 +33,6 @@ import {
   cameraShake,
   defineEffect,
   fxMaterial,
-  hitStop,
   marker,
   meshFxElement,
   play,
@@ -579,7 +578,6 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
           cameraShake({ duration: 0.3, frequency: 30, strength: 0.3 }),
           marker('impact'),
         ),
-        at(0.5, hitStop(70)),
         at(0.52, play('sparks'), play('shock'), marker('burst')),
         at(
           COUNTER_TIME,
@@ -613,7 +611,7 @@ function createTrailEffect(
       width,
     }),
     // Distance-based spawning keeps the ribbon quiet while the socket is
-    // parked (before its window and during hit stop) and dense mid-sweep.
+    // parked before its window and dense mid-sweep.
     spawn: perDistance(22),
     update: [colorOverLife(gradient(...colors))],
   });
@@ -738,7 +736,7 @@ async function run(): Promise<void> {
   const trailSystem = new CoreVFXSystem(runtime, undefined, { registry });
   trailSystem.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
   // Windows are wider than the sweep itself: the sweep runs on the timeline's
-  // hit-stopped local clock while trail lifecycles run on world time.
+  // local clock while trail lifecycles run on world time.
   const trailCyan = createTrailEffect(
     ['#f4feff', '#7ce4ff', '#3a4cff00'],
     0.24,
@@ -793,7 +791,6 @@ async function run(): Promise<void> {
     if (action.kind === 'play' && target !== undefined && emitter !== undefined) {
       playedEmitters.set(target, emitter);
     }
-    if (action.kind === 'hit-stop') socketPhase.beginHitStop(localTime);
   });
   for (const name of ['charge', 'impact', 'burst']) {
     instance.onMarker(name, () => markers.push(name));
@@ -863,8 +860,7 @@ async function run(): Promise<void> {
     socketB.position.set(...crescentB(sweepProgress(socketLocal, SLASH_B)));
     socketA.updateMatrixWorld(true);
     socketB.updateMatrixWorld(true);
-    // Advance companions first so a timeline action at this frame's boundary observes both clocks
-    // at the same local instant before bindCompanion applies its hit-stop replacement.
+    // Advance companions first so the page-driven sockets and parent timeline keep a stable phase.
     await trailSystem.update(delta);
     socketPhase.commitConsumedLocalTime(socketLocal);
     await system.update(delta);
@@ -946,6 +942,7 @@ async function run(): Promise<void> {
     cameraBaseRotation,
     cameraTarget: new THREE.Vector3(0.1, -0.05, 0),
     instance,
+    onBeforeHitStop: () => socketPhase.beginHitStop(instance.localTime),
     renderer,
   });
   required<HTMLElement>('#status-value').textContent = 'looping · watch the slash';

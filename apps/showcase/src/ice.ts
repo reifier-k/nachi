@@ -31,7 +31,6 @@ import {
   cameraShake,
   defineEffect,
   fxMaterial,
-  hitStop,
   marker,
   meshFxElement,
   play,
@@ -825,7 +824,6 @@ function createGlacialRequiem(textures: EffectTextures, loop: boolean) {
       cameraShake({ duration: 0.4, frequency: 30, strength: 0.34 }),
       marker('land'),
     ),
-    at(0.99, hitStop(70)),
     at(1.03, play('sparkle'), marker('tableau')),
     at(
       1.85,
