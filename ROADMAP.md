@@ -241,10 +241,34 @@
 - [x] H1-10: init乱数のspawnOrderキー化(plan 011、H1-1検収中に発見) — **受入済み(2026-07-14、コミット4dfdfce)**。init乱数導出を物理スロット+spawnGenerationからspawnOrder+エミッタシード+module/sample slotへ変更(既存PCG RXS-M-XS混合構造を維持する最小変更=選択(a)。奇数定数乗算で各軸mod 2^32置換、レビューのχ²/KS/シフトコピー/直列相関プローブ全合格、M1 all-slots経路はHEADコアとビット一致実証)。update/event段乱数は不変。外部initモジュールのrandom()にNACHI_INIT_RANDOM_SPAWN_ORDER_ACCESS_REQUIRED診断新設。**決定性の実測: beamラン間2.2〜4.6%→≤0.007%、iceフレーク0.7〜0.8%→≤0.013%**(3連続ゲート合格)。m3-spritesへスロット再利用決定性リグ常設(capacity 32/33物理配置撹乱で仮想退行も検出)。ClaudeレビューRETURN 1回: BLOCKER=beam復帰時のcenter焼き込み残存でワールドオフセット二重適用(粒子群剥離=再記録不可の退行をスクショ超過と正しく弁別)+リグのクエリプール超過console汚染→center削除(旧分布と厳密一致)+timestamp-free化で解消。追従: beamのstableRateInit回避策完全撤去、iceのsnow capacity 150→176(バースト包絡整合)。M2実ランの具体値は意図変化(M2アロケータ逆順pop+旧世代1混合によりburstでもslot==orderは不成立だった)=ゴールデン6+ショーケース5+wuwaの12ページ基準一括再記録+目視合格。643テスト緑、全域回帰緑。changeset=core minor
 - [x] 🔍 H1マイルストーン監査 — **完了(2026-07-14、指摘処理コミットaec2442)。裁定: PASS**。①独立監査2本: Codex=FAIL(1B/1S/2N。ビルド/API-RFC/changeset照合はPASS、GPU実測は不可のため机上代替) / Claude=PASS(0B/0S/4N。H1全10項目の実挙動検証・33ラン全緑・決定性再現beam≤0.007%/ice≤0.013%・perf記録・643テスト) ②**判定が割れたCodex B1(H1-7部分占有時の位相分母)は統括が一次コード裏取りで裁定**: 「飽和時は最先頭の発火位置を保持(超過分ドロップ)」は時間的先着順として物理的に忠実、perDistanceの承認済み飽和意味論・Niagaraパリティと一貫→**意図された挙動と確定し文書欠陥+回帰欠落へ降格**(M12裁定原則「規範違反と実クラッシュは区別」)。plan 003/RFC 001へ契約明記+m2-runtimeに部分占有GPU回帰(capacity10・8占有・要求10→生存2粒の位相0.05/0.15をWGSL誤差予算で固定)を常設し実測緑 ③残指摘全消化: plans状態ヘッダ8件更新+plan 011最終裁定注記、RFC 001用語統一(sim-stage)+handler例外境界契約+診断コード列挙2件+補間scale非対応明文+lowering混在配列の既知制限、CLAUDE.md perf節v2実態化 ④最終: 643テスト/typecheck/lint緑、ゴールデン7/7、ショーケース6全ok:true、m2両シナリオ+webgl緑
 
+## H2 — 残存瑕疵ハードニング(起票済み、実装未着手)
+
+出典: H1完了後の6傾向Codex探査(2026-07-14、gpt-5.6-sol xhigh read-only×6ジョブ並列)。H1瑕疵を6傾向(T1無音の失敗/T2状態所有権/T3物理ID/T4時間/T5空間既定/T6検証盲点)へ分類して同種残存を全域走査し、候補57件(高25/中28/低4)を検出。16裁定単位を全てユーザー裁定済み(2026-07-14。14件=推奨案、2件=推奨超え: H2-7透明描画順は全面対応/H2-6空間残余はupdate段sweepまで実装)。仕様の入口は `docs/plans/000_summary.md` の H2 追補(012–026、探査レポートのCodexジョブID付き)。実装はH1と同じ体制: `/codex:rescue --model gpt-5.6-sol --effort xhigh` へ委譲し、Claudeサブエージェントレビュー→差し戻し解消→受入コミット(統括は実装しない)。
+
+**全項目共通のDoD**(H1を踏襲): 対象プランの受け入れ基準に加え、(1) ショーケース6ページを修正へ追従させ不要になった回避策を撤去・簡素化する、(2) 全ショーケースspike ok:true+ゴールデン7本回帰(意図的な見た目変更のみ `--update-screenshots` で基準再記録し理由をセッションログに明記。再記録前に「変化」と「退行」を構造比較で弁別=H1-10知見)、(3) `pnpm typecheck/lint/test` 緑、(4) 変更パッケージのchangeset起票、(5) 静的監査由来の「要検証」項目は実装前に再現プローブで確度を確定してから着手。
+
+- [ ] H2-1: 検証基盤ハードニング全10件(plan 024) — CI収容拡大/基準PNG欠落fail化/custom Grid実codegen回帰/showcase evidence合否集約/VAT variant実行/小領域閾値/console・perf合否化/opt-out是正/indirect draw。**以降の全タスクの検収面を強化するため先行**
+- [ ] H2-2: 連続spawnの無限duration導出(plan 012) — rate/perDistanceのlifecycle省略でduration 0=無spawn(H1-1包絡導出の残存)。裁定=無限継続既定
+- [ ] H2-3: update段乱数のspawnOrderキー化(plan 019) — H1-10続編。統計プローブ+決定性ゲート+基準再記録前提
+- [ ] H2-4: 決定性tie-break残余バッチ(plan 018) — instance ID数値化/light top-N論理キー/event routing論理順固定+event原子順・neighbor bucket順のRFC既知制限化
+- [ ] H2-5: NeighborGridのemitter空間追従+範囲外診断(plan 013) — offset一元合成へ合流
+- [ ] H2-6: 空間selector追加+RFC 004表完備+update段transform補間(plan 022) — **大型(H1-7相当)**。裁定=sweepまで実装
+- [ ] H2-7: 透明描画順の全面対応(plan 020) — **裁定=全面対応(破壊的成分あり)**。sorted既定見直し/renderOrderユーザー合成/decal sorted+回転継承。RFC起票→設計確定→実装の2段構え
+- [ ] H2-8: sim-cacheのlineage照合(plan 021) — cacheフォーマット版数上げ+RFC §10.5改訂
+- [ ] H2-9: timeline mesh-fx所有権の完結(plan 014) — clone状態スナップショット/userVisible合成/geometry共有明文化
+- [ ] H2-10: VAT×timeline時計の自動バインド+clone保持(plan 015)
+- [ ] H2-11: 測定dtの既定クランプ(plan 016)
+- [ ] H2-12: runtime診断の既定console昇格拡張(plan 017) — H2-1完了後に実施(console合否集約と相互作用)
+- [ ] H2-13: 入力検証ハードニングバッチ12件(plan 023)
+- [ ] H2-14: showcase追従修正(plan 025) — post中心の毎フレーム再投影/ice jitter正規化
+- [ ] H2-15: 低優先残余・文書化バッチ(plan 026) — 要検証2件はプローブ→採否確定から
+- [ ] 🔍 H2マイルストーン監査 — H1と同じ独立監査2本(Codex+Claude)+統括裁定
+
 ## セッションログ
 
 | 日付 | セッション成果 |
 |---|---|
+| 2026-07-14 | **H1後続の残存瑕疵探査+H2起票**。①H1の11プランと検収BLOCKER群を6傾向(T1無音の失敗/T2状態所有権/T3物理ID/T4時間/T5空間既定/T6検証盲点)へ分類し、傾向ごとにCodex(gpt-5.6-sol xhigh、read-only)へ並列探査委譲→残存候補57件(高25/中28/低4)。主要検出: rate/perDistanceのduration 0無spawn(H1-1残存)/NeighborGrid world固定で移動spawn時に近傍無音全滅/fxMaterial cloneのsetter状態破棄/VAT時計のtimeline非バインド/復帰時巨大dt無上限/runtime診断無配送/instance ID 10進文字列tie-breakの桁境界反転/sim-cacheのslot再利用誤認補間/CI常設7ページのみ+基準PNG欠落が新規作成合格。健全確認: offset合成一元化・ribbon/trail連結・pool checkoutリセット・timeline実行順・grid dt伝播は指摘ゼロ。②16裁定単位をユーザー裁定: 14件推奨採用+2件推奨超え(透明描画順=全面対応、空間残余=update段sweepまで実装)。③docs/plans/012–026起票(000_summaryへH2追補節)+ROADMAP H2節(15タスク+監査)展開。運用知見: codex:rescueサブエージェントは単発フォワーダー専用のため、バックグラウンドジョブのポーリング・結果回収は統括がcompanion CLI(status/result)で直接行う |
 | 2026-07-14 | **H1マイルストーン監査・裁定: PASS(H1完了。指摘処理コミットaec2442)**。①独立監査2本: Codex(gpt-5.6-sol xhigh、read-onlyサンドボックス)=FAIL(1B/1S/2N)/Claude=PASS(0B/0S/4N、H1全項目実挙動検証33ラン+決定性再現+perf記録)。②判定対立のB1(H1-7部分占有位相)は統括一次コード裏取りで「意図された挙動(先着順ドロップ=perDistance意味論・Niagara整合)」と裁定し文書欠陥+回帰欠落へ降格→plan 003/RFC契約明記+m2部分占有GPU回帰常設(実測緑)。③両監査の残指摘(plans状態8件/RFC用語・契約・列挙・明文4件/CLAUDE.md perf節)を全件Codexで消化。④最終: 643テスト・ゴールデン7/7・ショーケース6・m2全シナリオ緑。**H1全10項目+監査チェック完了=マイルストーン成立**。全体を通じたクロスレビュー実績: Codex実装10件→Claudeレビュー10件(ACCEPT一発4・RETURN 6、うちBLOCKER実検出5件=Proxy残留/閾値較正/beam二重offset/凍結チャード間隙/m3console汚染)、統括はGPU実測検収と見た目裁定(beam白熱コア復元等)で全件補完 |
 | 2026-07-14 | **H1-10 検収・受入(コミット4dfdfce)。H1実装項目全10件完了(残は監査のみ)**。①Codex(gpt-5.6-sol xhigh)委譲: init乱数のspawnOrderキー化。設計選択(a)=既存PCG構造維持の最小変更(格子衝突なしを定数解析+統計プローブで確証)。②ClaudeレビューRETURN: BLOCKER 2=ページ側のみ(beam center二重適用の見た目退行をスクショ「再記録待ち」と正しく区別して検出/m3リグのクエリプール超過)→修正。コア側は指摘ゼロ(ハッシュ数学・決定性・M1ビット保持・非波及すべて合格)。③統括検収: 決定性ゲート完勝(beam≤0.007%・ice≤0.013%の3連続、m3リグ2連続一致)、12ページ基準一括再記録+目視合格(爆発/キャラ/アルティメット/ビーム等全て健全)、643テスト、全域回帰緑。**確定知見: 「見た目の変化」と「見た目の退行」の弁別はレビューの中核作業**(checksが領域感度不足で緑でも、基準との構造比較で退行を検出して再記録前に止める。今回のbeam剥離はまさに再記録すると基準へ焼き込まれる類だった) |
 | 2026-07-14 | **H1-9 検収・受入(コミットee3ba4e)**。①Codex(gpt-5.6-sol xhigh)委譲: 再現ページ/共用ドレイン/黒パネルガード/perf自動ドレイン/cwdガード/文書。②統括実測で最小再現の結論確定(Three単体非再現、ギャップ120fまで正常=upstream起票せず、ドレインは防御ツーリングとして正当化)。③ClaudeレビューRETURN(SHOULD 2=RFC §13.9内部API棚卸し追記漏れ+結論のツリー内記録なし。実装は全実測グリーン: repro両モード/置換7ページ/ゴールデン7/枯渇歴ページ/cwdガード)→Codex修正。**レビュー副産物: showcase-iceフレークのHEAD再現確認=plan 011機構と確定**(H1-10の検証対象へ)。④検収: 639テスト、repro/ドレイン/プール枯渇歴/golden全緑、/tmpからのcwdガード発火確認。**確定知見: ツーリング系の失敗仮説は必ず対象ライブラリ非依存の最小再現で帰属を確定してからupstream起票を判断する**(本件はnachi併用時のみ発現=Three起票を正しく回避) |
