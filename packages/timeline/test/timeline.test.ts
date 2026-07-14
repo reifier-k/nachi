@@ -938,9 +938,9 @@ describe('@nachi/timeline runtime', () => {
 
       expect(instance.state).toBe('error');
       expect(instance.diagnostics).toEqual([diagnostic]);
-      expect(Object.keys((spawnSpy.mock.calls[0]?.[0] as EffectDefinition).elements)).toEqual([
-        'source',
-      ]);
+      const spawnedDefinition = spawnSpy.mock.calls[0]?.[0];
+      expect(spawnedDefinition).toBeDefined();
+      expect(Object.keys((spawnedDefinition as EffectDefinition).elements)).toEqual(['source']);
     } finally {
       spawnSpy.mockRestore();
     }

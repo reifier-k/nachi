@@ -124,7 +124,9 @@ function finiteVec2(value: Vec2, name: string): void {
 }
 
 function normalize(value: Vec3, name: string): Vec3 {
-  value.forEach((component, index) => finite(component, `${name}[${index}]`));
+  value.forEach((component, index) => {
+    finite(component, `${name}[${index}]`);
+  });
   const magnitude = Math.hypot(...value);
   if (magnitude === 0) throw new RangeError(`${name} must not be zero`);
   return [value[0] / magnitude, value[1] / magnitude, value[2] / magnitude];

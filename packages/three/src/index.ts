@@ -1220,7 +1220,7 @@ export function materializeThreeSpriteDraw(
 > &
   ThreeDrawVisibilityControl {
   const draw = program.draws[drawIndex];
-  if (!draw || draw.kind !== 'billboard') {
+  if (draw?.kind !== 'billboard') {
     throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
   }
   if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
@@ -1465,7 +1465,7 @@ export function materializeThreeMeshDraw(
 ): THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial> &
   ThreeDrawVisibilityControl {
   const draw = program.draws[drawIndex];
-  if (!draw || draw.kind !== 'mesh') {
+  if (draw?.kind !== 'mesh') {
     throw new Error(`Compiled mesh draw ${drawIndex} is missing.`);
   }
   if (!kernels.drawIndirect || kernels.drawIndirectOffsetBytes === undefined) {
@@ -1593,8 +1593,7 @@ export function materializeThreeLightDraw(
   options: ThreeLightPoolOptions = {},
 ): ThreeLightPoolDraw {
   const draw = program.draws[drawIndex];
-  if (!draw || draw.kind !== 'light')
-    throw new Error(`Compiled light draw ${drawIndex} is missing.`);
+  if (draw?.kind !== 'light') throw new Error(`Compiled light draw ${drawIndex} is missing.`);
   if (kernels.capabilityPath !== 'webgpu-atomic-indirect') {
     throw new Error('NACHI_LIGHT_WEBGL2_UNSUPPORTED: Light top-N selection requires WebGPU.');
   }
@@ -1802,8 +1801,7 @@ export function materializeThreeDecalDraw(
 ): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicNodeMaterial> &
   ThreeDrawVisibilityControl {
   const draw = program.draws[drawIndex];
-  if (!draw || draw.kind !== 'decal')
-    throw new Error(`Compiled decal draw ${drawIndex} is missing.`);
+  if (draw?.kind !== 'decal') throw new Error(`Compiled decal draw ${drawIndex} is missing.`);
   if (kernels.capabilityPath !== 'webgpu-atomic-indirect') {
     throw new Error('NACHI_DECAL_WEBGL2_UNSUPPORTED: Projection decals require WebGPU.');
   }

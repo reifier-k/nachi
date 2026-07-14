@@ -470,9 +470,13 @@ async function run(): Promise<void> {
     fresnelCylinder.geometry,
     opacityGeometry,
     uvSeparationGeometry,
-  ].forEach((geometry) => geometry.dispose());
+  ].forEach((geometry) => {
+    geometry.dispose();
+  });
   [arcMaterial, uvMaterial, magicMaterial, fresnelMaterial, uvSeparationMaterial].forEach(
-    (material) => material.dispose(),
+    (material) => {
+      material.dispose();
+    },
   );
 }
 

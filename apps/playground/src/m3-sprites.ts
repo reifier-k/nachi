@@ -526,7 +526,7 @@ async function run(): Promise<void> {
   )) as Float32Array;
   const movementDelta = (finalPosition[0] ?? Number.NaN) - (initialPosition[0] ?? Number.NaN);
 
-  const firstDeath = aliveHistory.findIndex((count) => count === 0);
+  const firstDeath = aliveHistory.indexOf(0);
   const respawned =
     firstDeath >= 0 && aliveHistory.slice(firstDeath + 1).some((count) => count > 0);
 

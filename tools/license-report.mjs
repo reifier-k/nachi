@@ -1,6 +1,5 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import prettier from 'prettier';
 
 const root = path.resolve(import.meta.dirname, '..');
 const reportPath = path.join(root, 'docs/license-report.md');
@@ -247,7 +246,7 @@ ${
 ${table(packages)}
 `;
 
-await writeFile(reportPath, await prettier.format(markdown, { parser: 'markdown' }), 'utf8');
+await writeFile(reportPath, markdown, 'utf8');
 console.log(`Wrote ${path.relative(root, reportPath)} (${packages.length} package versions).`);
 if (productionConcerns.length > 0 || !threePinned || threePackages.length === 0)
   process.exitCode = 1;

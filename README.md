@@ -152,7 +152,7 @@ its kernels enter the pool, and a respawn must attach the newly materialized dra
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm prettier
+pnpm format:check
 pnpm build
 pnpm docs:build
 pnpm esm-all
@@ -161,6 +161,9 @@ pnpm golden:regress  # with the playground dev server running; headless SwiftSha
 node tools/bundle-size.mjs
 node tools/license-report.mjs
 ```
+
+Biome is the workspace linter and formatter for JavaScript, TypeScript, JSON, CSS, and HTML.
+Markdown and YAML are not automatically formatted.
 
 Changesets are independently versioned: run `pnpm changeset`, then `pnpm version-packages` when a
 release versioning pass is intended. `release:dry` never publishes.

@@ -145,7 +145,7 @@ function eventPayloadPositionSet(
   count: number,
 ): string[] {
   const field = queue.payloadFields.find(({ attribute }) => attribute === 'position');
-  if (!field || field.components !== 3 || (bank !== 0 && bank !== 1)) return [];
+  if (field?.components !== 3 || (bank !== 0 && bank !== 1)) return [];
   const positions = new Float32Array(count * 3);
   for (let slot = 0; slot < count; slot += 1) {
     const record =

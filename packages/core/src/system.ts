@@ -1850,9 +1850,9 @@ type ReleasableEffectInstance = {
 
 type CaptureScheduler = <Value>(capture: () => Promise<Value> | Value) => Promise<Value>;
 
-export class VfxEffectInstance<
-  Definition extends RuntimeEffectDefinition = RuntimeEffectDefinition,
-> implements EffectInstance<Definition> {
+export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = RuntimeEffectDefinition>
+  implements EffectInstance<Definition>
+{
   readonly clock: EffectClock;
   readonly debug: EffectInstanceDebug;
   readonly #diagnostics: VfxDiagnostic[] = [];

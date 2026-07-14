@@ -169,7 +169,7 @@ function createSkillSlash(noise: THREE.Texture) {
   });
 }
 
-function adapter(renderer: THREE.WebGPURenderer, backend: BackendLike): KernelTslAdapter {
+function adapter(_renderer: THREE.WebGPURenderer, backend: BackendLike): KernelTslAdapter {
   return createThreeKernelAdapter({
     backend: 'webgpu',
     linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,

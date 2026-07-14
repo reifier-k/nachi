@@ -7,28 +7,28 @@ level 9.
 
 ## Public package build artifacts
 
-| Package           | Files |                 Raw |                Gzip |
-| ----------------- | ----: | ------------------: | ------------------: |
-| `@nachi/core`     |    34 | 648693 (633.49 KiB) | 138901 (135.65 KiB) |
-| `@nachi/format`   |    10 | 118444 (115.67 KiB) |   17763 (17.35 KiB) |
-| `@nachi/mesh-fx`  |    10 |   43137 (42.13 KiB) |   11830 (11.55 KiB) |
-| `@nachi/post`     |    16 |   41924 (40.94 KiB) |   12357 (12.07 KiB) |
-| `@nachi/react`    |     4 |     9953 (9.72 KiB) |     2869 (2.80 KiB) |
-| `@nachi/three`    |     2 |   65154 (63.63 KiB) |   14645 (14.30 KiB) |
-| `@nachi/timeline` |     6 |   49626 (48.46 KiB) |   12513 (12.22 KiB) |
-| `@nachi/trails`   |     4 |   21714 (21.21 KiB) |     6161 (6.02 KiB) |
-| `@nachi/tsl-kit`  |    16 |   18469 (18.04 KiB) |     7108 (6.94 KiB) |
+| Package | Files | Raw | Gzip |
+|---|---:|---:|---:|
+| `@nachi/core` | 38 | 717897 (701.07 KiB) | 154389 (150.77 KiB) |
+| `@nachi/format` | 10 | 131140 (128.07 KiB) | 19967 (19.50 KiB) |
+| `@nachi/mesh-fx` | 10 | 45204 (44.14 KiB) | 12264 (11.98 KiB) |
+| `@nachi/post` | 16 | 41924 (40.94 KiB) | 12357 (12.07 KiB) |
+| `@nachi/react` | 4 | 10770 (10.52 KiB) | 3023 (2.95 KiB) |
+| `@nachi/three` | 2 | 72059 (70.37 KiB) | 16281 (15.90 KiB) |
+| `@nachi/timeline` | 6 | 59751 (58.35 KiB) | 14631 (14.29 KiB) |
+| `@nachi/trails` | 4 | 25175 (24.58 KiB) | 7118 (6.95 KiB) |
+| `@nachi/tsl-kit` | 16 | 18486 (18.05 KiB) | 7111 (6.94 KiB) |
 
-**Total:** 102 files, 1017114 bytes
-(993.28 KiB) raw, 224147 bytes
-(218.89 KiB) gzip.
+**Total:** 106 files, 1122406 bytes
+(1096.10 KiB) raw, 247141 bytes
+(241.35 KiB) gzip.
 
 ## Enforced consumer budgets
 
-| Probe                |                 Raw |              Gzip |       Budget (gzip) |   Result |
-| -------------------- | ------------------: | ----------------: | ------------------: | -------: |
-| Core public runtime  | 515084 (503.01 KiB) | 98771 (96.46 KiB) | 123904 (121.00 KiB) | **PASS** |
-| Minimal consumer app | 454629 (443.97 KiB) | 85625 (83.62 KiB) | 107520 (105.00 KiB) | **PASS** |
+| Probe | Raw | Gzip | Budget (gzip) | Result |
+|---|---:|---:|---:|---:|
+| Core public runtime | 579407 (565.83 KiB) | 111874 (109.25 KiB) | 123904 (121.00 KiB) | **PASS** |
+| Minimal consumer app | 522409 (510.17 KiB) | 100960 (98.59 KiB) | 107520 (105.00 KiB) | **PASS** |
 
 The consumer probe bundles `@nachi/core`, `@nachi/three`, `VFXSystem`, a billboard emitter, the
 Three runtime adapter, and the sprite materializer as a minimal working application. Three.js and
@@ -40,10 +40,10 @@ non-zero. Bundler: `rollup@4.62.2`.
 
 - Bundler: `rollup@4.62.2`
 - Entry imports: `defineEffect` and `billboard` only from `@nachi/core`
-- Minimal bundle: 6982 bytes (6.82 KiB) raw;
-  2126 bytes (2.08 KiB) gzip
-- Core runtime-JS reference: 516867 bytes
-  (504.75 KiB); reduction 98.6%
+- Minimal bundle: 12233 bytes (11.95 KiB) raw;
+  3385 bytes (3.31 KiB) gzip
+- Core runtime-JS reference: 581687 bytes
+  (568.05 KiB); reduction 97.9%
 - Forbidden Grid2D/Grid3D/neighbor/PBD symbol matches: none
 - Result: **PASS**
 

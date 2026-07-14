@@ -18,7 +18,7 @@ import {
   velocityCone,
 } from '@nachi/core';
 import type { KernelTslAdapter, ModuleDefinition } from '@nachi/core';
-import * as THREE from 'three/webgpu';
+import type * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
 import { createThreeKernelAdapter } from '@nachi/three';
@@ -252,7 +252,7 @@ function linearRgba(hexColor: string): number[] {
     const channel = value / 255;
     return channel < 0.04045
       ? channel * 0.0773993808
-      : Math.pow(channel * 0.9478672986 + 0.0521327014, 2.4);
+      : (channel * 0.9478672986 + 0.0521327014) ** 2.4;
   };
   return [
     toLinear(Number.parseInt(hex.slice(0, 2), 16)),

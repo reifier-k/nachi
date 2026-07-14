@@ -27,12 +27,16 @@ pnpm dev        # Vite on 0.0.0.0:5173 (required before browser tools)
 pnpm showcase:dev # showcase gallery site on 0.0.0.0:5174
 pnpm test       # Vitest
 pnpm typecheck  # all workspace TypeScript projects
-pnpm lint       # ESLint flat config
+pnpm lint       # Biome recommended rules
+pnpm format:check # Biome formatting check
 pnpm build      # all workspace builds
 pnpm docs:build # static documentation artifact in apps/docs/dist
 pnpm changeset  # record independently versioned package changes
 pnpm release:dry # build + all package ESM gates + npm publish --dry-run; never publishes
 ```
+
+Biome is the only direct lint/format tool. It covers JavaScript, TypeScript, JSON, CSS, and HTML;
+Markdown and YAML remain outside automatic formatting.
 
 Tooling (run `pnpm dev` first unless noted):
 

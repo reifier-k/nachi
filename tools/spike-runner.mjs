@@ -81,7 +81,7 @@ const CONTENT_TYPES = {
 async function installDistRoute(page, origin, directory) {
   await page.route(`${origin}/**`, async (route) => {
     const url = new URL(route.request().url());
-    let relative = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+    const relative = decodeURIComponent(url.pathname).replace(/^\/+/, '');
     let filename = path.resolve(directory, relative);
     if (!filename.startsWith(`${directory}${path.sep}`) && filename !== directory) {
       await route.fulfill({ body: 'Forbidden', status: 403 });

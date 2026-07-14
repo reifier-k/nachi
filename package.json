@@ -20,9 +20,9 @@
     "build": "pnpm -r --if-present build",
     "test": "vitest run",
     "typecheck": "pnpm -r --if-present typecheck",
-    "lint": "eslint .",
-    "prettier": "prettier --check .",
-    "format": "prettier --write .",
+    "lint": "biome lint .",
+    "format:check": "biome format .",
+    "format": "biome format --write .",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "esm:check": "node tools/check-all-package-esm.mjs",
@@ -31,16 +31,12 @@
     "release:dry": "pnpm build && pnpm esm:check && node tools/release-dry.mjs"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.3",
     "@changesets/cli": "2.29.7",
-    "@eslint/js": "9.39.2",
     "@types/node": "24.10.13",
-    "eslint": "9.39.2",
-    "globals": "16.5.0",
-    "playwright": "1.61.1",
-    "prettier": "3.8.2",
-    "typescript": "5.9.3",
-    "typescript-eslint": "8.55.0",
     "esbuild": "0.28.1",
+    "playwright": "1.61.1",
+    "typescript": "5.9.3",
     "vitest": "4.1.0"
   },
   "pnpm": {

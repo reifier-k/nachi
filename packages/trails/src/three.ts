@@ -214,7 +214,7 @@ export function materializeThreeRibbonDraw(
   options: ThreeRibbonMaterializationOptions = {},
 ): ThreeRibbonDraw {
   const draw = program.draws[drawIndex];
-  if (!draw || draw.kind !== 'ribbon') {
+  if (draw?.kind !== 'ribbon') {
     throw new Error(`Compiled ribbon draw ${drawIndex} is missing.`);
   }
   if (kernels.capabilityPath !== 'webgpu-atomic-indirect') {

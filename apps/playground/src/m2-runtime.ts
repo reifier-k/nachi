@@ -12,7 +12,7 @@ import {
   velocityCone,
 } from '@nachi/core';
 import type { ModuleDefinition, SpawnModule, ValueInput, VfxEmitterRuntimeView } from '@nachi/core';
-import * as THREE from 'three/webgpu';
+import type * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
 import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';

@@ -184,7 +184,7 @@ function proceduralFlameTextures(): { atlas: THREE.DataTexture; motion: THREE.Da
         atlasData[offset] = Math.round(255 * heat);
         atlasData[offset + 1] = Math.round(255 * heat * (0.25 + radial * 0.58));
         atlasData[offset + 2] = Math.round(80 * heat * radial);
-        atlasData[offset + 3] = Math.round(255 * Math.pow(radial, 0.65));
+        atlasData[offset + 3] = Math.round(255 * radial ** 0.65);
         const inverseDistance = distance > 0.0001 ? 1 / distance : 0;
         motionData[offset] = Math.round(128 + nx * inverseDistance * 28);
         motionData[offset + 1] = Math.round(128 + ny * inverseDistance * 28);

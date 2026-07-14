@@ -1196,7 +1196,7 @@ describe('emitter kernel compiler', () => {
       }),
     );
     const draw = program.draws[0];
-    if (!draw || draw.kind !== 'billboard') throw new Error('Expected a billboard draw.');
+    if (draw?.kind !== 'billboard') throw new Error('Expected a billboard draw.');
 
     expect(draw.fragment.lit).toEqual({ metalness: 0.1, normalMap, roughness: 0.65 });
     const defaults = compileEmitter(
@@ -1206,7 +1206,7 @@ describe('emitter kernel compiler', () => {
         spawn: burst({ count: 1 }),
       }),
     ).draws[0];
-    if (!defaults || defaults.kind !== 'billboard') throw new Error('Expected lit defaults.');
+    if (defaults?.kind !== 'billboard') throw new Error('Expected lit defaults.');
     expect(defaults.fragment.lit).toEqual({ metalness: 0, roughness: 0.8 });
     expect(
       compileEmitter(
@@ -1327,7 +1327,7 @@ describe('emitter kernel compiler', () => {
       }),
     );
     const draw = program.draws[0];
-    if (!draw || draw.kind !== 'billboard') throw new Error('Expected a billboard draw.');
+    if (draw?.kind !== 'billboard') throw new Error('Expected a billboard draw.');
     expect(draw.fragment.flipbook).not.toHaveProperty('motionVectors');
   });
 
@@ -1352,7 +1352,7 @@ describe('emitter kernel compiler', () => {
       }),
     );
     const draw = program.draws[0];
-    if (!draw || draw.kind !== 'billboard') throw new Error('Expected a billboard draw.');
+    if (draw?.kind !== 'billboard') throw new Error('Expected a billboard draw.');
     expect(draw.fragment.flipbook).not.toHaveProperty('motionVectors');
   });
 
@@ -1365,7 +1365,7 @@ describe('emitter kernel compiler', () => {
       }),
     );
     const validDraw = valid.draws[0];
-    if (!validDraw || validDraw.kind !== 'billboard') throw new Error('Expected billboard.');
+    if (validDraw?.kind !== 'billboard') throw new Error('Expected billboard.');
     expect(validDraw.fragment.soft).toEqual({ fadeDistance: 0.08 });
 
     const invalid = compileEmitter(
@@ -2211,21 +2211,22 @@ describe('emitter kernel compiler', () => {
     );
   });
 
-  it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])(
-    'diagnoses invalid burst count %s',
-    (count) => {
-      const program = compileEmitter({
-        ...baseEmitter(),
-        spawn: rawConfig(burst({ count: 1 }), { count }),
-      });
-      expect(program.diagnostics).toContainEqual(
-        expect.objectContaining({
-          code: 'NACHI_BURST_COUNT_INVALID',
-          path: 'spawn[0].config.count',
-        }),
-      );
-    },
-  );
+  it.each([
+    Number.NaN,
+    -1,
+    Number.POSITIVE_INFINITY,
+  ])('diagnoses invalid burst count %s', (count) => {
+    const program = compileEmitter({
+      ...baseEmitter(),
+      spawn: rawConfig(burst({ count: 1 }), { count }),
+    });
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_BURST_COUNT_INVALID',
+        path: 'spawn[0].config.count',
+      }),
+    );
+  });
 
   it('diagnoses a burst count parameter whose declaration is not a numeric scalar', () => {
     const emitter = defineEmitter({

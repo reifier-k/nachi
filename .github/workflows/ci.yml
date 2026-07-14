@@ -39,7 +39,7 @@ jobs:
         run: pnpm build
 
       - name: Check formatting
-        run: pnpm exec prettier --check .
+        run: pnpm format:check
 
   golden-regress:
     if: ${{ vars.NACHI_SKIP_GOLDEN_REGRESS != '1' }}

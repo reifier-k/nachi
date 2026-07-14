@@ -1739,9 +1739,7 @@ function normalizeColor(input: ColorInput): Vec4 {
     throw new Error(`Unsupported color "${input}". Expected #RGB, #RRGGBB, #RGBA, or #RRGGBBAA.`);
   }
   const srgbToLinear = (channel: number): number =>
-    channel < 0.04045
-      ? channel * 0.0773993808
-      : Math.pow(channel * 0.9478672986 + 0.0521327014, 2.4);
+    channel < 0.04045 ? channel * 0.0773993808 : (channel * 0.9478672986 + 0.0521327014) ** 2.4;
   return [
     srgbToLinear(Number.parseInt(expanded.slice(0, 2), 16) / 255),
     srgbToLinear(Number.parseInt(expanded.slice(2, 4), 16) / 255),

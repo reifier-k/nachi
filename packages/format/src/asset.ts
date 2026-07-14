@@ -565,7 +565,9 @@ class AssetValidator {
       return;
     }
     this.denseArray(value, path);
-    value.forEach((module, index) => this.module(module, stage, `${path}[${index}]`));
+    value.forEach((module, index) => {
+      this.module(module, stage, `${path}[${index}]`);
+    });
   }
 
   module(value: unknown, expectedStage: string, path: string): void {
@@ -848,7 +850,9 @@ class AssetValidator {
   timeline(value: unknown, path: string): void {
     if (Array.isArray(value)) {
       this.denseArray(value, path);
-      value.forEach((entry, index) => this.timelineEntry(entry, `${path}[${index}]`));
+      value.forEach((entry, index) => {
+        this.timelineEntry(entry, `${path}[${index}]`);
+      });
       return;
     }
     if (!this.record(value, path)) return;
@@ -874,9 +878,9 @@ class AssetValidator {
     if (!Array.isArray(value.entries)) this.type('array', value.entries, `${path}.entries`);
     else {
       this.denseArray(value.entries, `${path}.entries`);
-      value.entries.forEach((entry, index) =>
-        this.timelineEntry(entry, `${path}.entries[${index}]`),
-      );
+      value.entries.forEach((entry, index) => {
+        this.timelineEntry(entry, `${path}.entries[${index}]`);
+      });
       const times = value.entries.flatMap((entry) =>
         isRecord(entry) && typeof entry.at === 'number' && Number.isFinite(entry.at)
           ? [entry.at]
@@ -923,9 +927,9 @@ class AssetValidator {
     if (!Array.isArray(value.actions)) this.type('array', value.actions, `${path}.actions`);
     else {
       this.denseArray(value.actions, `${path}.actions`);
-      value.actions.forEach((action, index) =>
-        this.timelineAction(action, `${path}.actions[${index}]`),
-      );
+      value.actions.forEach((action, index) => {
+        this.timelineAction(action, `${path}.actions[${index}]`);
+      });
     }
   }
 
@@ -987,7 +991,9 @@ class AssetValidator {
     }
     if (Array.isArray(value)) {
       this.denseArray(value, path);
-      value.forEach((item, index) => this.json(item, `${path}[${index}]`, depth + 1));
+      value.forEach((item, index) => {
+        this.json(item, `${path}[${index}]`, depth + 1);
+      });
       return;
     }
     if (!this.record(value, path)) return;
@@ -1132,7 +1138,9 @@ class AssetValidator {
       return undefined;
     }
     this.denseArray(value, path);
-    value.forEach((item, index) => this.finiteNumber(item, `${path}[${index}]`));
+    value.forEach((item, index) => {
+      this.finiteNumber(item, `${path}[${index}]`);
+    });
     return `vec${value.length}`;
   }
 
@@ -1152,7 +1160,9 @@ class AssetValidator {
       return;
     }
     this.denseArray(value, path);
-    value.forEach((item, index) => this.finiteNumber(item, `${path}[${index}]`));
+    value.forEach((item, index) => {
+      this.finiteNumber(item, `${path}[${index}]`);
+    });
   }
 
   record(value: unknown, path: string): value is UnknownRecord {
@@ -1200,7 +1210,9 @@ class AssetValidator {
       return;
     }
     this.denseArray(value, path);
-    value.forEach((item, index) => this.finiteNumber(item, `${path}[${index}]`));
+    value.forEach((item, index) => {
+      this.finiteNumber(item, `${path}[${index}]`);
+    });
   }
 
   typedValue(type: AttributeType, value: unknown, path: string): void {

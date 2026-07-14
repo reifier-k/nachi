@@ -150,6 +150,7 @@ export function useEffectInstance<
       : createObject3DTransformSource(options.attachTo);
   }, [options.attachTo]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only definition, priority, seed, and system respawn; other options are forwarded live below.
   useEffect(() => {
     const spawnOptions = {
       ...(options.parameters === undefined ? {} : { parameters: options.parameters }),
@@ -178,6 +179,7 @@ export function useEffectInstance<
     // Seed and priority are spawn-only. Other values have live update effects below.
   }, [definition, options.priority, options.seed, system]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: spawn dependencies rerun parameter forwarding against the newly spawned instance.
   useEffect(() => {
     const current = instanceRef.current;
     if (!current || current.state === 'error') return;
@@ -194,6 +196,7 @@ export function useEffectInstance<
     }
   }, [definition, options.parameters, options.priority, options.seed, system]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: spawn dependencies rerun time-scale forwarding against the newly spawned instance.
   useEffect(() => {
     const current = instanceRef.current;
     if (current && current.state !== 'error' && options.timeScale !== undefined) {
@@ -201,6 +204,7 @@ export function useEffectInstance<
     }
   }, [definition, options.priority, options.seed, options.timeScale, system]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: spawn dependencies rerun transform forwarding against the newly spawned instance.
   useEffect(() => {
     const current = instanceRef.current;
     if (
@@ -212,6 +216,7 @@ export function useEffectInstance<
     }
   }, [definition, options.position, options.priority, options.rotation, options.seed, system]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: spawn dependencies reattach the newly spawned instance.
   useEffect(() => {
     const current = instanceRef.current;
     if (!current || current.state === 'error') return;

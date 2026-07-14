@@ -153,7 +153,7 @@ Threeの描画オブジェクトは、そのエミッターカーネルにライ
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm prettier
+pnpm format:check
 pnpm build
 pnpm docs:build
 pnpm esm-all
@@ -162,6 +162,9 @@ pnpm golden:regress  # with the playground dev server running; headless SwiftSha
 node tools/bundle-size.mjs
 node tools/license-report.mjs
 ```
+
+BiomeはJavaScript、TypeScript、JSON、CSS、HTMLのlintとformatを担当します。MarkdownとYAMLは
+自動整形の対象外です。
 
 Changesetsは独立してバージョニングされます。`pnpm changeset`を実行し、リリースのバージョニングを
 行う場合は`pnpm version-packages`を実行してください。`release:dry`は公開(publish)を一切行いません。

@@ -626,54 +626,54 @@ describe('M12 Grid3D runtime diagnostics', () => {
 });
 
 describe('M12 data-interface capture FIFO', () => {
-  it.each(['grid2d', 'grid3d'] as const)(
-    'serializes %s capture, rasterization, and sampling after an in-flight update',
-    async (kind) => {
-      const renderer = new DeferredSubmissionRenderer();
-      const definition =
-        kind === 'grid2d'
-          ? defineEffect({
-              elements: {
-                grid: defineGrid2D({
-                  channels: { density: { type: 'f32' } },
-                  resolution: [3, 2],
-                }),
-              },
-            })
-          : defineEffect({
-              elements: {
-                grid: defineGrid3D({
-                  channels: { density: { type: 'f32' } },
-                  resolution: [3, 2, 2],
-                }),
-              },
-            });
-      const system = new VFXSystem(renderer);
-      const instance = system.spawn(definition as never);
-      const grid = kind === 'grid2d' ? instance.getGrid2D('grid')! : instance.getGrid3D('grid')!;
-      const update = system.update(0.1);
-      await Promise.resolve();
-      await Promise.resolve();
-      const capture = grid.capture();
-      const raster =
-        kind === 'grid2d'
-          ? (grid as Grid2DRuntimeView).rasterizeParticles([[0.25, 0.5]], 'density')
-          : (grid as Grid3DRuntimeView).rasterizeParticles([[0.25, 0.5, 0.75]], 'density');
-      const sample =
-        kind === 'grid2d'
-          ? (grid as Grid2DRuntimeView).sampleParticles([[0.25, 0.5]], 'density')
-          : (grid as Grid3DRuntimeView).sampleParticles([[0.25, 0.5, 0.75]], 'density');
-      expect(renderer.readCount).toBe(0);
-      expect(renderer.writeCount).toBe(0);
-      renderer.releaseFirstSubmission();
-      await Promise.all([update, capture, raster, sample]);
-      expect(renderer.readCount).toBe(2);
-      expect(renderer.writeCount).toBe(2);
-      expect(grid.initialized).toBe(true);
-      instance.release();
-      expect(grid.initialized).toBe(false);
-    },
-  );
+  it.each([
+    'grid2d',
+    'grid3d',
+  ] as const)('serializes %s capture, rasterization, and sampling after an in-flight update', async (kind) => {
+    const renderer = new DeferredSubmissionRenderer();
+    const definition =
+      kind === 'grid2d'
+        ? defineEffect({
+            elements: {
+              grid: defineGrid2D({
+                channels: { density: { type: 'f32' } },
+                resolution: [3, 2],
+              }),
+            },
+          })
+        : defineEffect({
+            elements: {
+              grid: defineGrid3D({
+                channels: { density: { type: 'f32' } },
+                resolution: [3, 2, 2],
+              }),
+            },
+          });
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(definition as never);
+    const grid = kind === 'grid2d' ? instance.getGrid2D('grid')! : instance.getGrid3D('grid')!;
+    const update = system.update(0.1);
+    await Promise.resolve();
+    await Promise.resolve();
+    const capture = grid.capture();
+    const raster =
+      kind === 'grid2d'
+        ? (grid as Grid2DRuntimeView).rasterizeParticles([[0.25, 0.5]], 'density')
+        : (grid as Grid3DRuntimeView).rasterizeParticles([[0.25, 0.5, 0.75]], 'density');
+    const sample =
+      kind === 'grid2d'
+        ? (grid as Grid2DRuntimeView).sampleParticles([[0.25, 0.5]], 'density')
+        : (grid as Grid3DRuntimeView).sampleParticles([[0.25, 0.5, 0.75]], 'density');
+    expect(renderer.readCount).toBe(0);
+    expect(renderer.writeCount).toBe(0);
+    renderer.releaseFirstSubmission();
+    await Promise.all([update, capture, raster, sample]);
+    expect(renderer.readCount).toBe(2);
+    expect(renderer.writeCount).toBe(2);
+    expect(grid.initialized).toBe(true);
+    instance.release();
+    expect(grid.initialized).toBe(false);
+  });
 
   it('captures one NeighborGrid rebuild after an in-flight update and resets on release', async () => {
     const renderer = new DeferredSubmissionRenderer();
@@ -1958,7 +1958,7 @@ describe('VFXSystem runtime scheduler', () => {
     runBoundary = true;
     await system.update(0);
 
-    expect(reacquired?.getEmitter('particles')!.kernels).toBe(pooledKernels);
+    expect(reacquired?.getEmitter('particles')?.kernels).toBe(pooledKernels);
     expect(system.getPooledInstanceCount(definition)).toBe(1);
     expect(renderer.releasedKernels.has(pooledKernels)).toBe(false);
     expect(renderer.releasedKernels.has(releasedKernels)).toBe(false);
@@ -2028,40 +2028,40 @@ describe('VFXSystem runtime scheduler', () => {
     expect(renderer.releaseCount).toBe(1);
   });
 
-  it.each(['grid2d', 'grid3d'] as const)(
-    'attributes %s submission failures to the simulation-stage context',
-    async (kind) => {
-      const renderer = new FakeRuntimeRenderer();
-      const definition = defineEffect({
-        elements: {
-          grid:
-            kind === 'grid2d'
-              ? defineGrid2D({
-                  channels: { density: { type: 'f32' } },
-                  resolution: [2, 2],
-                })
-              : defineGrid3D({
-                  channels: { density: { type: 'f32' } },
-                  resolution: [2, 2, 2],
-                }),
-        },
-      });
-      const system = new VFXSystem(renderer);
-      const instance = system.spawn(definition);
-      renderer.failNextSubmission = true;
+  it.each([
+    'grid2d',
+    'grid3d',
+  ] as const)('attributes %s submission failures to the simulation-stage context', async (kind) => {
+    const renderer = new FakeRuntimeRenderer();
+    const definition = defineEffect({
+      elements: {
+        grid:
+          kind === 'grid2d'
+            ? defineGrid2D({
+                channels: { density: { type: 'f32' } },
+                resolution: [2, 2],
+              })
+            : defineGrid3D({
+                channels: { density: { type: 'f32' } },
+                resolution: [2, 2, 2],
+              }),
+      },
+    });
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(definition);
+    renderer.failNextSubmission = true;
 
-      await expect(system.update(0)).resolves.toBeUndefined();
+    await expect(system.update(0)).resolves.toBeUndefined();
 
-      expect(instance.state).toBe('error');
-      expect(instance.diagnostics).toContainEqual(
-        expect.objectContaining({
-          code: 'NACHI_GPU_SUBMISSION_FAILED',
-          context: { emitterPath: 'elements.grid', kernel: 'sim-stage' },
-          path: 'elements.grid',
-        }),
-      );
-    },
-  );
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_GPU_SUBMISSION_FAILED',
+        context: { emitterPath: 'elements.grid', kernel: 'sim-stage' },
+        path: 'elements.grid',
+      }),
+    );
+  });
 
   it('initializes effects spawned by an event callback before same-update event consumption', async () => {
     const renderer = new MappedReadbackRenderer();
@@ -2307,35 +2307,32 @@ describe('VFXSystem runtime scheduler', () => {
   it.each([
     ['NACHI_PARAMETER_UNKNOWN', { 'User.typo': 2 }],
     ['NACHI_PARAMETER_TYPE_MISMATCH', { 'User.intensity': 'bad' }],
-  ] as const)(
-    'transitions to error for invalid spawn parameter overrides: %s',
-    (code, parameters) => {
-      const parameterDefinition = defineParameter('User.intensity', {
-        default: 1,
-        type: 'f32',
-      });
-      const emitter = defineEmitter({
-        capacity: 1,
-        integration: 'none',
-        parameters: { 'User.intensity': parameterDefinition },
-        render: computeRender,
-        spawn: burst({ count: 1 }),
-      });
-      const effect = defineEffect({
-        elements: { particles: emitter },
-        parameters: { 'User.intensity': parameterDefinition },
-      });
-      const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(effect, {
-        parameters: parameters as never,
-      });
+  ] as const)('transitions to error for invalid spawn parameter overrides: %s', (code, parameters) => {
+    const parameterDefinition = defineParameter('User.intensity', {
+      default: 1,
+      type: 'f32',
+    });
+    const emitter = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      parameters: { 'User.intensity': parameterDefinition },
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({
+      elements: { particles: emitter },
+      parameters: { 'User.intensity': parameterDefinition },
+    });
+    const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(effect, {
+      parameters: parameters as never,
+    });
 
-      expect(instance.state).toBe('error');
-      expect(instance.diagnostics).toContainEqual(
-        expect.objectContaining({ code, phase: 'runtime' }),
-      );
-      expect(instance.getEmitter('particles')).toBeUndefined();
-    },
-  );
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({ code, phase: 'runtime' }),
+    );
+    expect(instance.getEmitter('particles')).toBeUndefined();
+  });
 
   it('accepts type-valid immutable parameter overrides at spawn time', () => {
     const parameterDefinition = defineParameter('User.intensity', {
@@ -2746,34 +2743,31 @@ describe('VFXSystem runtime scheduler', () => {
   it.each([
     ['finite', 2 as const, 4, 1, 'completed' as const],
     ['infinite', 'infinite' as const, 5, 2, 'active' as const],
-  ])(
-    'repeats the complete derived envelope for a %s loop count',
-    async (_name, loopCount, expectedSpawns, expectedLoopIndex, expectedState) => {
-      const renderer = new FakeRuntimeRenderer();
-      const system = new VFXSystem(renderer);
-      const emitter = defineEmitter({
-        capacity: 16,
-        init: [lifetime(0.05)],
-        integration: 'none',
-        lifecycle: { loopCount },
-        render: computeRender,
-        spawn: burst({ count: 1, cycles: 2, interval: 0.1 }),
-      });
-      const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+  ])('repeats the complete derived envelope for a %s loop count', async (_name, loopCount, expectedSpawns, expectedLoopIndex, expectedState) => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 16,
+      init: [lifetime(0.05)],
+      integration: 'none',
+      lifecycle: { loopCount },
+      render: computeRender,
+      spawn: burst({ count: 1, cycles: 2, interval: 0.1 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
 
-      await system.update(0);
-      await system.update(0.5);
+    await system.update(0);
+    await system.update(0.5);
 
-      expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(
-        expectedSpawns,
-      );
-      expect(instance.getEmitter('particles')).toMatchObject({
-        lifecycleState: expectedState,
-        loopIndex: expectedLoopIndex,
-        spawnGeneration: expectedLoopIndex,
-      });
-    },
-  );
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(
+      expectedSpawns,
+    );
+    expect(instance.getEmitter('particles')).toMatchObject({
+      lifecycleState: expectedState,
+      loopIndex: expectedLoopIndex,
+      spawnGeneration: expectedLoopIndex,
+    });
+  });
 
   it('still diagnoses a loop without an explicit or derived positive duration', () => {
     expect(() =>

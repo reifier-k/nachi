@@ -4,7 +4,6 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import prettier from 'prettier';
 
 const root = path.resolve(import.meta.dirname, '..');
 const docsRoot = path.join(root, 'docs');
@@ -326,15 +325,7 @@ const report = {
   treeShaking: await treeShakingCheck(core),
 };
 
-await writeFile(
-  jsonPath,
-  await prettier.format(JSON.stringify(report, null, 2), { parser: 'json' }),
-  'utf8',
-);
-await writeFile(
-  markdownPath,
-  await prettier.format(markdown(report), { parser: 'markdown' }),
-  'utf8',
-);
+await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+await writeFile(markdownPath, markdown(report), 'utf8');
 console.log(`Wrote ${path.relative(root, jsonPath)} and ${path.relative(root, markdownPath)}.`);
 if (!report.treeShaking.passed || !report.consumerBundles.passed) process.exitCode = 1;

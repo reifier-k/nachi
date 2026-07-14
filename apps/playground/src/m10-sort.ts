@@ -435,9 +435,9 @@ async function run(): Promise<void> {
   );
 
   const context = visual.getContext('2d')!;
-  [sortedCameraA, sortedCameraB, oitForward].forEach((pixels, index) =>
-    context.putImageData(new ImageData(new Uint8ClampedArray(pixels), SIZE, SIZE), index * SIZE, 0),
-  );
+  [sortedCameraA, sortedCameraB, oitForward].forEach((pixels, index) => {
+    context.putImageData(new ImageData(new Uint8ClampedArray(pixels), SIZE, SIZE), index * SIZE, 0);
+  });
   root.dataset.artifactScreenshots = JSON.stringify([
     { filename: 'm10-sort.png', selector: '#sort-visual' },
   ]);

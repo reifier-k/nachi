@@ -69,7 +69,9 @@ dd {
   gap: 0.55rem;
 }
 .column-controls {
+  border: 0;
   margin: 0.7rem 0;
+  padding: 0;
 }
 label {
   color: #b8d8e5;
@@ -89,7 +91,7 @@ button {
 table {
   border-collapse: collapse;
   font:
-    0.72rem/1.4 ui-monospace,
+    0.72rem / 1.4 ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -119,7 +121,7 @@ th {
 .note {
   color: #8eb2c1;
   font:
-    0.7rem/1.4 ui-monospace,
+    0.7rem / 1.4 ui-monospace,
     monospace;
 }
 .readback-panel canvas {

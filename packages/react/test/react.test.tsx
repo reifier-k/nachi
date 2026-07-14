@@ -478,6 +478,65 @@ describe('@nachi/react lifecycle', () => {
     await act(async () => root.unmount());
   });
 
+  it('updates live props in place and respawns only for spawn-only options', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const observedInstances: unknown[] = [];
+
+    function Tree({
+      liveValue,
+      priority,
+      seed,
+    }: {
+      liveValue: number;
+      priority: number;
+      seed: number;
+    }) {
+      return (
+        <VFXSystemProvider renderer={renderer} options={SYSTEM_OPTIONS}>
+          <VFXEffect
+            definition={definition}
+            onInstance={(instance) => {
+              if (instance) observedInstances.push(instance);
+            }}
+            parameters={{ 'User.intensity': liveValue }}
+            position={[liveValue, 2, 3]}
+            priority={priority}
+            rotation={[0, liveValue, 0]}
+            seed={seed}
+            timeScale={liveValue}
+          />
+        </VFXSystemProvider>
+      );
+    }
+
+    let root: ReactTestRenderer;
+    await act(async () => {
+      root = create(<Tree liveValue={1} priority={0} seed={1} />);
+    });
+    const initialInstance = observedInstances[0];
+
+    await act(async () => {
+      root.update(<Tree liveValue={2} priority={0} seed={1} />);
+    });
+    expect(observedInstances).toEqual([initialInstance]);
+    expect(renderer.releaseCount).toBe(0);
+
+    await act(async () => {
+      root.update(<Tree liveValue={2} priority={0} seed={2} />);
+    });
+    expect(observedInstances).toHaveLength(2);
+    expect(observedInstances[1]).not.toBe(initialInstance);
+    expect(renderer.releaseCount).toBe(1);
+
+    await act(async () => {
+      root.update(<Tree liveValue={2} priority={1} seed={2} />);
+    });
+    expect(observedInstances).toHaveLength(3);
+    expect(renderer.releaseCount).toBe(2);
+
+    await act(async () => root.unmount());
+  });
+
   it('notifies an inline onInstance callback only when the instance changes', async () => {
     const renderer = new FakeRuntimeRenderer();
     const observedInstances: unknown[] = [];

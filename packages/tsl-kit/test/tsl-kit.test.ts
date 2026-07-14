@@ -87,9 +87,9 @@ describe('@nachi/tsl-kit node graphs', () => {
     expectTypeOf(rim).toMatchTypeOf<Node<'vec3'>>();
     expectTypeOf(distorted).toMatchTypeOf<Node<'vec2'>>();
     expectTypeOf(flowedMap).toMatchTypeOf<Node<'vec4'>>();
-    [dissolved, flowedUv, polar, edge, rim, distorted, flowedMap].forEach((node) =>
-      expectNode(node),
-    );
+    [dissolved, flowedUv, polar, edge, rim, distorted, flowedMap].forEach((node) => {
+      expectNode(node);
+    });
   });
 
   it('reports stable diagnostics for invalid constants and resources', () => {

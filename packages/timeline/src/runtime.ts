@@ -75,9 +75,8 @@ export interface TimelineSystemOptions extends VfxSystemOptions {
   readonly cameraShakeTarget?: CameraShakeTarget;
 }
 
-export interface TimelineEffectSpawnOptions<
-  Definition = EffectDefinition,
-> extends EffectSpawnOptions<Definition> {
+export interface TimelineEffectSpawnOptions<Definition = EffectDefinition>
+  extends EffectSpawnOptions<Definition> {
   readonly cameraShakeTarget?: CameraShakeTarget;
 }
 
@@ -1137,7 +1136,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     options: EffectSpawnOptions,
   ): VfxEffectInstance {
     const element = definition.elements[key];
-    if (!element || element.kind !== 'emitter') {
+    if (element?.kind !== 'emitter') {
       throw new VfxDiagnosticError([
         runtimeDiagnostic(
           'NACHI_TIMELINE_ELEMENT_ADAPTER_MISSING',

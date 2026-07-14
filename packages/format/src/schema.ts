@@ -493,6 +493,7 @@ export const effectAssetSchemaV1 = {
             properties: { type: { const: 'core/position-sphere' } },
             required: ['type'],
           },
+          // biome-ignore lint/suspicious/noThenProperty: "then" is a JSON Schema conditional keyword.
           then: { properties: { config: { $ref: '#/$defs/positionSphereConfig' } } },
         },
       ],
