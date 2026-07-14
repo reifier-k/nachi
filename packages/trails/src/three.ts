@@ -43,6 +43,7 @@ type ThreeDrawRegistration = {
   readonly attributes: readonly THREE.BufferAttribute[];
   readonly dispose: () => void;
   readonly object: THREE.Object3D;
+  userVisible: boolean;
 };
 
 function registerRibbonDraw(
@@ -50,16 +51,29 @@ function registerRibbonDraw(
   object: THREE.Object3D,
   attributes: readonly THREE.BufferAttribute[],
   dispose: () => void,
-): void {
+): (visible: boolean) => void {
   const owner = kernels as BuiltEmitterKernels & {
     [THREE_DRAW_REGISTRY]?: Set<ThreeDrawRegistration>;
     [THREE_RENDER_ORDER]?: number;
     [THREE_VISIBILITY]?: boolean;
   };
   owner[THREE_DRAW_REGISTRY] ??= new Set();
-  owner[THREE_DRAW_REGISTRY].add({ attributes, dispose, object });
+  const registration: ThreeDrawRegistration = {
+    attributes,
+    dispose,
+    object,
+    userVisible: true,
+  };
+  owner[THREE_DRAW_REGISTRY].add(registration);
   object.renderOrder = owner[THREE_RENDER_ORDER] ?? object.renderOrder;
-  object.visible = owner[THREE_VISIBILITY] ?? true;
+  const applyVisibility = () => {
+    object.visible = (owner[THREE_VISIBILITY] ?? true) && registration.userVisible;
+  };
+  applyVisibility();
+  return (visible) => {
+    registration.userVisible = visible;
+    applyVisibility();
+  };
 }
 
 function disposeRibbonDraw(
@@ -186,6 +200,7 @@ export interface ThreeRibbonDraw {
   readonly segmentValues: KernelStorageNode;
   readonly segmentWidths: KernelStorageNode;
   prepare(renderer: THREE.WebGPURenderer): Promise<void>;
+  setUserVisible(visible: boolean): void;
 }
 
 /**
@@ -405,7 +420,7 @@ export function materializeThreeRibbonDraw(
     geometry.dispose();
     material.dispose();
   };
-  registerRibbonDraw(
+  const setUserVisible = registerRibbonDraw(
     kernels,
     mesh,
     [
@@ -431,6 +446,7 @@ export function materializeThreeRibbonDraw(
     segmentIndices,
     segmentValues,
     segmentWidths,
+    setUserVisible,
   };
 }
 

@@ -107,7 +107,7 @@ export interface VfxRuntimeRenderer {
   releaseStorage?(storage: KernelStorageNode): void;
   setUniformValue?(uniform: KernelUniformNode, path: ParameterPath, value: unknown): void;
   setInstanceCount?(kernels: BuiltEmitterKernels, count: number): void;
-  /** Hides materialized draw objects when a fully culled instance skips rendering. */
+  /** Publishes runtime-owned visibility; backends compose it with any draw-local user override. */
   setVisibility?(kernels: BuiltEmitterKernels, visible: boolean): void;
   /** Returns the currently materialized indirect draw records owned by these kernels. */
   getRenderableIndirectDrawCount?(kernels: BuiltEmitterKernels): number;

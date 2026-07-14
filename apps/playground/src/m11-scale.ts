@@ -463,19 +463,27 @@ async function run(): Promise<void> {
   renderer.clear();
   renderer.render(cullingScene, visualCamera);
   cullingScene.remove(cullingMesh);
+  const visibleBeforeUserOverride = cullingMesh.visible;
+  cullingMesh.setUserVisible(false);
+  const hiddenByUser = !cullingMesh.visible;
   culled.setTransform([0, 0, 5]);
   await cullingSystem.update(1 / 60);
+  const hiddenDuringRuntimeFade = !cullingMesh.visible;
   const renderableProfile = await cullingSystem.debug.captureProfile();
   const aliveBeforeCull = view(culled).aliveCount;
   const timeBeforeCull = culled.localTime;
   const fadeAtFive = culled.scalability.fade;
   culled.setTransform([0, 0, 8]);
   await cullingSystem.update(0.5);
+  const hiddenAcrossRuntimeCull = !cullingMesh.visible;
   const culledProfile = await cullingSystem.debug.captureProfile();
   const aliveWhileCulled = view(culled).aliveCount;
   const timeWhileCulled = culled.localTime;
+  cullingMesh.setUserVisible(true);
+  const runtimeCullStillWins = !cullingMesh.visible;
   culled.setTransform([0, 0, 1]);
   await cullingSystem.update(0.1);
+  const visibleAfterUserRestore = cullingMesh.visible;
   const aliveAfterResume = view(culled).aliveCount;
 
   const budgetEffect = defineEffect({
@@ -528,6 +536,13 @@ async function run(): Promise<void> {
       aliveBeforeCull === aliveWhileCulled &&
       timeBeforeCull === timeWhileCulled &&
       (aliveAfterResume ?? 0) > (aliveWhileCulled ?? 0),
+    drawVisibilityComposition:
+      visibleBeforeUserOverride &&
+      hiddenByUser &&
+      hiddenDuringRuntimeFade &&
+      hiddenAcrossRuntimeCull &&
+      runtimeCullStillWins &&
+      visibleAfterUserRestore,
     profilerDrawCulling:
       unmaterializedOrUnrendered.system.indirectDraws.value === 0 &&
       renderableProfile.system.indirectDraws.value === 1 &&
@@ -574,6 +589,14 @@ async function run(): Promise<void> {
       aliveWhileCulled,
       diagnostics: culled.scalability,
       fadeAtFive,
+      visibilityComposition: {
+        hiddenAcrossRuntimeCull,
+        hiddenByUser,
+        hiddenDuringRuntimeFade,
+        runtimeCullStillWins,
+        visibleAfterUserRestore,
+        visibleBeforeUserOverride,
+      },
       profile: {
         culled: culledProfile,
         renderable: renderableProfile,

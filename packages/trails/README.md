@@ -13,3 +13,8 @@ The renderer requires WebGPU storage buffers and indirect draw; WebGL2 reports
 emitter is alive, or call `dispose()` before replacing it. Ribbon draws participate in the official
 Three runtime's visibility, render-order, profiling, pooling, and kernel-release lifecycle; a draw
 must not be rendered after its effect instance is released.
+
+Use `draw.setUserVisible(false)` to hide a ribbon independently of runtime culling and
+`draw.setUserVisible(true)` to return to runtime visibility. The final rule is
+`runtimeVisible && userVisible`, with `userVisible` defaulting to `true`. Assigning
+`draw.mesh.visible` directly is not persistent because the Three runtime owns that field.

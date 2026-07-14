@@ -396,6 +396,13 @@ describe('three kernel adapter', () => {
     expect(lightDraw.group.visible).toBe(false);
     lightRuntime.setVisibility?.(lightKernels, true);
     expect(lightDraw.group.visible).toBe(true);
+    lightDraw.setUserVisible(false);
+    expect(lightDraw.group.visible).toBe(false);
+    lightRuntime.setVisibility?.(lightKernels, false);
+    lightRuntime.setVisibility?.(lightKernels, true);
+    expect(lightDraw.group.visible).toBe(false);
+    lightDraw.setUserVisible(true);
+    expect(lightDraw.group.visible).toBe(true);
     expectTypeOf<Parameters<typeof lightDraw.update>[1]>().toEqualTypeOf<
       EffectInstanceState | undefined
     >();
@@ -456,6 +463,7 @@ describe('three kernel adapter', () => {
     expect(decal.geometry.getIndirect()).toBeDefined();
     expect(decal.renderOrder).toBe(23);
     expect(decal.visible).toBe(false);
+    expect(decal.setUserVisible).toBeTypeOf('function');
     expect(decalRuntime.getRenderableIndirectDrawCount?.(decalKernels)).toBe(1);
     expect(decalIndirect.updateRanges).toEqual([
       { count: 1, start: decalKernels.drawIndirectOffsetBytes! / 4 },
@@ -510,6 +518,11 @@ describe('three kernel adapter', () => {
     expect(draw.mesh.material.opacityNode).not.toBeNull();
     expect(draw.mesh.renderOrder).toBe(17);
     expect(draw.mesh.visible).toBe(false);
+    draw.setUserVisible(false);
+    runtime.setVisibility?.(kernels, true);
+    expect(draw.mesh.visible).toBe(false);
+    draw.setUserVisible(true);
+    expect(draw.mesh.visible).toBe(true);
     expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(1);
     runtime.prepareKernelsForPooling?.(kernels);
     expect(released).toHaveLength(4);
@@ -1163,7 +1176,7 @@ describe('three kernel adapter', () => {
     expect(updated).toContain(untouchedNode.value);
   });
 
-  it('applies culling visibility both before and after draw materialization', () => {
+  it('composes user visibility with every runtime culling transition', () => {
     const program = compileEmitter(
       defineEmitter({
         capacity: 2,
@@ -1187,6 +1200,46 @@ describe('three kernel adapter', () => {
     expect(mesh.visible).toBe(false);
     runtime.setVisibility?.(kernels, true);
     expect(mesh.visible).toBe(true);
+    mesh.setUserVisible(false);
+    expect(mesh.visible).toBe(false);
+    runtime.setVisibility?.(kernels, false);
+    expect(mesh.visible).toBe(false);
+    runtime.setVisibility?.(kernels, true);
+    expect(mesh.visible).toBe(false);
+    mesh.setUserVisible(true);
+    expect(mesh.visible).toBe(true);
+  });
+
+  it('defaults legacy draw registrations without userVisible to visible', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const adapter = createThreeKernelAdapter();
+    const kernels = program.buildKernels(adapter);
+    const object = new THREE.Group();
+    Reflect.set(
+      kernels,
+      Symbol.for('@nachi/three/materialized-draw-registry'),
+      new Set([{ attributes: [], dispose: () => undefined, object }]),
+    );
+    const runtime = createThreeRuntimeRenderer(
+      {
+        async computeAsync() {},
+        async getArrayBufferAsync() {
+          return new ArrayBuffer(0);
+        },
+      } as unknown as THREE.WebGPURenderer,
+      adapter,
+    );
+
+    runtime.setVisibility?.(kernels, true);
+    expect(object.visible).toBe(true);
+    runtime.setVisibility?.(kernels, false);
+    expect(object.visible).toBe(false);
   });
 
   it('keeps the first materialize-to-render indirect record fully defined', () => {
@@ -1299,6 +1352,7 @@ describe('three kernel adapter', () => {
     expect(mesh.material.positionNode).not.toBeNull();
     expect(mesh.material.colorNode).not.toBeNull();
     expect(mesh.material.transparent).toBe(true);
+    expect(mesh.setUserVisible).toBeTypeOf('function');
   });
 
   it('maps mesh +Y to five directions using the transposed TSL rotate convention', () => {

@@ -23,6 +23,7 @@ import {
   VFXSystem as CoreVFXSystem,
   type TextureRef,
   type Vec3,
+  type VfxEffectInstance,
   type VfxEmitterRuntimeView,
 } from '@nachi/core';
 import { ring, slashArc } from '@nachi/mesh-fx';
@@ -53,6 +54,7 @@ import {
   materializeThreeSpriteDraw,
 } from '@nachi/three';
 import { createPerformanceMonitor } from './perf';
+import { createCompanionSocketPhase } from './companion-socket-phase';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './wuwa-slash.css';
@@ -747,21 +749,17 @@ async function run(): Promise<void> {
 
   interface TrailRuntime {
     draw?: ReturnType<typeof materializeThreeRibbonDraw>;
-    readonly instance: {
-      readonly diagnostics: ReadonlyArray<{ readonly code: string }>;
-      readonly state: string;
-      attachTo(source: ReturnType<typeof createThreeTransformSource>): void;
-      getEmitter(key: string): VfxEmitterRuntimeView | undefined;
-      release(): void;
-    };
+    readonly instance: VfxEffectInstance;
     readonly socket: THREE.Object3D;
   }
   let trailRuntimes: TrailRuntime[] = [];
   const spawnTrails = (): TrailRuntime[] => {
     const cyan = trailSystem.spawn(trailCyan, { seed: 0x7c1 });
     cyan.attachTo(createThreeTransformSource(socketA));
+    instance.bindCompanion(cyan);
     const gold = trailSystem.spawn(trailGold, { seed: 0x7c2 });
     gold.attachTo(createThreeTransformSource(socketB));
+    instance.bindCompanion(gold);
     return [
       { instance: cyan, socket: socketA },
       { instance: gold, socket: socketB },
@@ -778,6 +776,7 @@ async function run(): Promise<void> {
   const actions: Array<{ kind: string; localTime: number; target?: string }> = [];
   const markers: string[] = [];
   const playedEmitters = new Map<string, VfxEmitterRuntimeView>();
+  const socketPhase = createCompanionSocketPhase();
   let latestCycle = 0;
   instance.onAction(({ action, cycle, emitter, localTime }) => {
     const target = 'target' in action ? action.target : undefined;
@@ -786,6 +785,7 @@ async function run(): Promise<void> {
     if (action.kind === 'play' && target !== undefined && emitter !== undefined) {
       playedEmitters.set(target, emitter);
     }
+    if (action.kind === 'hit-stop') socketPhase.beginHitStop(localTime);
   });
   for (const name of ['charge', 'impact', 'burst']) {
     instance.onMarker(name, () => markers.push(name));
@@ -850,12 +850,17 @@ async function run(): Promise<void> {
 
   const step = async (delta: number) => {
     const local = localNow();
-    socketA.position.set(...crescentA(sweepProgress(local, SLASH_A)));
-    socketB.position.set(...crescentB(sweepProgress(local, SLASH_B)));
+    const socketLocal = socketPhase.driveLocalTime(local);
+    socketA.position.set(...crescentA(sweepProgress(socketLocal, SLASH_A)));
+    socketB.position.set(...crescentB(sweepProgress(socketLocal, SLASH_B)));
     socketA.updateMatrixWorld(true);
     socketB.updateMatrixWorld(true);
-    await system.update(delta);
+    // Advance companions first so a timeline action at this frame's boundary observes both clocks
+    // at the same local instant before bindCompanion applies its hit-stop replacement.
     await trailSystem.update(delta);
+    socketPhase.commitConsumedLocalTime(socketLocal);
+    await system.update(delta);
+    socketPhase.releaseAfterParentAdvance(localNow());
     materializeNewDraws();
     for (const trail of trailRuntimes) {
       if (trail.draw) continue;
@@ -967,6 +972,7 @@ async function runHeadless(
     draw?: ReturnType<typeof materializeThreeRibbonDraw>;
     readonly instance: {
       readonly diagnostics: ReadonlyArray<{ readonly code: string }>;
+      readonly localTime: number;
       readonly state: string;
       getEmitter(key: string): VfxEmitterRuntimeView | undefined;
     };
@@ -990,6 +996,8 @@ async function runHeadless(
   const captures: Uint8Array[] = [];
   const captureStates: Array<Record<string, unknown>> = [];
   let captureIndex = 0;
+  let companionClockError = 0;
+  let companionClockSamples = 0;
   let trailSegments = { maximumGap: Number.POSITIVE_INFINITY, segmentCount: 0 };
   await step(0);
   // The very first readback from a fresh render target returns empty pixels;
@@ -999,6 +1007,16 @@ async function runHeadless(
   await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT);
   for (let frame = 0; frame < 140; frame += 1) {
     await step(STEP);
+    if (instance.localTime >= 0.49 && instance.localTime <= 0.505) {
+      for (const trail of trails()) {
+        if (trail.instance.state !== 'active') continue;
+        companionClockSamples += 1;
+        companionClockError = Math.max(
+          companionClockError,
+          Math.abs(trail.instance.localTime - instance.localTime),
+        );
+      }
+    }
     renderer.setRenderTarget(target);
     post.render();
     // A tiny readback every frame keeps the async readback path drained; a
@@ -1085,6 +1103,7 @@ async function runHeadless(
   );
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
+    companionClockSynchronized: companionClockSamples >= 4 && companionClockError < 1e-8,
     consoleClean: consoleMessages.length === 0,
     impactVisible: impact.foregroundRatio > 0.02 && impact.saturatedRatio < 0.3,
     stateHealthy: instance.state !== 'error',
@@ -1102,6 +1121,7 @@ async function runHeadless(
     evidence: {
       captureStates,
       captureTimes: CAPTURE_TIMES,
+      companionClock: { maximumError: companionClockError, samples: companionClockSamples },
       finalLocalTime: instance.localTime,
       finalState: instance.state,
       panelStats,

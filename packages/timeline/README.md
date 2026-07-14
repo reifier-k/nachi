@@ -48,3 +48,37 @@ integrations can capture the exact `VfxEmitterRuntimeView` from `event.emitter` 
 `TimelineEffectInstance.onAction()`; the field is undefined for mesh-fx and non-play actions.
 A captured view is invalid after its child emitter is released; pooled storage may then be reused,
 so retaining and using the view can alias a later emitter.
+
+Timeline-external core effects such as socket-following trails can subscribe to the same controls:
+
+```ts
+const timelineInstance = timelineSystem.spawn(skill);
+const trailInstance = trailSystem.spawn(trail);
+timelineInstance.bindCompanion(trailInstance);
+
+// Advance a separate companion system first with the same world delta. A hit-stop action reached
+// by the following timeline update then starts at the same frame boundary on both instances.
+await trailSystem.update(delta);
+await timelineSystem.update(delta);
+```
+
+`bindCompanion()` immediately synchronizes the effective timeline time scale and any remaining hit
+stop, then forwards later `setTimeScale()` and hit-stop replacements synchronously. Companion and
+timeline systems must receive the same world-step sequence. Advancing the companion first prevents
+a full-frame-late stop, but exact local-time equality additionally requires the hit-stop action to
+align with a companion update boundary. A non-aligned action can differ by less than one companion
+update interval because only the timeline sub-segments its update.
+
+For a page-driven socket trail, latch the socket pose from the last completed companion update when
+the hit-stop action fires. Keep driving that pose while parent local time is stopped, then release
+the latch only after parent local time advances. The next non-stopped companion update consumes the
+whole catch-up transform, allowing per-distance interpolation to fill the path instead of H1-7
+correctly discarding movement observed during a zero-local-delta step. See
+[RFC 005 §3.1](../../docs/rfc/005-effect-local-clock.md#31-bindcompanion-phase-limit-and-socket-driving).
+
+Binding overwrites the companion's current time scale and remaining hit stop. The binding does not
+make those controls exclusive: later direct companion writes and timeline forwards are
+last-writer-wins. `unbindCompanion()` stops forwarding without resetting the last values. Bindings
+are weak and released companions are removed automatically. Error/released companions receive no
+forwarded operation; invalid binds and bound companions entering error add
+`NACHI_TIMELINE_COMPANION_UNAVAILABLE` to timeline diagnostics.

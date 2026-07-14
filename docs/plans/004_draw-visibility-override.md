@@ -2,7 +2,7 @@
 
 - 重大度: 中(デバッグ体験 / 演出制御)
 - 対象: `@nachi/three` / `@nachi/trails/three`(draw registry)、`@nachi/core`(可視性管理)
-- 状態: 提案
+- 状態: H1-8で実装済み(2026-07-14)
 
 ## 症状
 
@@ -41,3 +41,12 @@ wuwa-slash 実測: 要素の視覚的切り分け(「この光はリボンか火
 - 追加 API のみで後方互換。リスクは低い。
 - 「Three の `visible` を直接触っても効かない」非直感性自体は残るため、materialize 系 API の
   ドキュメントに合成則を明記する。
+
+## H1-8 実装
+
+- draw登録は `userVisible` を既定 `true` で保持し、Threeオブジェクトへ常に
+  `runtimeVisible && userVisible` を反映する。
+- sprite、mesh、decal、ribbonに加え、light poolも `setUserVisible()` を公開する。lightの `group.visible`
+  直接操作もruntime遷移で上書きされるため、対象外にはしなかった。個々のPointLightはshader variantを
+  安定させる既存契約どおりvisibleを維持し、合成可視性はpool groupへ適用する。
+- `m11-scale` がuser非表示、runtime fade/cull、user復帰、runtime復帰の全遷移を弁別する。

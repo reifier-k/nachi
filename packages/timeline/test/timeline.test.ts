@@ -67,6 +67,7 @@ function fakeChildInstance(
   const applyHitStop = vi.fn((durationMs: number, timeScale = 0) =>
     clock.applyHitStop(durationMs, timeScale),
   );
+  const setTimeScale = vi.fn((value: number) => clock.setTimeScale(value));
   const child = {
     applyHitStop,
     definition: { elements: {}, kind: 'effect' },
@@ -87,7 +88,7 @@ function fakeChildInstance(
       state = 'released';
     },
     setParameter: () => undefined,
-    setTimeScale: (value: number) => clock.setTimeScale(value),
+    setTimeScale,
     setTransform: () => undefined,
     stop: () => {
       state = 'stopped';
@@ -97,6 +98,7 @@ function fakeChildInstance(
     advance: (delta: number) => clock.advance(delta),
     applyHitStop,
     child,
+    setTimeScale,
     setState: (value: EffectInstanceState) => {
       state = value;
     },
@@ -703,6 +705,142 @@ describe('@nachi/timeline runtime', () => {
       updateSpy.mockRestore();
       spawnSpy.mockRestore();
     }
+  });
+
+  it('keeps a bound companion on the same hit-stop and resume frame boundaries', async () => {
+    const effect = defineEffect({
+      elements: {},
+      timeline: timeline<never>([at(0.05, hitStop(70))], { duration: 0.2 }),
+    });
+    const system = new VFXSystem({});
+    const instance = system.spawn(effect);
+    const companion = fakeChildInstance();
+    instance.bindCompanion(companion.child);
+
+    const advanceTogether = async (delta: number) => {
+      companion.advance(delta);
+      await system.update(delta);
+      expect(companion.child.localTime).toBeCloseTo(instance.localTime, 12);
+    };
+
+    await advanceTogether(0.05);
+    expect(companion.applyHitStop).toHaveBeenCalledWith(70, 0);
+    await advanceTogether(0.04);
+    expect(instance.localTime).toBeCloseTo(0.05, 12);
+    await advanceTogether(0.03);
+    expect(instance.localTime).toBeCloseTo(0.05, 12);
+    await advanceTogether(0.01);
+    expect(instance.localTime).toBeCloseTo(0.06, 12);
+
+    instance.setTimeScale(0.5);
+    expect(companion.child.timeScale).toBe(0.5);
+    expect(companion.setTimeScale).toHaveBeenLastCalledWith(0.5);
+  });
+
+  it('synchronizes residual hit stop when a companion binds late', async () => {
+    const effect = defineEffect({
+      elements: {},
+      timeline: timeline<never>([at(0, hitStop(70, 0.25))], { duration: 0.2 }),
+    });
+    const system = new VFXSystem({});
+    const instance = system.spawn(effect);
+    await system.update(0.02);
+    const companion = fakeChildInstance();
+
+    instance.bindCompanion(companion.child);
+
+    expect(companion.setTimeScale).toHaveBeenCalledWith(1);
+    expect(companion.applyHitStop).toHaveBeenCalledTimes(1);
+    expect(companion.applyHitStop.mock.calls[0]?.[0]).toBeCloseTo(50, 10);
+    expect(companion.applyHitStop.mock.calls[0]?.[1]).toBe(0.25);
+  });
+
+  it('automatically drops released companions and supports explicit unbinding', () => {
+    const system = new VFXSystem({});
+    const instance = system.spawn(defineEffect({ elements: {} }));
+    const released = fakeChildInstance();
+    instance.bindCompanion(released.child);
+    const releasedScaleCalls = released.setTimeScale.mock.calls.length;
+    released.child.release();
+
+    expect(() => instance.applyHitStop(20)).not.toThrow();
+    instance.setTimeScale(2);
+    expect(released.applyHitStop).not.toHaveBeenCalled();
+    expect(released.setTimeScale).toHaveBeenCalledTimes(releasedScaleCalls);
+
+    const unavailable = fakeChildInstance();
+    unavailable.child.release();
+    instance.bindCompanion(unavailable.child);
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_TIMELINE_COMPANION_UNAVAILABLE',
+        severity: 'warning',
+      }),
+    );
+
+    const unbound = fakeChildInstance();
+    instance.bindCompanion(unbound.child);
+    const unboundHitStopCalls = unbound.applyHitStop.mock.calls.length;
+    const unboundScaleCalls = unbound.setTimeScale.mock.calls.length;
+    instance.unbindCompanion(unbound.child);
+    instance.applyHitStop(30, 0.5);
+    instance.setTimeScale(3);
+    expect(unbound.applyHitStop).toHaveBeenCalledTimes(unboundHitStopCalls);
+    expect(unbound.setTimeScale).toHaveBeenCalledTimes(unboundScaleCalls);
+  });
+
+  it('uses last-writer-wins time scale while a companion remains bound', () => {
+    const system = new VFXSystem({});
+    const instance = system.spawn(defineEffect({ elements: {} }));
+    const companion = fakeChildInstance();
+    instance.bindCompanion(companion.child);
+
+    companion.child.setTimeScale(0.25);
+    expect(companion.child.timeScale).toBe(0.25);
+    instance.setTimeScale(2);
+    expect(companion.child.timeScale).toBe(2);
+    companion.child.setTimeScale(3);
+    expect(companion.child.timeScale).toBe(3);
+
+    instance.unbindCompanion(companion.child);
+    instance.setTimeScale(4);
+    expect(companion.child.timeScale).toBe(3);
+  });
+
+  it('gates every companion transfer path for error-state instances', () => {
+    const system = new VFXSystem({});
+    const instance = system.spawn(defineEffect({ elements: {} }));
+    const alreadyErrored = fakeChildInstance('error');
+    instance.bindCompanion(alreadyErrored.child);
+    instance.applyHitStop(10);
+    instance.setTimeScale(2);
+    expect(alreadyErrored.applyHitStop).not.toHaveBeenCalled();
+    expect(alreadyErrored.setTimeScale).not.toHaveBeenCalled();
+    expect(instance.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_TIMELINE_COMPANION_UNAVAILABLE',
+        message: expect.stringContaining('error'),
+        severity: 'warning',
+      }),
+    );
+
+    const errorsDuringInitialSync = fakeChildInstance();
+    errorsDuringInitialSync.setTimeScale.mockImplementationOnce(() =>
+      errorsDuringInitialSync.setState('error'),
+    );
+    instance.bindCompanion(errorsDuringInitialSync.child);
+    expect(errorsDuringInitialSync.setTimeScale).toHaveBeenCalledTimes(1);
+    expect(errorsDuringInitialSync.applyHitStop).not.toHaveBeenCalled();
+
+    const becomesErrored = fakeChildInstance();
+    instance.bindCompanion(becomesErrored.child);
+    const hitStopCallsBeforeError = becomesErrored.applyHitStop.mock.calls.length;
+    const scaleCallsBeforeError = becomesErrored.setTimeScale.mock.calls.length;
+    becomesErrored.setState('error');
+    instance.applyHitStop(10);
+    instance.setTimeScale(3);
+    expect(becomesErrored.applyHitStop).toHaveBeenCalledTimes(hitStopCallsBeforeError);
+    expect(becomesErrored.setTimeScale).toHaveBeenCalledTimes(scaleCallsBeforeError);
   });
 
   it('publishes the emitter view created by a play action', async () => {

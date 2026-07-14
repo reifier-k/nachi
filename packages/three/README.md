@@ -73,6 +73,15 @@ helpers for matching core modules. Light materialization returns a bounded Point
 `update()` method is driven by the host. These APIs expose ordinary Three objects so scene
 ownership, render targets, cameras, and disposal remain explicit application responsibilities.
 
+Sprite, mesh, decal, and light materialization results expose `setUserVisible(visible)`. Final draw
+visibility is `runtimeVisible && userVisible`, where runtime visibility continues to own culling,
+completion, stop, and pooling transitions. The user component defaults to `true`, so existing hosts
+do not change. Do not assign the returned Three object's `.visible` directly: a later runtime
+visibility update overwrites that field. Use `setUserVisible(false)` for a persistent user hide and
+`setUserVisible(true)` to return control to the current runtime state. Light draws apply the same
+contract to their returned `group` while keeping every pooled child PointLight shader-stably
+visible.
+
 ## Draw and pooled-kernel lifetime
 
 Materialized draws are registered against their `BuiltEmitterKernels` so culling, render order, and

@@ -411,7 +411,27 @@ type ThreeDrawRegistration = {
   readonly attributes: readonly THREE.BufferAttribute[];
   readonly dispose: () => void;
   readonly object: THREE.Object3D;
+  userVisible?: boolean;
 };
+
+/** User-owned visibility component composed with runtime culling and lifecycle visibility. */
+export interface ThreeDrawVisibilityControl {
+  setUserVisible(visible: boolean): void;
+}
+
+function runtimeVisibility(kernels: BuiltEmitterKernels): boolean {
+  const state = kernels as BuiltEmitterKernels & {
+    [THREE_VISIBILITY]?: boolean;
+  };
+  return state[THREE_VISIBILITY] ?? true;
+}
+
+function applyDrawVisibility(
+  kernels: BuiltEmitterKernels,
+  registration: ThreeDrawRegistration,
+): void {
+  registration.object.visible = runtimeVisibility(kernels) && (registration.userVisible ?? true);
+}
 
 type ThreeAttributeManager = {
   delete(attribute: THREE.BufferAttribute): unknown;
@@ -450,19 +470,26 @@ function registerDrawObject(
   object: THREE.Object3D,
   attributes: readonly THREE.BufferAttribute[] = [],
   dispose: () => void = () => disposeObjectResources(object),
-): void {
+): ThreeDrawVisibilityControl {
   const instanceMatrix = object instanceof THREE.InstancedMesh ? [object.instanceMatrix] : [];
-  drawRegistry(kernels, true)!.add({
+  const registration: ThreeDrawRegistration = {
     attributes: [...instanceMatrix, ...attributes],
     dispose,
     object,
-  });
+    userVisible: true,
+  };
+  drawRegistry(kernels, true)!.add(registration);
   const state = kernels as BuiltEmitterKernels & {
     [THREE_RENDER_ORDER]?: number;
-    [THREE_VISIBILITY]?: boolean;
   };
   object.renderOrder = state[THREE_RENDER_ORDER] ?? object.renderOrder;
-  object.visible = state[THREE_VISIBILITY] ?? true;
+  applyDrawVisibility(kernels, registration);
+  return {
+    setUserVisible(visible: boolean): void {
+      registration.userVisible = visible;
+      applyDrawVisibility(kernels, registration);
+    },
+  };
 }
 
 function rendererAttributeManager(
@@ -1010,7 +1037,9 @@ export function createThreeRuntimeRenderer(
     setVisibility: (kernels: BuiltEmitterKernels, visible: boolean) => {
       (kernels as BuiltEmitterKernels & { [THREE_VISIBILITY]?: boolean })[THREE_VISIBILITY] =
         visible;
-      for (const { object } of drawRegistry(kernels) ?? []) object.visible = visible;
+      for (const registration of drawRegistry(kernels) ?? []) {
+        applyDrawVisibility(kernels, registration);
+      }
     },
     ...(setInstanceCount === undefined ? {} : { setInstanceCount }),
     submitCompute: (kernel: Parameters<VfxRuntimeRenderer['submitCompute']>[0]) => {
@@ -1188,7 +1217,8 @@ export function materializeThreeSpriteDraw(
 ): THREE.InstancedMesh<
   THREE.BufferGeometry,
   THREE.SpriteNodeMaterial | ThreeLitSpriteNodeMaterial
-> {
+> &
+  ThreeDrawVisibilityControl {
   const draw = program.draws[drawIndex];
   if (!draw || draw.kind !== 'billboard') {
     throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
@@ -1384,8 +1414,7 @@ export function materializeThreeSpriteDraw(
   }
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
-  registerDrawObject(kernels, mesh);
-  return mesh;
+  return Object.assign(mesh, registerDrawObject(kernels, mesh));
 }
 
 function indexedGeometry(source: THREE.BufferGeometry): THREE.BufferGeometry {
@@ -1433,7 +1462,8 @@ export function materializeThreeMeshDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeMeshMaterializationOptions,
-): THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial> {
+): THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial> &
+  ThreeDrawVisibilityControl {
   const draw = program.draws[drawIndex];
   if (!draw || draw.kind !== 'mesh') {
     throw new Error(`Compiled mesh draw ${drawIndex} is missing.`);
@@ -1507,8 +1537,7 @@ export function materializeThreeMeshDraw(
   }
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
-  registerDrawObject(kernels, mesh);
-  return mesh;
+  return Object.assign(mesh, registerDrawObject(kernels, mesh));
 }
 
 type MutableNode = KernelNode & {
@@ -1536,7 +1565,7 @@ export interface ThreeLightSelectionStats {
   }[];
 }
 
-export interface ThreeLightPoolDraw {
+export interface ThreeLightPoolDraw extends ThreeDrawVisibilityControl {
   dispose(renderer?: THREE.WebGPURenderer): void;
   readonly group: THREE.Group;
   readonly lights: readonly THREE.PointLight[];
@@ -1675,7 +1704,7 @@ export function materializeThreeLightDraw(
     for (const light of lights) light.intensity = 0;
     group.removeFromParent();
   };
-  registerDrawObject(
+  const visibility = registerDrawObject(
     kernels,
     group,
     selectionBuffers.map(({ value }) => value as THREE.StorageBufferAttribute),
@@ -1734,6 +1763,7 @@ export function materializeThreeLightDraw(
     lights,
     selectionBuffers,
     selectionKernels,
+    setUserVisible: visibility.setUserVisible,
     get stats() {
       return stats;
     },
@@ -1769,7 +1799,8 @@ export function materializeThreeDecalDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeDecalMaterializationOptions,
-): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicNodeMaterial> {
+): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicNodeMaterial> &
+  ThreeDrawVisibilityControl {
   const draw = program.draws[drawIndex];
   if (!draw || draw.kind !== 'decal')
     throw new Error(`Compiled decal draw ${drawIndex} is missing.`);
@@ -1866,6 +1897,5 @@ export function materializeThreeDecalDraw(
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
   mesh.renderOrder = options.renderOrder ?? 10;
-  registerDrawObject(kernels, mesh);
-  return mesh;
+  return Object.assign(mesh, registerDrawObject(kernels, mesh));
 }

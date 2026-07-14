@@ -325,6 +325,8 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   readonly #activeEmitters = new Map<string, VfxEffectInstance>();
   readonly #activeShakes: ActiveShake[] = [];
   readonly #cameraShakeTarget: CameraShakeTarget | undefined;
+  readonly #companionWarningKeys = new Set<string>();
+  readonly #companions = new Set<WeakRef<VfxEffectInstance>>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #meshRuntimes = new Map<string, MeshRuntime>();
   readonly #retiredEmitterStates = new Map<string, TimelineElementState>();
@@ -490,6 +492,36 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     return () => listeners?.delete(callback);
   }
 
+  /** Shares this timeline's effective time scale and hit-stop replacements with a core instance. */
+  bindCompanion(instance: VfxEffectInstance): void {
+    this.#assertNotReleased();
+    this.#visitCompanions(() => undefined);
+    if (instance.state === 'released' || instance.state === 'error') {
+      this.#warnUnavailableCompanion(instance);
+      return;
+    }
+    for (const reference of this.#companions) {
+      if (reference.deref() === instance) return;
+    }
+    const reference = new WeakRef(instance);
+    this.#companions.add(reference);
+    if (!this.#synchronizeCompanion(instance)) {
+      this.#companions.delete(reference);
+      this.#warnUnavailableCompanion(instance);
+    }
+  }
+
+  /** Stops sharing timeline clock controls with a previously bound core instance. */
+  unbindCompanion(instance: VfxEffectInstance): void {
+    this.#assertNotReleased();
+    for (const reference of this.#companions) {
+      const companion = reference.deref();
+      if (companion === undefined || companion === instance || companion.state === 'released') {
+        this.#companions.delete(reference);
+      }
+    }
+  }
+
   applyHitStop(durationMs: number, timeScale = 0): void {
     this.#assertNotReleased();
     if (
@@ -504,6 +536,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.#hitStopScale = timeScale;
     for (const emitter of this.#activeEmitters.values())
       emitter.applyHitStop(durationMs, timeScale);
+    this.#visitCompanions((companion) => companion.applyHitStop(durationMs, timeScale));
   }
 
   attachTo(source: EffectTransformSource): void {
@@ -547,6 +580,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     for (const emitter of this.#activeEmitters.values()) {
       emitter.setTimeScale(this.#effectiveTimeScale());
     }
+    this.#visitCompanions((companion) => companion.setTimeScale(this.#effectiveTimeScale()));
   }
 
   setTransform(position: PositionInput, rotation?: RotationInput): void {
@@ -569,6 +603,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.#stopAllElements();
     this.#disposeMeshes();
     this.#actionListeners.clear();
+    this.#companions.clear();
     this.#eventListeners.clear();
     this.#released = true;
     this.#state = 'released';
@@ -590,6 +625,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       );
     }
     this.#disposeMeshes();
+    this.#companions.clear();
   }
 
   #disposeMeshes(): void {
@@ -627,6 +663,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
 
   /** @internal Defers explicit timeline time-zero actions until callbacks can be registered. */
   beginUpdate(): void {
+    this.#visitCompanions(() => undefined);
     if (this.#state !== 'active' || this.#started) return;
     this.#started = true;
     this.#processDueEntries();
@@ -668,6 +705,56 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
 
   #effectiveTimeScale(): number {
     return this.#baseTimeScale * (this.#timeline.speed ?? 1);
+  }
+
+  #synchronizeCompanion(companion: VfxEffectInstance): boolean {
+    if (companion.state === 'released' || companion.state === 'error') return false;
+    companion.setTimeScale(this.#effectiveTimeScale());
+    const stateAfterTimeScale = companion.state as EffectInstanceState;
+    if (stateAfterTimeScale === 'released' || stateAfterTimeScale === 'error') return false;
+    if (this.#hitStopRemaining > EPSILON) {
+      companion.applyHitStop(this.#hitStopRemaining * 1000, this.#hitStopScale);
+    }
+    const finalState = companion.state as EffectInstanceState;
+    return finalState !== 'released' && finalState !== 'error';
+  }
+
+  #visitCompanions(operation: (companion: VfxEffectInstance) => void): void {
+    for (const reference of this.#companions) {
+      const companion = reference.deref();
+      if (companion === undefined || companion.state === 'released') {
+        this.#companions.delete(reference);
+        continue;
+      }
+      // Wrapper integrations must never forward operations into terminal error instances.
+      if (companion.state === 'error') {
+        this.#companions.delete(reference);
+        this.#warnUnavailableCompanion(companion);
+        continue;
+      }
+      operation(companion);
+      const stateAfterOperation = companion.state as EffectInstanceState;
+      if (stateAfterOperation === 'released' || stateAfterOperation === 'error') {
+        this.#companions.delete(reference);
+        if (stateAfterOperation === 'error') this.#warnUnavailableCompanion(companion);
+      }
+    }
+  }
+
+  #warnUnavailableCompanion(companion: VfxEffectInstance): void {
+    const state = companion.state;
+    if (state !== 'released' && state !== 'error') return;
+    const key = `${companion.id}:${state}`;
+    if (this.#companionWarningKeys.has(key)) return;
+    this.#companionWarningKeys.add(key);
+    this.diagnostics.push(
+      runtimeDiagnostic(
+        'NACHI_TIMELINE_COMPANION_UNAVAILABLE',
+        `Companion "${companion.id}" is ${state}; timeline clock controls were not forwarded.`,
+        `companions.${companion.id}`,
+        'warning',
+      ),
+    );
   }
 
   #currentLocalRate(): number {

@@ -25,7 +25,7 @@ import {
   type TextureRef,
   type TslExpression,
   type Vec3,
-  type VfxEmitterRuntimeView,
+  type VfxEffectInstance,
 } from '@nachi/core';
 import { cylinder, ring, uvFlow } from '@nachi/mesh-fx';
 import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi/post';
@@ -1045,12 +1045,7 @@ function cameraState(camera: THREE.Camera, viewport: readonly [number, number]) 
   };
 }
 
-interface CoreInstanceLike {
-  readonly diagnostics: ReadonlyArray<{ readonly code: string }>;
-  readonly state: string;
-  getEmitter(key: string): VfxEmitterRuntimeView | undefined;
-  release(): void;
-}
+type CoreInstanceLike = VfxEffectInstance;
 
 interface CoreFxRuntime {
   readonly instance: CoreInstanceLike;
@@ -1166,6 +1161,7 @@ async function run(): Promise<void> {
     spriteKeys: readonly string[],
     lightKeys: readonly string[],
   ) => {
+    instance.bindCompanion(fxInstance);
     coreFx.push({
       instance: fxInstance,
       lightKeys,
@@ -1299,8 +1295,8 @@ async function run(): Promise<void> {
         cutoffTriggered = true;
         spawnAfterglow();
       }
-      await system.update(delta / SUBSTEPS);
       await coreSystem.update(delta / SUBSTEPS);
+      await system.update(delta / SUBSTEPS);
     }
     materializeCoreDraws();
     for (const fx of coreFx) {
