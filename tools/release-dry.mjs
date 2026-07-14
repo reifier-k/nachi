@@ -54,31 +54,63 @@ async function verifyReleasePlan(packages) {
     await run('pnpm', ['changeset', 'status', '--output', output]);
     const status = JSON.parse(await readFile(path.join(root, output), 'utf8'));
     const expectedNames = packages.map(({ manifest }) => manifest.name).sort();
-    const releases = status.releases
-      .filter(({ name }) => expectedNames.includes(name))
-      .sort((left, right) => left.name.localeCompare(right.name));
-    const releaseNames = releases.map(({ name }) => name);
-    if (JSON.stringify(releaseNames) !== JSON.stringify(expectedNames)) {
+    const unknownReleases = status.releases.filter(({ name }) => !expectedNames.includes(name));
+    if (unknownReleases.length > 0) {
       throw new Error(
-        `Changeset release plan package set differs from public packages: expected ${expectedNames.join(', ')}; received ${releaseNames.join(', ')}.`,
+        `Changeset release plan contains non-public packages: ${unknownReleases
+          .map(({ name }) => name)
+          .join(', ')}.`,
       );
     }
-    const invalid = releases.filter(
-      ({ newVersion, oldVersion, type }) =>
-        type !== 'minor' || oldVersion !== '0.0.0' || newVersion !== '0.1.0',
+    const releases = status.releases.sort((left, right) => left.name.localeCompare(right.name));
+    const initialPackages = packages.filter(({ manifest }) => manifest.version === '0.0.0');
+    if (initialPackages.length > 0) {
+      if (initialPackages.length !== packages.length) {
+        throw new Error('Public packages cannot mix unreleased 0.0.0 and versioned manifests.');
+      }
+      const releaseNames = releases.map(({ name }) => name);
+      if (JSON.stringify(releaseNames) !== JSON.stringify(expectedNames)) {
+        throw new Error(
+          `Initial release plan package set differs from public packages: expected ${expectedNames.join(', ')}; received ${releaseNames.join(', ')}.`,
+        );
+      }
+      const invalid = releases.filter(
+        ({ newVersion, oldVersion, type }) =>
+          type !== 'minor' || oldVersion !== '0.0.0' || newVersion !== '0.1.0',
+      );
+      if (invalid.length > 0) {
+        throw new Error(
+          `Every public package must have a minor 0.0.0 -> 0.1.0 release plan: ${invalid
+            .map(
+              ({ name, newVersion, oldVersion, type }) =>
+                `${name} (${type} ${oldVersion} -> ${newVersion})`,
+            )
+            .join(', ')}.`,
+        );
+      }
+      console.log(
+        `Initial Changeset release plan verified: ${releases.length} public packages, all minor 0.0.0 -> 0.1.0.`,
+      );
+      return;
+    }
+
+    const currentVersions = new Map(
+      packages.map(({ manifest }) => [manifest.name, manifest.version]),
     );
-    if (invalid.length > 0) {
+    const staleReleases = releases.filter(
+      ({ name, oldVersion }) => currentVersions.get(name) !== oldVersion,
+    );
+    if (staleReleases.length > 0) {
       throw new Error(
-        `Every public package must have a minor 0.0.0 -> 0.1.0 release plan: ${invalid
-          .map(
-            ({ name, newVersion, oldVersion, type }) =>
-              `${name} (${type} ${oldVersion} -> ${newVersion})`,
-          )
+        `Changeset release plan does not start at current package versions: ${staleReleases
+          .map(({ name, oldVersion }) => `${name} (${oldVersion})`)
           .join(', ')}.`,
       );
     }
     console.log(
-      `Changeset release plan verified: ${releases.length} public packages, all minor 0.0.0 -> 0.1.0.`,
+      releases.length === 0
+        ? `Prepared release state verified: ${packages.length} versioned public packages and no pending Changesets.`
+        : `Changeset release plan verified: ${releases.length} pending public package releases.`,
     );
   } finally {
     await rm(path.join(root, output), { force: true });
