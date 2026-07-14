@@ -45,10 +45,16 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
-import { allPanelsHaveForeground, createDrainedReadback } from './readback';
-import { createPlaygroundRenderer } from './webgpu-renderer';
-import './showcase-heal.css';
+import {
+  allPanelsHaveForeground,
+  createDrainedReadback,
+  createPerformanceMonitor,
+  createPlaygroundRenderer,
+  createTimestampQueryPoolDrain,
+} from './harness';
+import { attachShowcaseTuning } from './tuning';
+import './heal.css';
+import './embed.css';
 
 const WIDTH = 640;
 const HEIGHT = 360;
@@ -67,6 +73,7 @@ const CAPTURE_LABELS = [
 ] as const;
 const root = document.documentElement;
 const headless = new URLSearchParams(location.search).get('headless') === '1';
+if (new URLSearchParams(location.search).get('embed') === '1') root.dataset.embed = '1';
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -90,7 +97,7 @@ type BackendLike = {
 
 function required<T extends Element>(selector: string): T {
   const value = document.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing showcase-heal element: ${selector}`);
+  if (!value) throw new Error(`Missing heal element: ${selector}`);
   return value;
 }
 
@@ -194,7 +201,7 @@ function canvasTexture(
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('showcase-heal requires a 2D canvas context.');
+  if (!context) throw new Error('heal requires a 2D canvas context.');
   context.fillStyle = '#000';
   context.fillRect(0, 0, width, height);
   draw(context);
@@ -237,7 +244,13 @@ function leafStripTexture(): THREE.CanvasTexture {
       } else if (kind === 1) {
         // Vine curl: spiral of shrinking half-arcs.
         context.arc(cx, cy, scale * 0.9, Math.PI * 0.2, Math.PI * 1.25);
-        context.arc(cx - scale * 0.28, cy - scale * 0.18, scale * 0.45, Math.PI * 1.25, Math.PI * 2.2);
+        context.arc(
+          cx - scale * 0.28,
+          cy - scale * 0.18,
+          scale * 0.45,
+          Math.PI * 1.25,
+          Math.PI * 2.2,
+        );
       } else if (kind === 2) {
         // Petal fan: three petals sharing a base point.
         for (let petal = -1; petal <= 1; petal += 1) {
@@ -245,7 +258,12 @@ function leafStripTexture(): THREE.CanvasTexture {
           const tipX = cx + Math.cos(angle) * scale * 1.25;
           const tipY = cy + scale * 0.55 + Math.sin(angle) * scale * 1.25;
           context.moveTo(cx, cy + scale * 0.55);
-          context.quadraticCurveTo(cx + Math.cos(angle - 0.45) * scale, cy + scale * 0.55 + Math.sin(angle - 0.45) * scale, tipX, tipY);
+          context.quadraticCurveTo(
+            cx + Math.cos(angle - 0.45) * scale,
+            cy + scale * 0.55 + Math.sin(angle - 0.45) * scale,
+            tipX,
+            tipY,
+          );
         }
       } else {
         // Bud: diamond over a short stem.
@@ -347,12 +365,12 @@ function glowSpriteTexture(): THREE.DataTexture {
 const SPARKLE_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-heal/sparkle',
+  uri: 'procedural://heal/sparkle',
 };
 const GLOW_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-heal/glow',
+  uri: 'procedural://heal/glow',
 };
 
 interface EffectTextures {
@@ -366,10 +384,7 @@ interface EffectTextures {
 function createSanctuaryBloom(textures: EffectTextures, loop: boolean) {
   const motes = defineEmitter({
     capacity: 80,
-    init: [
-      positionSphere({ radius: 1.7, surfaceOnly: true }),
-      lifetime(range(0.36, 0.52)),
-    ],
+    init: [positionSphere({ radius: 1.7, surfaceOnly: true }), lifetime(range(0.36, 0.52))],
     render: billboard({
       alignment: { factor: 0.85, mode: 'velocity-stretch' },
       blending: 'additive',
@@ -764,9 +779,7 @@ async function run(): Promise<void> {
       }
     }
     if (latestShake) {
-      camera.position
-        .copy(cameraBasePosition)
-        .add(new THREE.Vector3(...latestShake.translation));
+      camera.position.copy(cameraBasePosition).add(new THREE.Vector3(...latestShake.translation));
       camera.rotation.set(
         cameraBaseRotation.x + latestShake.rotation[0],
         cameraBaseRotation.y + latestShake.rotation[1],
@@ -790,7 +803,7 @@ async function run(): Promise<void> {
       const monitor = createPerformanceMonitor(renderer, {
         gpuScopes: ['compute', 'render'],
         mode: 'headless',
-        page: 'showcase-heal',
+        page: 'heal',
       });
       await monitor.captureGpuSamples(async () => {
         await step(STEP);
@@ -818,6 +831,14 @@ async function run(): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+  attachShowcaseTuning({
+    camera,
+    cameraBasePosition,
+    cameraBaseRotation,
+    cameraTarget: new THREE.Vector3(0, 0.42, 0),
+    instance,
+    renderer,
+  });
   required<HTMLElement>('#status-value').textContent = 'looping · watch the bloom';
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
@@ -895,7 +916,7 @@ async function runHeadless(
 
   const canvas = required<HTMLCanvasElement>('#heal-visual');
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('showcase-heal requires the contact sheet canvas.');
+  if (!context) throw new Error('heal requires the contact sheet canvas.');
   const sheet = context.createImageData(WIDTH * 3, HEIGHT * 2);
   const panelStats: Array<{ foregroundRatio: number; saturatedRatio: number }> = [];
   captures.forEach((pixels, panel) => {
@@ -946,10 +967,10 @@ async function runHeadless(
       panelStats,
     },
     ok: Object.values(checks).every(Boolean),
-    schema: 'nachi.showcase-heal.v1',
+    schema: 'nachi.heal.v1',
   };
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'showcase-heal.png', selector: '#heal-visual' },
+    { filename: 'heal.png', selector: '#heal-visual' },
   ]);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';

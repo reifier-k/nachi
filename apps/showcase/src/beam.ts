@@ -49,10 +49,16 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
-import { allPanelsHaveForeground, createDrainedReadback } from './readback';
-import { createPlaygroundRenderer } from './webgpu-renderer';
-import './showcase-beam.css';
+import {
+  allPanelsHaveForeground,
+  createDrainedReadback,
+  createPerformanceMonitor,
+  createPlaygroundRenderer,
+  createTimestampQueryPoolDrain,
+} from './harness';
+import { attachShowcaseTuning } from './tuning';
+import './beam.css';
+import './embed.css';
 
 const WIDTH = 640;
 const HEIGHT = 360;
@@ -76,6 +82,7 @@ const CAPTURE_LABELS = [
 ] as const;
 const root = document.documentElement;
 const headless = new URLSearchParams(location.search).get('headless') === '1';
+if (new URLSearchParams(location.search).get('embed') === '1') root.dataset.embed = '1';
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -99,7 +106,7 @@ type BackendLike = {
 
 function required<T extends Element>(selector: string): T {
   const value = document.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing showcase-beam element: ${selector}`);
+  if (!value) throw new Error(`Missing beam element: ${selector}`);
   return value;
 }
 
@@ -215,7 +222,7 @@ function canvasTexture(
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('showcase-beam requires a 2D canvas context.');
+  if (!context) throw new Error('beam requires a 2D canvas context.');
   context.fillStyle = '#000';
   context.fillRect(0, 0, width, height);
   draw(context);
@@ -421,17 +428,17 @@ function starSpriteTexture(): THREE.DataTexture {
 const GLOW_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-beam/glow',
+  uri: 'procedural://beam/glow',
 };
 const SPARK_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-beam/spark',
+  uri: 'procedural://beam/spark',
 };
 const STAR_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-beam/star',
+  uri: 'procedural://beam/star',
 };
 
 interface EffectTextures {
@@ -1264,7 +1271,7 @@ async function run(): Promise<void> {
       const monitor = createPerformanceMonitor(renderer, {
         gpuScopes: ['compute', 'render'],
         mode: 'headless',
-        page: 'showcase-beam',
+        page: 'beam',
       });
       await monitor.captureGpuSamples(async () => {
         await step(STEP);
@@ -1296,6 +1303,14 @@ async function run(): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+  attachShowcaseTuning({
+    camera,
+    cameraBasePosition,
+    cameraBaseRotation,
+    cameraTarget: new THREE.Vector3(0, 0.1, 0),
+    instance,
+    renderer,
+  });
   required<HTMLElement>('#status-value').textContent = 'looping · watch the lance';
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
@@ -1383,7 +1398,7 @@ async function runHeadless(
 
   const canvas = required<HTMLCanvasElement>('#beam-visual');
   const sheetContext = canvas.getContext('2d');
-  if (!sheetContext) throw new Error('showcase-beam requires the contact sheet canvas.');
+  if (!sheetContext) throw new Error('beam requires the contact sheet canvas.');
   const sheet = sheetContext.createImageData(WIDTH * 3, HEIGHT * 2);
   const panelStats: Array<{ foregroundRatio: number; saturatedRatio: number }> = [];
   captures.forEach((pixels, panel) => {
@@ -1447,10 +1462,10 @@ async function runHeadless(
       panelStats,
     },
     ok: Object.values(checks).every(Boolean),
-    schema: 'nachi.showcase-beam.v1',
+    schema: 'nachi.beam.v1',
   };
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'showcase-beam.png', selector: '#beam-visual' },
+    { filename: 'beam.png', selector: '#beam-visual' },
   ]);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';

@@ -13,6 +13,9 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 - `packages/post`: RenderPipeline distortion/blur/bloom plus native-WebGPU weighted blended OIT.
 - `packages/timeline`: effect composition, sequencing, hit stop, and mesh-fx lifecycle runtime.
 - `apps/playground`: Vite/TypeScript playground plus compute and depth spikes.
+- `apps/showcase`: sidebar-gallery showcase site hosting the six showcase effect pages
+  (`slash`, `heal`, `barrier`, `beam`, `ice`, `machina`) with embed/fullscreen viewing and a
+  live tweakpane debug-tuning panel; reuses the playground spike harness via `src/harness.ts`.
 - `apps/docs`: lightweight Vite static documentation and seven-effect demo gallery.
 - `tools`: Playwright-based WebGPU probes, spike collection, and screenshots.
 - `docs/rfc`: normative design RFCs; keep implementation and RFC terminology aligned.
@@ -21,6 +24,7 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 
 ```sh
 pnpm dev        # Vite on 0.0.0.0:5173 (required before browser tools)
+pnpm showcase:dev # showcase gallery site on 0.0.0.0:5174
 pnpm test       # Vitest
 pnpm typecheck  # all workspace TypeScript projects
 pnpm lint       # ESLint flat config
@@ -76,6 +80,8 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5174/slash/?backend=webgpu  # showcase pages need pnpm showcase:dev
+node tools/spike-runner.mjs http://127.0.0.1:5174/heal/?backend=webgpu   # likewise barrier/beam/ice/machina
 node tools/golden-explosion-runner.mjs http://127.0.0.1:5173/golden-explosion/ artifacts
 node tools/screenshot.mjs [url] [output.png] [--backend webgl|webgpu]
 node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png --backend webgl --compare-depth-fade

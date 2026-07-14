@@ -53,12 +53,18 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
 import { createCompanionSocketPhase } from './companion-socket-phase';
-import { allPanelsHaveForeground, createDrainedReadback } from './readback';
-import { readLogicalAttribute } from './three-runtime-readback';
-import { createPlaygroundRenderer } from './webgpu-renderer';
-import './wuwa-slash.css';
+import {
+  allPanelsHaveForeground,
+  createDrainedReadback,
+  createPerformanceMonitor,
+  createPlaygroundRenderer,
+  createTimestampQueryPoolDrain,
+  readLogicalAttribute,
+} from './harness';
+import { attachShowcaseTuning } from './tuning';
+import './slash.css';
+import './embed.css';
 
 const WIDTH = 640;
 const HEIGHT = 360;
@@ -80,6 +86,7 @@ const CAPTURE_LABELS = [
 const TRAIL_SPACING_ERROR_BUDGET = 64 * 2 ** -23;
 const root = document.documentElement;
 const headless = new URLSearchParams(location.search).get('headless') === '1';
+if (new URLSearchParams(location.search).get('embed') === '1') root.dataset.embed = '1';
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -103,7 +110,7 @@ type BackendLike = {
 
 function required<T extends Element>(selector: string): T {
   const value = document.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing wuwa-slash element: ${selector}`);
+  if (!value) throw new Error(`Missing slash element: ${selector}`);
   return value;
 }
 
@@ -206,7 +213,7 @@ function canvasTexture(
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('wuwa-slash requires a 2D canvas context.');
+  if (!context) throw new Error('slash requires a 2D canvas context.');
   context.fillStyle = '#000';
   context.fillRect(0, 0, width, height);
   draw(context);
@@ -356,12 +363,12 @@ function glowSpriteTexture(): THREE.DataTexture {
 const SPARK_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://wuwa-slash/spark',
+  uri: 'procedural://slash/spark',
 };
 const GLOW_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://wuwa-slash/glow',
+  uri: 'procedural://slash/glow',
 };
 
 interface EffectTextures {
@@ -467,7 +474,7 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     outerRadius: 1.58,
     segments: 96,
   });
-  circleOuterMesh.name = 'wuwa-circle-outer';
+  circleOuterMesh.name = 'slash-circle-outer';
   circleOuterMesh.rotation.x = -Math.PI / 2;
   circleOuterMesh.position.y = -0.93;
   const circleInnerMesh = ring({
@@ -486,7 +493,7 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     outerRadius: 1.04,
     segments: 96,
   });
-  circleInnerMesh.name = 'wuwa-circle-inner';
+  circleInnerMesh.name = 'slash-circle-inner';
   circleInnerMesh.rotation.x = -Math.PI / 2;
   circleInnerMesh.position.y = -0.93;
 
@@ -507,7 +514,7 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     rotation: -18,
     taper: 0.8,
   });
-  slashMainMesh.name = 'wuwa-slash-main';
+  slashMainMesh.name = 'slash-main';
   slashMainMesh.rotation.set(-0.24, 0.16, 0.3);
   slashMainMesh.position.set(0, -0.4, 0.2);
   const slashCounterMesh = slashArc({
@@ -527,7 +534,7 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     rotation: 190,
     taper: 0.75,
   });
-  slashCounterMesh.name = 'wuwa-slash-counter';
+  slashCounterMesh.name = 'slash-counter';
   slashCounterMesh.rotation.set(0.18, -0.14, -0.3);
   slashCounterMesh.position.set(0, 0.2, 0.1);
 
@@ -547,7 +554,7 @@ function createResonanceSlash(textures: EffectTextures, loop: boolean) {
     outerRadius: 1.0,
     segments: 96,
   });
-  shockMesh.name = 'wuwa-shock';
+  shockMesh.name = 'slash-shock';
 
   return defineEffect({
     elements: {
@@ -873,7 +880,7 @@ async function run(): Promise<void> {
     for (const trail of trailRuntimes) if (trail.draw) await trail.draw.prepare(renderer);
     if (lightDraw) await lightDraw.update(renderer);
     const shockState = instance.getElementState('shock');
-    const shockClone = findMeshFx('wuwa-shock');
+    const shockClone = findMeshFx('slash-shock');
     if (shockClone && shockState?.playing) {
       const q = Math.min(1, shockState.localTime / 0.5);
       const scale = 0.3 + 2.6 * (1 - (1 - q) ** 3);
@@ -905,7 +912,7 @@ async function run(): Promise<void> {
       const monitor = createPerformanceMonitor(renderer, {
         gpuScopes: ['compute', 'render'],
         mode: 'headless',
-        page: 'wuwa-slash',
+        page: 'slash',
       });
       await monitor.captureGpuSamples(async () => {
         await step(STEP);
@@ -920,7 +927,7 @@ async function run(): Promise<void> {
 
   // Live viewer: present to the page canvas and loop forever; the timeline
   // loops itself, and blade trails are respawned at every new cycle.
-  required<HTMLCanvasElement>('#wuwa-visual').style.display = 'none';
+  required<HTMLCanvasElement>('#slash-visual').style.display = 'none';
   required<HTMLElement>('#frame-labels').style.display = 'none';
   const stage = required<HTMLElement>('#stage');
   stage.appendChild(renderer.domElement);
@@ -933,6 +940,14 @@ async function run(): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+  attachShowcaseTuning({
+    camera,
+    cameraBasePosition,
+    cameraBaseRotation,
+    cameraTarget: new THREE.Vector3(0.1, -0.05, 0),
+    instance,
+    renderer,
+  });
   required<HTMLElement>('#status-value').textContent = 'looping · watch the slash';
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
@@ -1061,9 +1076,9 @@ async function runHeadless(
     }
   }
 
-  const canvas = required<HTMLCanvasElement>('#wuwa-visual');
+  const canvas = required<HTMLCanvasElement>('#slash-visual');
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('wuwa-slash requires the contact sheet canvas.');
+  if (!context) throw new Error('slash requires the contact sheet canvas.');
   const sheet = context.createImageData(WIDTH * 3, HEIGHT * 2);
   const panelStats: Array<{ foregroundRatio: number; saturatedRatio: number }> = [];
   captures.forEach((pixels, panel) => {
@@ -1127,10 +1142,10 @@ async function runHeadless(
       trailSpacingErrorBudget: TRAIL_SPACING_ERROR_BUDGET,
     },
     ok: Object.values(checks).every(Boolean),
-    schema: 'nachi.wuwa-slash.v1',
+    schema: 'nachi.slash.v1',
   };
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'wuwa-slash.png', selector: '#wuwa-visual' },
+    { filename: 'slash.png', selector: '#slash-visual' },
   ]);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';

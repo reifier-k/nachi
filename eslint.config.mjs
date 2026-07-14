@@ -18,7 +18,7 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['apps/playground/src/**/*.ts'],
+    files: ['apps/playground/src/**/*.ts', 'apps/showcase/src/**/*.ts'],
     languageOptions: {
       globals: globals.browser,
     },

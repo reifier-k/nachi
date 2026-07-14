@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi VFX Showcase</title>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <header>
+          <p class="brand-eyebrow">@nachi vfx library</p>
+          <h1>Showcase</h1>
+          <p class="brand-note">
+            Six game-ready ultimates authored end to end with the @nachi TSL/WebGPU runtime.
+          </p>
+        </header>
+        <nav id="showcase-nav" aria-label="Showcases"></nav>
+        <footer>
+          <p>WebGPU required · fixed 16:9 stage</p>
+        </footer>
+      </aside>
+      <main class="viewer">
+        <div class="toolbar">
+          <div class="toolbar-title">
+            <p class="eyebrow" id="viewer-eyebrow"></p>
+            <h2 id="viewer-title"></h2>
+          </div>
+          <div class="toolbar-actions">
+            <button id="panel-toggle" type="button" aria-pressed="false">Tuning panel</button>
+            <button id="fullscreen-toggle" type="button">Fullscreen</button>
+            <a id="standalone-link" href="#" target="_blank" rel="noopener">Open standalone ↗</a>
+          </div>
+        </div>
+        <div class="stage-frame" id="stage-frame">
+          <iframe id="viewer-frame" title="Showcase effect"></iframe>
+        </div>
+        <p class="viewer-note" id="viewer-note"></p>
+      </main>
+    </div>
+    <script type="module" src="/src/shell.ts"></script>
+  </body>
+</html>

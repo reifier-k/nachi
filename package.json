@@ -13,6 +13,8 @@
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "dev": "pnpm --filter @nachi/playground dev",
+    "showcase:dev": "pnpm --filter @nachi/showcase dev",
+    "showcase:build": "pnpm --filter @nachi/showcase build",
     "docs:dev": "pnpm --filter @nachi/docs dev",
     "docs:build": "pnpm --filter @nachi/docs build",
     "build": "pnpm -r --if-present build",

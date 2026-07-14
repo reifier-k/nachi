@@ -50,10 +50,16 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
-import { allPanelsHaveForeground, createDrainedReadback } from './readback';
-import { createPlaygroundRenderer } from './webgpu-renderer';
-import './showcase-ice.css';
+import {
+  allPanelsHaveForeground,
+  createDrainedReadback,
+  createPerformanceMonitor,
+  createPlaygroundRenderer,
+  createTimestampQueryPoolDrain,
+} from './harness';
+import { attachShowcaseTuning } from './tuning';
+import './ice.css';
+import './embed.css';
 
 const WIDTH = 640;
 const HEIGHT = 360;
@@ -82,6 +88,7 @@ const CAPTURE_LABELS = [
 ] as const;
 const root = document.documentElement;
 const headless = new URLSearchParams(location.search).get('headless') === '1';
+if (new URLSearchParams(location.search).get('embed') === '1') root.dataset.embed = '1';
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -105,7 +112,7 @@ type BackendLike = {
 
 function required<T extends Element>(selector: string): T {
   const value = document.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing showcase-ice element: ${selector}`);
+  if (!value) throw new Error(`Missing ice element: ${selector}`);
   return value;
 }
 
@@ -206,7 +213,7 @@ function canvasTexture(
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('showcase-ice requires a 2D canvas context.');
+  if (!context) throw new Error('ice requires a 2D canvas context.');
   context.fillStyle = '#000';
   context.fillRect(0, 0, width, height);
   draw(context);
@@ -393,17 +400,17 @@ function flakeSpriteTexture(): THREE.DataTexture {
 const SPARK_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-ice/spark',
+  uri: 'procedural://ice/spark',
 };
 const GLOW_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-ice/glow',
+  uri: 'procedural://ice/glow',
 };
 const FLAKE_REF: TextureRef = {
   assetType: 'texture',
   kind: 'asset-ref',
-  uri: 'procedural://showcase-ice/flake',
+  uri: 'procedural://ice/flake',
 };
 
 interface EffectTextures {
@@ -496,7 +503,11 @@ const sparklePlacement = tslModule(
     return {
       position: vec3(
         cos(theta).mul(radius).add(jitter.x.mul(0.2)),
-        jitter.y.mul(0.5).add(0.5).mul(span).add(FLOOR_Y + 0.05),
+        jitter.y
+          .mul(0.5)
+          .add(0.5)
+          .mul(span)
+          .add(FLOOR_Y + 0.05),
         sin(theta).mul(radius).add(jitter.z.mul(0.2)),
       ) as unknown as TslExpression<Vec3>,
     };
@@ -552,7 +563,10 @@ function buildPillarMesh(spec: PillarSpec, textures: EffectTextures): MeshFxMesh
   const duration = PILLAR_END - spec.start;
   const grow = Math.min(0.9, GROW_TIME / duration);
   const shatterAt = Math.min(0.94, (spec.shatter - spec.start) / duration);
-  const crumbled = Math.min(0.99, Math.max(shatterAt + 0.02, (spec.shatter + 0.42 - spec.start) / duration));
+  const crumbled = Math.min(
+    0.99,
+    Math.max(shatterAt + 0.02, (spec.shatter + 0.42 - spec.start) / duration),
+  );
   const mesh = cone({
     height: spec.height,
     heightSegments: 3,
@@ -664,11 +678,7 @@ function createGlacialRequiem(textures: EffectTextures, loop: boolean) {
     // Eight complete cycles are intentional; keep capacity aligned so none of the 176 flakes are
     // dropped before the earliest 1.3s lifetime can expire.
     capacity: 176,
-    init: [
-      positionSphere({ radius: 1.7 }),
-      offsetInit([0, 0.95, 0]),
-      lifetime(range(1.3, 1.9)),
-    ],
+    init: [positionSphere({ radius: 1.7 }), offsetInit([0, 0.95, 0]), lifetime(range(1.3, 1.9))],
     render: billboard({ blending: 'additive', map: FLAKE_REF }),
     spawn: burst({ count: 22, cycles: 8, interval: 0.2 }),
     update: [
@@ -1028,9 +1038,7 @@ async function run(): Promise<void> {
       waveClone.scale.set(scale, 1, scale);
     }
     if (latestShake) {
-      camera.position
-        .copy(cameraBasePosition)
-        .add(new THREE.Vector3(...latestShake.translation));
+      camera.position.copy(cameraBasePosition).add(new THREE.Vector3(...latestShake.translation));
       camera.rotation.set(
         cameraBaseRotation.x + latestShake.rotation[0],
         cameraBaseRotation.y + latestShake.rotation[1],
@@ -1054,7 +1062,7 @@ async function run(): Promise<void> {
       const monitor = createPerformanceMonitor(renderer, {
         gpuScopes: ['compute', 'render'],
         mode: 'headless',
-        page: 'showcase-ice',
+        page: 'ice',
       });
       await monitor.captureGpuSamples(async () => {
         await step(STEP);
@@ -1082,6 +1090,14 @@ async function run(): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+  attachShowcaseTuning({
+    camera,
+    cameraBasePosition,
+    cameraBaseRotation,
+    cameraTarget: new THREE.Vector3(0, 0.42, 0),
+    instance,
+    renderer,
+  });
   required<HTMLElement>('#status-value').textContent = 'looping · watch the freeze';
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
@@ -1163,7 +1179,7 @@ async function runHeadless(
 
   const canvas = required<HTMLCanvasElement>('#ice-visual');
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('showcase-ice requires the contact sheet canvas.');
+  if (!context) throw new Error('ice requires the contact sheet canvas.');
   const sheet = context.createImageData(WIDTH * 3, HEIGHT * 2);
   const panelStats: Array<{ foregroundRatio: number; saturatedRatio: number }> = [];
   captures.forEach((pixels, panel) => {
@@ -1219,10 +1235,10 @@ async function runHeadless(
       panelStats,
     },
     ok: Object.values(checks).every(Boolean),
-    schema: 'nachi.showcase-ice.v1',
+    schema: 'nachi.ice.v1',
   };
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'showcase-ice.png', selector: '#ice-visual' },
+    { filename: 'ice.png', selector: '#ice-visual' },
   ]);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';

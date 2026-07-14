@@ -94,6 +94,46 @@ importers:
         specifier: 7.3.5
         version: 7.3.5(@types/node@24.10.13)
 
+  apps/showcase:
+    dependencies:
+      '@nachi/core':
+        specifier: workspace:^
+        version: link:../../packages/core
+      '@nachi/mesh-fx':
+        specifier: workspace:^
+        version: link:../../packages/mesh-fx
+      '@nachi/post':
+        specifier: workspace:^
+        version: link:../../packages/post
+      '@nachi/three':
+        specifier: workspace:^
+        version: link:../../packages/three
+      '@nachi/timeline':
+        specifier: workspace:^
+        version: link:../../packages/timeline
+      '@nachi/trails':
+        specifier: workspace:^
+        version: link:../../packages/trails
+      '@nachi/tsl-kit':
+        specifier: workspace:^
+        version: link:../../packages/tsl-kit
+      three:
+        specifier: 0.185.1
+        version: 0.185.1
+      tweakpane:
+        specifier: 4.0.5
+        version: 4.0.5
+    devDependencies:
+      '@tweakpane/core':
+        specifier: 2.0.5
+        version: 2.0.5
+      '@types/three':
+        specifier: 0.185.0
+        version: 0.185.0
+      vite:
+        specifier: 7.3.5
+        version: 7.3.5(@types/node@24.10.13)
+
   packages/core: {}
 
   packages/format:
@@ -925,7 +965,6 @@ packages:
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
-    engines: {node: '>= 0.6'}
 
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}

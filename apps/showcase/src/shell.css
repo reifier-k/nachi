@@ -1,0 +1,204 @@
+:root {
+  color: #e8f1ff;
+  background: #04060c;
+  font-family: Inter, system-ui, sans-serif;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 18% 0%, #0b1526, #060a14 46%, #04060c 80%);
+}
+.app {
+  display: grid;
+  grid-template-columns: 316px 1fr;
+  min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 26px 18px 18px;
+  border-right: 1px solid #16233c;
+  background: #060b16cc;
+}
+.brand-eyebrow {
+  margin: 0;
+  color: #6f8fc9;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+.sidebar h1 {
+  margin: 4px 0;
+  font-size: 34px;
+  letter-spacing: -0.03em;
+  background: linear-gradient(100deg, #eaf3ff 20%, #7fb4ff 65%, #c9e2ff 95%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+.brand-note {
+  margin: 0;
+  color: #93a9cf;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  border: 1px solid #182742;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 12px;
+  background: #0a1120d9;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+.nav-item:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, #182742);
+  transform: translateX(2px);
+}
+.nav-item.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, #0a1120);
+}
+.nav-eyebrow {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.nav-title {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.nav-blurb {
+  color: #8fa5cc;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.sidebar footer {
+  margin-top: auto;
+}
+.sidebar footer p {
+  margin: 0;
+  color: #5d729c;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+/* Viewer */
+.viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 22px 26px 26px;
+}
+.toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.toolbar-title .eyebrow {
+  margin: 0;
+  color: #6f8fc9;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+.toolbar-title h2 {
+  margin: 2px 0 0;
+  font-size: clamp(24px, 3.4vw, 38px);
+  letter-spacing: -0.035em;
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toolbar-actions button,
+.toolbar-actions a {
+  padding: 9px 14px;
+  border: 1px solid #24365c;
+  border-radius: 10px;
+  background: #0c1526;
+  color: #cfdff9;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.toolbar-actions button:hover,
+.toolbar-actions a:hover {
+  border-color: #3d5689;
+  background: #101c33;
+}
+.toolbar-actions button[aria-pressed='true'] {
+  border-color: #7fb4ff;
+  background: #14264a;
+}
+.stage-frame {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  border: 1px solid color-mix(in srgb, var(--accent, #7fb4ff) 40%, #16233c);
+  border-radius: 16px;
+  background: #000;
+  box-shadow: 0 26px 90px #000c;
+}
+.stage-frame:fullscreen {
+  border: 0;
+  border-radius: 0;
+  aspect-ratio: auto;
+}
+.stage-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
+}
+.viewer-note {
+  margin: 0;
+  color: #8fa5cc;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #16233c;
+  }
+}
