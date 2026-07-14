@@ -130,6 +130,19 @@ describe('@nachi/tsl-kit node graphs', () => {
       expect(warning).not.toHaveBeenCalled();
       expect(() => fresnel({ color: 'rebeccapurple' })).not.toThrow();
       expect(() => fresnel({ color: 'rgb(12, 34, 56)' })).not.toThrow();
+      expect(() => fresnel({ color: 'rgba(12, 34, 56, .5)' })).not.toThrow();
+      expect(() => fresnel({ color: 'rgb(12%, 34%, 56%)' })).not.toThrow();
+      expect(() => fresnel({ color: 'hsl(210, 50%, 25%)' })).not.toThrow();
+      expect(() => fresnel({ color: 'hsla(210, 50%, 25%, 0.5)' })).not.toThrow();
+
+      const repeatedDigits = '9'.repeat(20_000);
+      for (const color of [
+        `rgb(9,9,9,${repeatedDigits}x)`,
+        `rgb(9%,9%,9%,${repeatedDigits}x)`,
+        `hsl(9,9%,9%,${repeatedDigits}x)`,
+      ]) {
+        expect(() => fresnel({ color })).toThrow(TslKitDiagnosticError);
+      }
     } finally {
       warning.mockRestore();
     }

@@ -11,6 +11,11 @@ import {
 
 type TextureLike = { readonly isTexture?: boolean };
 
+const MAX_COLOR_STRING_LENGTH = 256;
+const DECIMAL_COMPONENT = /^(?:\d+(?:\.\d+)?|\.\d+)$/;
+const INTEGER_COMPONENT = /^\d+$/;
+const PERCENTAGE_COMPONENT = /^\d+%$/;
+
 export function scalar(input: ScalarInput, path: string, minimum?: number): Node<'float'> {
   if (typeof input === 'number') {
     if (!Number.isFinite(input) || (minimum !== undefined && input < minimum)) {
@@ -85,20 +90,27 @@ function isNode(value: unknown): value is Node {
 }
 
 function isThreeColorString(value: string): boolean {
+  if (value.length > MAX_COLOR_STRING_LENGTH) return false;
   if (/^#[A-Fa-f\d]{3}(?:[A-Fa-f\d]{3})?$/.test(value)) return true;
   if (Object.hasOwn(Color.NAMES, value.toLowerCase())) return true;
   const functional = /^(rgb|rgba|hsl|hsla)\(([^)]*)\)$/.exec(value);
   if (!functional) return false;
   const model = functional[1];
-  const components = functional[2] ?? '';
+  const components = (functional[2] ?? '').split(',').map((component) => component.trim());
+  if (components.length < 3 || components.length > 4) return false;
+  const [first = '', second = '', third = '', alpha] = components;
+  if (alpha !== undefined && !DECIMAL_COMPONENT.test(alpha)) return false;
   if (model === 'rgb' || model === 'rgba') {
+    const colorComponents = [first, second, third];
     return (
-      /^\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(?:,\s*\d*\.?\d+\s*)?$/.test(components) ||
-      /^\s*\d+%\s*,\s*\d+%\s*,\s*\d+%\s*(?:,\s*\d*\.?\d+\s*)?$/.test(components)
+      colorComponents.every((component) => INTEGER_COMPONENT.test(component)) ||
+      colorComponents.every((component) => PERCENTAGE_COMPONENT.test(component))
     );
   }
-  return /^\s*\d*\.?\d+\s*,\s*\d*\.?\d+%\s*,\s*\d*\.?\d+%\s*(?:,\s*\d*\.?\d+\s*)?$/.test(
-    components,
+  return (
+    DECIMAL_COMPONENT.test(first) &&
+    PERCENTAGE_COMPONENT.test(second) &&
+    PERCENTAGE_COMPONENT.test(third)
   );
 }
 

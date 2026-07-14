@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -81,15 +81,14 @@ const CONTENT_TYPES = {
 async function installDistRoute(page, origin, directory) {
   await page.route(`${origin}/**`, async (route) => {
     const url = new URL(route.request().url());
-    const relative = decodeURIComponent(url.pathname).replace(/^\/+/, '');
-    let filename = path.resolve(directory, relative);
+    let relative = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+    if (url.pathname.endsWith('/')) relative = path.join(relative, 'index.html');
+    const filename = path.resolve(directory, relative);
     if (!filename.startsWith(`${directory}${path.sep}`) && filename !== directory) {
       await route.fulfill({ body: 'Forbidden', status: 403 });
       return;
     }
     try {
-      const information = await stat(filename);
-      if (information.isDirectory()) filename = path.join(filename, 'index.html');
       const body = await readFile(filename);
       await route.fulfill({
         body,
