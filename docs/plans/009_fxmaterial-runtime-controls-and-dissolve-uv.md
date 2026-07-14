@@ -2,7 +2,7 @@
 
 - 重大度: 中(表現力。3/5 の制作エージェントが独立に報告)
 - 対象: `@nachi/mesh-fx`(material.ts)、`@nachi/timeline`(fxMaterial ラッパー)
-- 状態: 提案
+- 状態: 実装済み・受入済み(2026-07-14、受入コミット `c2d9235`)
 - 出典: showcase-barrier / showcase-machina / showcase-beam 制作エージェント
 
 ## 症状

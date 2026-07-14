@@ -46,9 +46,12 @@ Niagara の interpolated spawning 相当を導入する:
   `interpolationActive = 0` にリセットする。`update(0)` は履歴を進めない。
 - 行列がビット単位で等しいときは CPU が `Emitter.interpolationActive = 0` を設定する。
   init カーネルはこの場合、従来どおり `Emitter.transform` を直接読み、lerp/slerp を実行しない。
-- 補間が有効な通常の rate/burst バッチでは、capacity clamp 後の実スポーン数を `N`、
-  `spawnOrder` から導いたバッチ内 index を `i` として
-  `phase = (i + 0.5) / N` とする。compaction の割り当て順には依存しない。
+- 補間が有効な通常の rate/burst バッチでは、位相分母 `N` を CPU 側クランプ
+  (要求数 ∧ 物理 capacity ∧ 論理可用性)後のバッチサイズに固定し、`spawnOrder` から導いた
+  バッチ内 index を `i` として `phase = (i + 0.5) / N` とする。GPU free-list 飽和は
+  さらに生成数を減らすが位相は再分配せず、最先頭の発火位置を保持する。これは perDistance の
+  承認済みドロップ意味論(先頭 N 個の発火位置を保持し、再分配しない)と一貫する。
+  compaction の割り当て順には依存しない。
 - `perDistance({ rate: R })` ではステップ距離を `D`、ステップ開始時の距離アキュムレータを
   `r` (`0 <= r < 1`) とし、`phaseStart = (1 - r) / (R * D)`、
   `phaseStep = 1 / (R * D)` とする。各発火位置そのものを current segment 上の位相へ変換する。

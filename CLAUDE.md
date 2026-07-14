@@ -136,9 +136,11 @@ record; do not add another timestamp resolver or infer GPU time from CPU duratio
 correctness renderers timestamp-free and use a separate short perf capture when dispatch counts are
 large.
 
-The v1 perf record's GPU fields are a single latest timestamp per scope: there is no GPU warm-up
-window, sample count, or median. Treat them as smoke/baseline observations only. FA performance
-budgets must use multiple warmed samples and a robust aggregate such as the median.
+The current perf record is schemaVersion 2. It always includes a `sampleWindow` with four warm-up
+samples followed by 16 measured samples by default, and reports median/p95 aggregates per scope and
+for the total. SwiftShader values remain smoke observations rather than performance claims; FA
+performance budgets must use robust aggregates such as the median from warmed samples on the
+relevant hardware.
 
 M12 effect JSON is owned by `@nachi/format`. The v1 envelope is exactly
 `{ format: 'nachi-effect', version: 1, effect }`. Keep format-owned structures strict and

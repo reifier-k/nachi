@@ -2,7 +2,7 @@
 
 - 重大度: 高(体験。4/5 の制作エージェントが独立に痛点として報告)
 - 対象: `@nachi/core`(init/update モジュールの空間意味論、EmitterConfig)
-- 状態: 承認済み(実装待ち。既定統一は RFC 起票が前提)
+- 状態: 実装済み・受入済み(2026-07-14、受入コミット `643ab51` / `df21d5b`)
 - 出典: showcase-ice / showcase-machina / showcase-beam / showcase-barrier 制作エージェント
 - 裁定: 2026-07-13 ユーザー承認 — 追加 API(center/arc/offset)に加え、**RFC を起票した上で
   既定空間の 'emitter' 統一(破壊的変更)まで本ハードニングで断行**する。changeset の
@@ -32,7 +32,7 @@
    「同一エフェクト内の別地点」を宣言できるようにする。timeline の play はこのローカル
    オフセットを効果変換に合成する(001 の合成則と同一)。
 3. **空間指定の総点検**: `position` / `center` を取る全モジュール
-   (pointAttractor / vortex / killVolume / collide* )について、既定空間を表にして
+   (pointAttractor / vortex / killVolume / collide\* )について、既定空間を表にして
    ドキュメント化し、`space` 未指定時の既定を「emitter」に統一するかを RFC で判断する
    (挙動変更のため)。
 4. `positionSphere` に `arc?: { thetaMax }`(球冠)を追加(barrier の半球ドーム用)。

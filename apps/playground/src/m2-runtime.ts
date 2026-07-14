@@ -181,11 +181,15 @@ function movingEffect(
   });
 }
 
-function placementEffect(spawn: SpawnModule, radius: ValueInput<number> = 0) {
+function placementEffect(
+  spawn: SpawnModule | readonly SpawnModule[],
+  radius: ValueInput<number> = 0,
+  capacity = 16,
+) {
   return defineEffect({
     elements: {
       particles: defineEmitter({
-        capacity: 16,
+        capacity,
         init: [positionSphere({ radius }), lifetime(10)],
         integration: 'none',
         lifecycle: { duration: 1 },
@@ -373,7 +377,40 @@ async function runLifecycleScenario(
   await movingRateSystem.update(FIXED_DELTA_SECONDS);
   const rateDistribution = lineDistribution(await alivePositions(renderer, movingRate), 10, 1 / 20);
 
-  // 5. interpolationActive=0 must retain the current-transform path bit-for-bit. A static timed
+  // 5. GPU free-list saturation must retain the leading phases of the CPU-clamped rate batch.
+  // Eight existing particles leave two slots; a ten-birth request therefore keeps phases 0.05
+  // and 0.15 rather than redistributing the two successful births across the segment.
+  const partialOccupancySystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const partialOccupancy = partialOccupancySystem.spawn(
+    placementEffect([burst({ count: 8 }), rate(600)], 0, 10),
+    { seed: 25 },
+  );
+  await partialOccupancySystem.update(0);
+  const partialOccupancyAliveBefore = await aliveCount(renderer, partialOccupancy);
+  partialOccupancy.setTransform([1, 0, 0]);
+  await partialOccupancySystem.update(FIXED_DELTA_SECONDS);
+  const partialOccupancyAliveAfter = await aliveCount(renderer, partialOccupancy);
+  const partialOccupancyPositions = await alivePositions(renderer, partialOccupancy);
+  const partialOccupancyXs = partialOccupancyPositions
+    .map(([x]) => x)
+    .sort((left, right) => left - right);
+  const partialOccupancyExpectedXs = [0, 0, 0, 0, 0, 0, 0, 0, 0.05, 0.15] as const;
+  const partialOccupancyPhasesValid =
+    partialOccupancyAliveBefore === 8 &&
+    partialOccupancyAliveAfter === 10 &&
+    partialOccupancyXs.length === partialOccupancyExpectedXs.length &&
+    partialOccupancyXs.every(
+      (value, index) =>
+        Math.abs(value - (partialOccupancyExpectedXs[index] ?? Number.NaN)) <=
+        SPAWN_INTERPOLATION_ERROR_BUDGET,
+    ) &&
+    partialOccupancyPositions.every(
+      ([, y, z]) =>
+        Math.abs(y) <= SPAWN_INTERPOLATION_ERROR_BUDGET &&
+        Math.abs(z) <= SPAWN_INTERPOLATION_ERROR_BUDGET,
+    );
+
+  // 6. interpolationActive=0 must retain the current-transform path bit-for-bit. A static timed
   // batch and an equivalent static burst therefore produce identical seeded positions.
   const staticDefinition = placementEffect(rate(600), range(0.1, 0.4));
   const staticControlDefinition = placementEffect(burst({ count: 10 }), range(0.1, 0.4));
@@ -387,7 +424,7 @@ async function runLifecycleScenario(
   const staticTimedPositions = await floatStorage(renderer, staticTimed, 'position');
   const staticControlPositions = await floatStorage(renderer, staticControl, 'position');
 
-  // 6. A pooled kernel whose prior generation moved must respawn exactly like a fresh kernel.
+  // 7. A pooled kernel whose prior generation moved must respawn exactly like a fresh kernel.
   const pooledDefinition = placementEffect(burst({ count: 10 }), range(0.1, 0.4));
   const pooledSystem = new VFXSystem(runtimeRenderer, undefined, {
     ...systemOptions,
@@ -412,12 +449,12 @@ async function runLifecycleScenario(
   const pooledRespawnPositions = await floatStorage(renderer, pooledRespawn, 'position');
   const freshPoolControlPositions = await floatStorage(renderer, freshPoolControl, 'position');
 
-  // 7/8. Atomic compaction count, alive flags, and indirect instanceCount must agree.
+  // 8/9. Atomic compaction count, alive flags, and indirect instanceCount must agree.
   const distanceFlags = await uintStorage(renderer, distanceInstance, 'alive');
   const actualAlive = distanceFlags.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
   const indirectAlive = await indirectInstanceCount(renderer, distanceInstance);
 
-  // 9. Exhaustion clamps safely and publishes a stable warning diagnostic.
+  // 10. Exhaustion clamps safely and publishes a stable warning diagnostic.
   const overflowSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
   const overflowed = overflowSystem.spawn(
     smokeEffect({ capacity: 2, duration: 0, spawn: burst({ count: 5 }) }),
@@ -426,7 +463,7 @@ async function runLifecycleScenario(
   await overflowSystem.update(0);
   const overflowAlive = await aliveCount(renderer, overflowed);
 
-  // 10. Identical seeds and schedules must produce bit-identical particle state.
+  // 11. Identical seeds and schedules must produce bit-identical particle state.
   const deterministicEffect = smokeEffect({
     capacity: 4,
     randomVelocity: true,
@@ -457,6 +494,7 @@ async function runLifecycleScenario(
       distanceDistribution.valid &&
       (distanceDistribution.xs[0] ?? 1) < 0.1 &&
       (distanceDistribution.xs.at(-1) ?? 0) > 0.45,
+    partialOccupancyKeepsLeadingRatePhases: partialOccupancyPhasesValid,
     rateInterpolated:
       rateDistribution.valid &&
       (rateDistribution.xs[0] ?? 1) < 0.1 &&
@@ -479,6 +517,13 @@ async function runLifecycleScenario(
     },
     interpolation: {
       errorBudget: SPAWN_INTERPOLATION_ERROR_BUDGET,
+      partialOccupancy: {
+        aliveAfter: partialOccupancyAliveAfter,
+        aliveBefore: partialOccupancyAliveBefore,
+        expectedPhases: [0.05, 0.15],
+        valid: partialOccupancyPhasesValid,
+        xs: partialOccupancyXs,
+      },
       perDistance: distanceDistribution,
       pooledRespawnBitExact: equalArrays(pooledRespawnPositions, freshPoolControlPositions),
       rate: rateDistribution,
