@@ -1,5 +1,7 @@
 import { Pane } from 'tweakpane';
-import * as THREE from 'three/webgpu';
+import type * as THREE from 'three/webgpu';
+
+import { attachShowcaseViewControls } from './view-controls';
 
 /** Structural view of a TimelineEffectInstance so pages stay decoupled from generics. */
 interface TuneableInstance {
@@ -18,7 +20,7 @@ export interface ShowcaseTuningOptions {
   /** Base transform the page's step() re-applies each frame before camera shake. */
   readonly cameraBasePosition: THREE.Vector3;
   readonly cameraBaseRotation: THREE.Euler;
-  /** The point the page's fixed camera looks at; orbit/dolly pivot around it. */
+  /** The point the camera orbits around. It moves along with viewport panning. */
   readonly cameraTarget: THREE.Vector3;
   readonly instance: TuneableInstance;
   readonly renderer: THREE.WebGPURenderer;
@@ -39,34 +41,28 @@ export function attachShowcaseTuning(options: ShowcaseTuningOptions): void {
   const search = new URLSearchParams(location.search);
   const embedded = search.get('embed') === '1';
 
-  const homePosition = cameraBasePosition.clone();
   const defaults = {
     exposure: renderer.toneMappingExposure,
     fov: camera.fov,
   };
   const settings = {
-    distance: 1,
     exposure: defaults.exposure,
     fov: defaults.fov,
-    height: 0,
-    orbit: 0,
     paused: false,
     speed: 1,
   };
 
-  const scratch = new THREE.PerspectiveCamera();
-  const up = new THREE.Vector3(0, 1, 0);
-  const applyCamera = () => {
-    const offset = homePosition.clone().sub(cameraTarget);
-    offset.applyAxisAngle(up, THREE.MathUtils.degToRad(settings.orbit));
-    offset.multiplyScalar(settings.distance);
-    cameraBasePosition.copy(cameraTarget).add(offset);
-    cameraBasePosition.y += settings.height;
-    scratch.position.copy(cameraBasePosition);
-    scratch.lookAt(cameraTarget);
-    cameraBaseRotation.copy(scratch.rotation);
+  const viewControls = attachShowcaseViewControls({
+    camera,
+    cameraBasePosition,
+    cameraBaseRotation,
+    cameraTarget,
+    renderer,
+  });
+  const applyFov = () => {
     camera.fov = settings.fov;
     camera.updateProjectionMatrix();
+    viewControls.setFov(settings.fov);
   };
   const applyPlayback = () => {
     instance.setTimeScale(settings.paused ? 0 : settings.speed);
@@ -85,29 +81,18 @@ export function attachShowcaseTuning(options: ShowcaseTuningOptions): void {
   });
 
   const view = pane.addFolder({ expanded: true, title: 'Camera / render' });
-  view
-    .addBinding(settings, 'orbit', { label: 'orbit °', max: 180, min: -180, step: 1 })
-    .on('change', applyCamera);
-  view
-    .addBinding(settings, 'height', { max: 1.5, min: -1.5, step: 0.01 })
-    .on('change', applyCamera);
-  view
-    .addBinding(settings, 'distance', { max: 2, min: 0.45, step: 0.01 })
-    .on('change', applyCamera);
-  view.addBinding(settings, 'fov', { max: 70, min: 24, step: 0.5 }).on('change', applyCamera);
+  view.addBinding(settings, 'fov', { max: 70, min: 24, step: 0.5 }).on('change', applyFov);
   view.addBinding(settings, 'exposure', { max: 2.5, min: 0.2, step: 0.01 }).on('change', () => {
     renderer.toneMappingExposure = settings.exposure;
   });
   view.addButton({ title: 'reset' }).on('click', () => {
-    settings.distance = 1;
     settings.exposure = defaults.exposure;
     settings.fov = defaults.fov;
-    settings.height = 0;
-    settings.orbit = 0;
     settings.paused = false;
     settings.speed = 1;
     renderer.toneMappingExposure = defaults.exposure;
-    applyCamera();
+    applyFov();
+    viewControls.reset();
     applyPlayback();
     pane.refresh();
   });

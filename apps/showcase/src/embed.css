@@ -1,3 +1,85 @@
+/* Shared interactive viewport affordances. */
+.stage {
+  position: relative;
+}
+.stage canvas:focus-visible {
+  outline: 2px solid #b9dcff;
+  outline-offset: -2px;
+}
+.view-controls-hint {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  z-index: 2;
+  max-width: calc(100% - 112px);
+  margin: 0;
+  padding: 7px 11px;
+  border: 1px solid #ffffff24;
+  border-radius: 999px;
+  background: #050914b8;
+  color: #dce9fb;
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0.82;
+  transform: translateX(-50%);
+  transition: opacity 180ms ease;
+  backdrop-filter: blur(6px);
+}
+.stage.has-used-view-controls .view-controls-hint {
+  opacity: 0;
+}
+.view-reset {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid #ffffff24;
+  border-radius: 9px;
+  background: #050914b8;
+  color: #dce9fb;
+  font:
+    700 11px / 1.2 Inter,
+    system-ui,
+    sans-serif;
+  cursor: pointer;
+  opacity: 0.72;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    opacity 140ms ease;
+  backdrop-filter: blur(6px);
+}
+.view-reset:hover,
+.view-reset:focus-visible {
+  border-color: #b9dcff99;
+  background: #0b1629e6;
+  opacity: 1;
+}
+
+@media (max-width: 620px), (pointer: coarse) {
+  .view-controls-hint {
+    max-width: calc(100% - 24px);
+    white-space: normal;
+  }
+  .view-reset span:last-child {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-controls-hint,
+  .view-reset {
+    transition: none;
+  }
+}
+
 /* Embedded mode (?embed=1): the shell iframe shows only the letterboxed stage.
    The renderer keeps sizing its drawing buffer from the stage width; CSS
    constraints below only scale the presented canvas into the viewport. */
