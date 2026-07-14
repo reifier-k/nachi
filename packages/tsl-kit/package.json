@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/tsl-kit",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Standalone TSL shader building blocks for Three.js NodeMaterial",
   "keywords": [
     "three.js",

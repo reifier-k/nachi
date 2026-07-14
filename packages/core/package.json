@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "GPU-first deterministic particle simulation and VFX runtime for Three.js",
   "keywords": [
     "three.js",
