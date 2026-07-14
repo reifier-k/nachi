@@ -23,6 +23,13 @@ Three Fiberバインディング、リリース自動化、ビルド可能なド
 このリポジトリには、Viteベースの[プレイグラウンド](./apps/playground)と静的な
 [ドキュメントサイト](./apps/docs)も含まれています。
 
+## コントリビューション
+
+バグ報告、機能要望、詳細なユースケースのフィードバックはGitHub Issuesで歓迎します。外部からのPull
+Requestは受け付けず、採用した変更はメンテナーが実装・レビューします。Issueで実質的に貢献した方には、
+希望に応じてCo-author creditを付与します。詳細は[CONTRIBUTING.ja.md](./CONTRIBUTING.ja.md)を参照して
+ください。脆弱性は[SECURITY.md](./SECURITY.md)に従って非公開で報告してください。
+
 ## インストール
 
 Three.jsのコア機能を利用する場合:

@@ -1,0 +1,56 @@
+name: Feature request / 機能提案
+description: Describe a use case or desired outcome / ユースケースや望ましい結果を提案する
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please focus on the problem and constraints rather than preparing a patch. External pull requests are not accepted; accepted work is implemented by the maintainer.
+
+        パッチではなく、解決したい問題と制約を中心に記載してください。外部Pull Requestは受け付けず、採用した変更はメンテナーが実装します。
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight / 事前確認
+      options:
+        - label: I searched existing issues and roadmap documents for the same request. / 既存Issueとロードマップに同じ要望がないことを確認しました。
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case / 問題またはユースケース
+      description: What are you trying to accomplish, and why is it important? / 何を実現したく、なぜ必要ですか？
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome / 望ましい結果
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and tradeoffs / 制約とトレードオフ
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 検討した代替案
+  - type: input
+    id: scope
+    attributes:
+      label: Relevant packages or APIs / 関連パッケージまたはAPI
+      placeholder: "@nachi/core, @nachi/three, asset format, ..."
+  - type: dropdown
+    id: credit
+    attributes:
+      label: Co-author credit / 共同著者表記
+      description: If this issue materially leads to a shipped change, do you want Co-authored-by credit? / このIssueが変更に実質的に寄与した場合、Co-authored-by表記を希望しますか？
+      options:
+        - No credit requested / 希望しない
+        - Yes, use my GitHub no-reply identity / 希望する
+    validations:
+      required: true

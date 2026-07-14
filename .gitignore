@@ -19,6 +19,8 @@ artifacts/
 .env
 .env.*
 *.local
+.mcp.json
+.claude/settings.local.json
 
 # editor / os
 .DS_Store

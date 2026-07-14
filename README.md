@@ -23,6 +23,14 @@ Three Fiber bindings, release automation, and a buildable documentation gallery.
 The repository also contains the Vite [playground](./apps/playground) and static
 [documentation site](./apps/docs).
 
+## Contributions
+
+Bug reports, feature requests, and detailed use-case feedback are welcome through GitHub Issues.
+External pull requests are not accepted; accepted changes are implemented and reviewed by the
+maintainers, with opt-in co-author credit for substantive issue contributions. See
+[CONTRIBUTING.md](./CONTRIBUTING.md). Report vulnerabilities privately according to
+[SECURITY.md](./SECURITY.md).
+
 ## Install
 
 Core Three.js usage:

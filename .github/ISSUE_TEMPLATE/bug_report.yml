@@ -1,0 +1,106 @@
+name: Bug report / バグ報告
+description: Report a reproducible problem / 再現可能な問題を報告する
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. External pull requests are not accepted; describe the issue here and the maintainer will investigate and implement accepted changes.
+
+        ご報告ありがとうございます。外部Pull Requestは受け付けていません。このIssueに問題を記載してください。
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight / 事前確認
+      options:
+        - label: I searched existing issues and did not find the same report. / 既存Issueに同じ報告がないことを確認しました。
+          required: true
+        - label: This report does not contain credentials, private data, or a security vulnerability. / 認証情報、非公開データ、脆弱性情報を含んでいません。
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary / 概要
+      description: Describe the problem and its impact. / 問題と影響を説明してください。
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: Affected package / 対象パッケージ
+      multiple: true
+      options:
+        - "@nachi/core"
+        - "@nachi/three"
+        - "@nachi/format"
+        - "@nachi/react"
+        - "@nachi/timeline"
+        - "@nachi/trails"
+        - "@nachi/mesh-fx"
+        - "@nachi/post"
+        - "@nachi/tsl-kit"
+        - Playground, showcase, or documentation
+        - Not sure / 不明
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit / バージョンまたはコミット
+      placeholder: "0.0.0 or commit SHA"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction / 再現手順
+      description: Provide a minimal reproduction link or exact steps. / 最小再現例または正確な手順を記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 期待する挙動
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / 実際の挙動
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 環境
+      description: Include OS, Node.js, browser, GPU, Three.js, and other relevant versions. / OS、Node.js、ブラウザ、GPU、Three.jsなどを含めてください。
+      placeholder: |
+        OS:
+        Node.js:
+        Browser:
+        GPU:
+        Three.js:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostics / ログまたは診断情報
+      render: shell
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround or investigation / 回避策または調査内容
+  - type: dropdown
+    id: credit
+    attributes:
+      label: Co-author credit / 共同著者表記
+      description: If this report materially leads to a shipped change, do you want Co-authored-by credit? / この報告が変更に実質的に寄与した場合、Co-authored-by表記を希望しますか？
+      options:
+        - No credit requested / 希望しない
+        - Yes, use my GitHub no-reply identity / 希望する
+    validations:
+      required: true
