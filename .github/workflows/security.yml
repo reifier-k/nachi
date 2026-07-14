@@ -10,6 +10,15 @@ on:
   schedule:
     - cron: "17 0 * * 1"
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Base ref for a manually dispatched dependency review
+        required: false
+        type: string
+      head_ref:
+        description: Head ref for a manually dispatched dependency review
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -21,7 +30,7 @@ concurrency:
 jobs:
   dependency-review:
     name: Dependency review
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || (inputs.base_ref != '' && inputs.head_ref != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -31,6 +40,8 @@ jobs:
       - name: Review dependency changes
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
+          base-ref: ${{ inputs.base_ref }}
+          head-ref: ${{ inputs.head_ref }}
           fail-on-severity: moderate
 
   codeql:

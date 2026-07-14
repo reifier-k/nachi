@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -37,9 +38,22 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Create or update release PR
+        id: changesets
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         with:
           version: pnpm version-packages
           title: "chore(release): version packages"
           commit: "chore(release): version packages"
           commitMode: github-api
+
+      - name: Run checks for release PR
+        if: ${{ steps.changesets.outputs.pullRequestNumber != '' }}
+        env:
+          BASE_REF: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: changeset-release/${{ github.ref_name }}
+        run: |
+          gh workflow run ci.yml --ref "$RELEASE_BRANCH"
+          gh workflow run security.yml --ref "$RELEASE_BRANCH" \
+            --field base_ref="$BASE_REF" \
+            --field head_ref="$RELEASE_BRANCH"
