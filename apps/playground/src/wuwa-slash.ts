@@ -53,8 +53,9 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor } from './perf';
+import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
 import { createCompanionSocketPhase } from './companion-socket-phase';
+import { allPanelsHaveForeground, createDrainedReadback } from './readback';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './wuwa-slash.css';
@@ -993,6 +994,8 @@ async function runHeadless(
     'sparks',
   ] as const;
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  const drainReadback = createDrainedReadback(renderer, target);
+  const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
   const captures: Uint8Array[] = [];
   const captureStates: Array<Record<string, unknown>> = [];
   let captureIndex = 0;
@@ -1000,11 +1003,9 @@ async function runHeadless(
   let companionClockSamples = 0;
   let trailSegments = { maximumGap: Number.POSITIVE_INFINITY, segmentCount: 0 };
   await step(0);
-  // The very first readback from a fresh render target returns empty pixels;
-  // warm the readback path up before any measured capture.
   renderer.setRenderTarget(target);
   post.render();
-  await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT);
+  await drainReadback();
   for (let frame = 0; frame < 140; frame += 1) {
     await step(STEP);
     if (instance.localTime >= 0.49 && instance.localTime <= 0.505) {
@@ -1019,13 +1020,8 @@ async function runHeadless(
     }
     renderer.setRenderTarget(target);
     post.render();
-    // A tiny readback every frame keeps the async readback path drained; a
-    // full-size capture after many readback-free frames returns empty pixels.
-    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
-    if (frame % 6 === 5) {
-      await renderer.resolveTimestampsAsync('compute');
-      await renderer.resolveTimestampsAsync('render');
-    }
+    await drainReadback();
+    await drainTimestampQueries();
     if (captureIndex < CAPTURE_TIMES.length && instance.localTime >= CAPTURE_TIMES[captureIndex]!) {
       captures.push(
         new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT)),
@@ -1103,6 +1099,7 @@ async function runHeadless(
   );
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
+    allPanelsVisible: allPanelsHaveForeground(panelStats),
     companionClockSynchronized: companionClockSamples >= 4 && companionClockError < 1e-8,
     consoleClean: consoleMessages.length === 0,
     impactVisible: impact.foregroundRatio > 0.02 && impact.saturatedRatio < 0.3,

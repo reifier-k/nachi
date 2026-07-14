@@ -1,7 +1,16 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { chromium } from 'playwright';
+const REPOSITORY_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const CURRENT_WORKING_DIRECTORY = path.resolve(process.cwd());
+if (CURRENT_WORKING_DIRECTORY !== REPOSITORY_ROOT) {
+  throw new Error(
+    `spike-runner must be started from the repository root (${REPOSITORY_ROOT}); current cwd is ${CURRENT_WORKING_DIRECTORY}. Relative artifacts and --dist directory resolution depend on the root cwd.`,
+  );
+}
+
+const { chromium } = await import('playwright');
 
 const DEFAULT_URL = 'http://127.0.0.1:5173/spike-compute/';
 const ADAPTER_FLAGS = {

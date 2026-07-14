@@ -50,7 +50,8 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor } from './perf';
+import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
+import { allPanelsHaveForeground, createDrainedReadback } from './readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './showcase-ice.css';
 
@@ -1131,29 +1132,21 @@ async function runHeadless(
     ]),
   ];
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  const drainReadback = createDrainedReadback(renderer, target);
+  const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
   const captures: Uint8Array[] = [];
   const captureStates: Array<Record<string, unknown>> = [];
   let captureIndex = 0;
   await step(0);
-  // The very first readback from a fresh render target returns empty pixels;
-  // warm the readback path up before any measured capture.
   renderer.setRenderTarget(target);
   post.render();
-  await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT);
+  await drainReadback();
   for (let frame = 0; frame < HEADLESS_FRAMES; frame += 1) {
     await step(STEP);
     renderer.setRenderTarget(target);
     post.render();
-    // A tiny readback every frame keeps the async readback path drained; a
-    // full-size capture after many readback-free frames returns empty pixels.
-    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
-    // This page dispatches far more compute kernels per frame than the other
-    // spikes (per-pillar emitters), so the timestamp query pool needs draining
-    // every other frame to stay below its capacity.
-    if (frame % 2 === 1) {
-      await renderer.resolveTimestampsAsync('compute');
-      await renderer.resolveTimestampsAsync('render');
-    }
+    await drainReadback();
+    await drainTimestampQueries();
     if (captureIndex < CAPTURE_TIMES.length && instance.localTime >= CAPTURE_TIMES[captureIndex]!) {
       captures.push(
         new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT)),
@@ -1203,6 +1196,7 @@ async function runHeadless(
   const tableau = panelStats[3] ?? { foregroundRatio: 0, saturatedRatio: 1 };
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
+    allPanelsVisible: allPanelsHaveForeground(panelStats),
     consoleClean: consoleMessages.length === 0,
     eruptionVisible: eruption.foregroundRatio > 0.02 && eruption.saturatedRatio < 0.3,
     forestVisible: forest.foregroundRatio > 0.045 && forest.saturatedRatio < 0.32,

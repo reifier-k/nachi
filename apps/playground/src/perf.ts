@@ -79,7 +79,13 @@ type TimestampBackend = {
   device?: { features?: { has(feature: string): boolean } };
   hasTimestamp?: boolean;
   isWebGPUBackend?: boolean;
+  timestampQueryPool?: Partial<Record<TimestampScope, TimestampQueryPoolLike | null>>;
   trackTimestamp?: boolean;
+};
+
+type TimestampQueryPoolLike = {
+  currentQueryIndex?: number;
+  maxQueries?: number;
 };
 
 export type PerformanceMonitorOptions = {
@@ -90,6 +96,106 @@ export type PerformanceMonitorOptions = {
   gpuWarmupSamples?: number;
   windowSize?: number;
 };
+
+type TimestampQueryPoolDrainOptions = {
+  minimumRemainingRatio?: number;
+  projectedFrameMultiplier?: number;
+  resolve?: (scopes: readonly TimestampScope[]) => Promise<void>;
+  scopes?: readonly TimestampScope[];
+};
+
+const DEFAULT_MINIMUM_REMAINING_RATIO = 0.25;
+const DEFAULT_PROJECTED_FRAME_MULTIPLIER = 1.25;
+
+export function shouldDrainTimestampQueryPool(
+  currentQueryIndex: number,
+  maxQueries: number,
+  recentlyAllocatedQueries: number,
+  minimumRemainingRatio = DEFAULT_MINIMUM_REMAINING_RATIO,
+  projectedFrameMultiplier = DEFAULT_PROJECTED_FRAME_MULTIPLIER,
+): boolean {
+  if (
+    !Number.isFinite(currentQueryIndex) ||
+    !Number.isFinite(maxQueries) ||
+    !Number.isFinite(recentlyAllocatedQueries) ||
+    maxQueries <= 0 ||
+    currentQueryIndex <= 0
+  ) {
+    return false;
+  }
+  const remaining = Math.max(0, maxQueries - currentQueryIndex);
+  const capacityReserve = Math.ceil(maxQueries * minimumRemainingRatio);
+  const projectedFrameReserve = Math.ceil(
+    Math.max(0, recentlyAllocatedQueries) * projectedFrameMultiplier,
+  );
+  return remaining <= Math.max(capacityReserve, projectedFrameReserve);
+}
+
+/**
+ * Watches Three's timestamp-query pool consumption and resolves before the next frame can exhaust
+ * the pool. Timestamp-free renderers have no pools, so this is a no-op for correctness loops that
+ * follow the repository's separate-renderer performance policy.
+ */
+export function createTimestampQueryPoolDrain(
+  renderer: THREE.WebGPURenderer,
+  options: TimestampQueryPoolDrainOptions = {},
+): () => Promise<boolean> {
+  const scopes = [...(options.scopes ?? ['compute', 'render'])];
+  const minimumRemainingRatio = options.minimumRemainingRatio ?? DEFAULT_MINIMUM_REMAINING_RATIO;
+  const projectedFrameMultiplier =
+    options.projectedFrameMultiplier ?? DEFAULT_PROJECTED_FRAME_MULTIPLIER;
+  const previousQueryIndices = new Map<TimestampScope, number>();
+  let resolutionInFlight: Promise<void> | null = null;
+  const resolve =
+    options.resolve ??
+    (async (requestedScopes: readonly TimestampScope[]) => {
+      for (const scope of requestedScopes) {
+        const timestampQuery = scope === 'compute' ? TimestampQuery.COMPUTE : TimestampQuery.RENDER;
+        await renderer.resolveTimestampsAsync(timestampQuery);
+      }
+    });
+
+  return async () => {
+    if (resolutionInFlight !== null) {
+      await resolutionInFlight;
+      return true;
+    }
+
+    const pools = (renderer.backend as TimestampBackend).timestampQueryPool;
+    if (!pools) return false;
+
+    let needsDrain = false;
+    for (const scope of scopes) {
+      const pool = pools[scope];
+      const currentQueryIndex = pool?.currentQueryIndex;
+      const maxQueries = pool?.maxQueries;
+      if (currentQueryIndex === undefined || maxQueries === undefined) continue;
+      const previousQueryIndex = previousQueryIndices.get(scope) ?? 0;
+      const recentlyAllocatedQueries =
+        currentQueryIndex >= previousQueryIndex
+          ? currentQueryIndex - previousQueryIndex
+          : currentQueryIndex;
+      previousQueryIndices.set(scope, currentQueryIndex);
+      needsDrain ||= shouldDrainTimestampQueryPool(
+        currentQueryIndex,
+        maxQueries,
+        recentlyAllocatedQueries,
+        minimumRemainingRatio,
+        projectedFrameMultiplier,
+      );
+    }
+    if (!needsDrain) return false;
+
+    resolutionInFlight = resolve(scopes);
+    try {
+      await resolutionInFlight;
+      for (const scope of scopes) previousQueryIndices.set(scope, 0);
+      return true;
+    } finally {
+      resolutionInFlight = null;
+    }
+  };
+}
 
 // Stable baseline record schema (v2, backward-compatible extension of v1):
 // { schema, schemaVersion, page, backend, mode, capturedAt,
@@ -110,8 +216,8 @@ export class PerformanceMonitor {
   readonly #options: Required<PerformanceMonitorOptions>;
   readonly #frameSamples: number[] = [];
   readonly #hud: HTMLElement | null;
+  readonly #timestampQueryPoolDrain: () => Promise<boolean>;
   #previousTimestamp: number | undefined;
-  #frameCount = 0;
   #lastPublishTimestamp = 0;
   #timestampResolutionInFlight: Promise<void> | null = null;
   #gpu: GpuMetric;
@@ -133,11 +239,14 @@ export class PerformanceMonitor {
     };
     this.#gpu = this.#detectTimestampSupport();
     this.#hud = options.mode === 'visual' ? this.#createHud() : null;
+    this.#timestampQueryPoolDrain = createTimestampQueryPoolDrain(renderer, {
+      resolve: async () => this.#scheduleGpuTimestampResolution(false),
+      scopes: this.#options.gpuScopes,
+    });
     this.publish();
   }
 
   recordFrame(timestamp: number): void {
-    this.#frameCount += 1;
     if (this.#previousTimestamp !== undefined) {
       const frameMs = timestamp - this.#previousTimestamp;
       if (Number.isFinite(frameMs) && frameMs > 0 && frameMs < 1000) {
@@ -151,9 +260,7 @@ export class PerformanceMonitor {
       this.#lastPublishTimestamp = timestamp;
       this.publish();
     }
-    if (this.#frameCount % 30 === 0) {
-      void this.resolveGpuTimestamps();
-    }
+    void this.#timestampQueryPoolDrain();
   }
 
   resolveGpuTimestamps(): Promise<void> {

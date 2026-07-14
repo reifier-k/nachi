@@ -1,4 +1,41 @@
+import type * as THREE from 'three/webgpu';
+
 const WEBGPU_BYTES_PER_ROW_ALIGNMENT = 256;
+
+export type PanelReadbackStats = {
+  foregroundRatio: number;
+};
+
+type RenderTargetReadbackRenderer = Pick<THREE.WebGPURenderer, 'readRenderTargetPixelsAsync'>;
+
+/**
+ * Creates the per-frame 1x1 readback used by headless/offscreen capture loops.
+ *
+ * Three r185's WebGPU readback path can return an empty first full-size capture after many frames
+ * without a readback. Call the returned function once after every render to keep that path drained.
+ */
+export function createDrainedReadback(
+  renderer: RenderTargetReadbackRenderer,
+  target: THREE.RenderTarget,
+): () => Promise<void> {
+  return async () => {
+    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+  };
+}
+
+/** Contract-sheet guard: every captured panel must contain at least some foreground pixels. */
+export function allPanelsHaveForeground(
+  panelStats: readonly PanelReadbackStats[],
+  minimumForegroundRatio = 0,
+): boolean {
+  return (
+    panelStats.length > 0 &&
+    panelStats.every(
+      ({ foregroundRatio }) =>
+        Number.isFinite(foregroundRatio) && foregroundRatio > minimumForegroundRatio,
+    )
+  );
+}
 
 /**
  * Removes the row padding returned by Three r185's WebGPU render-target readback.

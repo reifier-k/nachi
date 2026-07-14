@@ -193,5 +193,6 @@ The release gate imports every built public export in plain Node ESM and runs `n
 - Navigate to a real `http://localhost`/`127.0.0.1` URL; `about:blank`, `data:`, and direct files do not expose WebGPU reliably.
 - Playwright must launch full Chromium with `channel: 'chromium'` and `--enable-unsafe-webgpu`; do not use the headless-shell binary.
 - SwiftShader supports compute/readback here, but presenting a WebGPU canvas immediately destroys the device. Use offscreen/readback mode (`headless=1`) or force WebGL2 for screenshots.
+- After many frames without readback, the first full-size readback can be empty; drain the offscreen readback path with a 1×1 read every frame before measured captures.
 - Do not add browser-download postinstall hooks. The expected Chromium installation is managed outside the repository.
 - Dev servers must stay bound to `0.0.0.0` so a Windows-side browser can reach the WSL server.

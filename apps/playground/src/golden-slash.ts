@@ -39,7 +39,7 @@ import {
 } from '@nachi/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
-import { compactRgba8Readback } from './readback';
+import { compactRgba8Readback, createDrainedReadback } from './readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-slash.css';
 
@@ -127,6 +127,7 @@ async function probePointLights(
   const gpuRenderMs: (number | null)[] = [];
   const nonBlack: number[] = [];
   const target = new THREE.RenderTarget(32, 32, { depthBuffer: true });
+  const drainReadback = createDrainedReadback(renderer, target);
   for (const count of counts) {
     const scene = new THREE.Scene();
     const material = new THREE.MeshStandardMaterial({ color: 0x445566, roughness: 0.8 });
@@ -139,7 +140,7 @@ async function probePointLights(
     }
     renderer.setRenderTarget(target);
     renderer.render(scene, camera);
-    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+    await drainReadback();
     await renderer.resolveTimestampsAsync('render');
     renderer.render(scene, camera);
     const pixels = compactRgba8Readback(

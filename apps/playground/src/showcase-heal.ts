@@ -45,7 +45,8 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor } from './perf';
+import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
+import { allPanelsHaveForeground, createDrainedReadback } from './readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './showcase-heal.css';
 
@@ -865,26 +866,21 @@ async function runHeadless(
     'surge',
   ] as const;
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  const drainReadback = createDrainedReadback(renderer, target);
+  const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
   const captures: Uint8Array[] = [];
   const captureStates: Array<Record<string, unknown>> = [];
   let captureIndex = 0;
   await step(0);
-  // The very first readback from a fresh render target returns empty pixels;
-  // warm the readback path up before any measured capture.
   renderer.setRenderTarget(target);
   post.render();
-  await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT);
+  await drainReadback();
   for (let frame = 0; frame < 140; frame += 1) {
     await step(STEP);
     renderer.setRenderTarget(target);
     post.render();
-    // A tiny readback every frame keeps the async readback path drained; a
-    // full-size capture after many readback-free frames returns empty pixels.
-    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
-    if (frame % 6 === 5) {
-      await renderer.resolveTimestampsAsync('compute');
-      await renderer.resolveTimestampsAsync('render');
-    }
+    await drainReadback();
+    await drainTimestampQueries();
     if (captureIndex < CAPTURE_TIMES.length && instance.localTime >= CAPTURE_TIMES[captureIndex]!) {
       captures.push(
         new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT)),
@@ -933,6 +929,7 @@ async function runHeadless(
   const fountainPanel = panelStats[3] ?? { foregroundRatio: 0, saturatedRatio: 1 };
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
+    allPanelsVisible: allPanelsHaveForeground(panelStats),
     climaxVisible: climax.foregroundRatio > 0.03 && climax.saturatedRatio < 0.3,
     consoleClean: consoleMessages.length === 0,
     fountainVisible: fountainPanel.foregroundRatio > 0.015,

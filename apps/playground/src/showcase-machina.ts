@@ -47,7 +47,8 @@ import {
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
 } from '@nachi/three';
-import { createPerformanceMonitor } from './perf';
+import { createPerformanceMonitor, createTimestampQueryPoolDrain } from './perf';
+import { allPanelsHaveForeground, createDrainedReadback } from './readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './showcase-machina.css';
 
@@ -1336,26 +1337,21 @@ async function runHeadless(
     'shockFinal',
   ] as const;
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  const drainReadback = createDrainedReadback(renderer, target);
+  const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
   const captures: Uint8Array[] = [];
   const captureStates: Array<Record<string, unknown>> = [];
   let captureIndex = 0;
   await step(0);
-  // The very first readback from a fresh render target returns empty pixels;
-  // warm the readback path up before any measured capture.
   renderer.setRenderTarget(target);
   post.render();
-  await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT);
+  await drainReadback();
   for (let frame = 0; frame < 195; frame += 1) {
     await step(STEP);
     renderer.setRenderTarget(target);
     post.render();
-    // A tiny readback every frame keeps the async readback path drained; a
-    // full-size capture after many readback-free frames returns empty pixels.
-    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
-    // Derived burst envelopes overlap heavily during the barrage. Drain both timestamp scopes
-    // every frame so the page-local compute query pool cannot accumulate enough entries to warn.
-    await renderer.resolveTimestampsAsync('compute');
-    await renderer.resolveTimestampsAsync('render');
+    await drainReadback();
+    await drainTimestampQueries();
     if (captureIndex < CAPTURE_TIMES.length && instance.localTime >= CAPTURE_TIMES[captureIndex]!) {
       captures.push(
         new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, WIDTH, HEIGHT)),
@@ -1406,6 +1402,7 @@ async function runHeadless(
   const checks = {
     afterglowLingers: afterglow.foregroundRatio > 0.012,
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
+    allPanelsVisible: allPanelsHaveForeground(panelStats),
     allStrikesLanded: landedStrikes().length === STRIKES.length + 1,
     barrageReads: barrage.foregroundRatio > 0.035 && barrage.saturatedRatio < 0.28,
     consoleClean: consoleMessages.length === 0,

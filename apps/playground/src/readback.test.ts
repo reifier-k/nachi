@@ -1,6 +1,46 @@
 import { describe, expect, it } from 'vitest';
 
-import { compactRgba8Readback, normalizeRgba8Readback } from './readback';
+import {
+  allPanelsHaveForeground,
+  compactRgba8Readback,
+  createDrainedReadback,
+  normalizeRgba8Readback,
+} from './readback';
+
+describe('headless readback drain', () => {
+  it('reads exactly one pixel from the configured render target per call', async () => {
+    const target = { name: 'capture' };
+    const calls: unknown[][] = [];
+    const renderer = {
+      async readRenderTargetPixelsAsync(...arguments_: unknown[]) {
+        calls.push(arguments_);
+        return new Uint8Array(4);
+      },
+    };
+    const drain = createDrainedReadback(renderer as never, target as never);
+
+    await drain();
+    await drain();
+
+    expect(calls).toEqual([
+      [target, 0, 0, 1, 1],
+      [target, 0, 0, 1, 1],
+    ]);
+  });
+});
+
+describe('contract-sheet foreground guard', () => {
+  it('requires every panel to clear the configured foreground floor', () => {
+    expect(allPanelsHaveForeground([{ foregroundRatio: 0.01 }, { foregroundRatio: 0.02 }])).toBe(
+      true,
+    );
+    expect(allPanelsHaveForeground([{ foregroundRatio: 0.01 }, { foregroundRatio: 0 }])).toBe(
+      false,
+    );
+    expect(allPanelsHaveForeground([{ foregroundRatio: 0.01 }], 0.015)).toBe(false);
+    expect(allPanelsHaveForeground([])).toBe(false);
+  });
+});
 
 describe('RGBA8 render-target readback compaction', () => {
   it('compacts the 32px golden-slash probe without losing its lower rows', () => {

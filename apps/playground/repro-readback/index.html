@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#07111f" />
+    <link rel="icon" href="data:," />
+    <title>Three r185 Readback Drain Reproduction</title>
+    <style>
+      :root {
+        color: #dff7ff;
+        background: #07111f;
+        font:
+          16px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      body {
+        display: grid;
+        min-height: 100vh;
+        margin: 0;
+        place-items: center;
+      }
+      main {
+        width: min(42rem, calc(100vw - 3rem));
+        padding: 2rem;
+        border: 1px solid #2e6b80;
+        border-radius: 0.75rem;
+        background: #0b1c2f;
+      }
+      dt {
+        color: #7fc9df;
+      }
+      dd {
+        margin: 0 0 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>Three r185 · offscreen WebGPU readback reproduction</p>
+      <h1>First full-size readback after a frame gap</h1>
+      <dl>
+        <dt>Drain mode</dt>
+        <dd id="drain-value">initializing</dd>
+        <dt>Frames</dt>
+        <dd id="frames-value">--</dd>
+        <dt>Result</dt>
+        <dd id="status-value">initializing</dd>
+      </dl>
+    </main>
+    <script type="module" src="/src/repro-readback.ts"></script>
+  </body>
+</html>

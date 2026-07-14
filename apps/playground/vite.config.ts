@@ -53,6 +53,7 @@ export default defineConfig({
         showcaseHeal: 'showcase-heal/index.html',
         showcaseIce: 'showcase-ice/index.html',
         showcaseMachina: 'showcase-machina/index.html',
+        reproReadback: 'repro-readback/index.html',
         spikeCompute: 'spike-compute/index.html',
         spikeDepth: 'spike-depth/index.html',
         wuwaSlash: 'wuwa-slash/index.html',
