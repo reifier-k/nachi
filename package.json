@@ -24,7 +24,7 @@
     "format:check": "biome format .",
     "format": "biome format --write .",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "changeset version && node tools/sync-package-versions.mjs",
     "esm:check": "node tools/check-all-package-esm.mjs",
     "esm-all": "node tools/check-all-package-esm.mjs",
     "golden:regress": "node tools/golden-runner.mjs",
