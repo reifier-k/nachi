@@ -78,11 +78,26 @@ export interface PostPipelineControls {
   setHeatHaze(index: number, region: Readonly<Required<HeatHazeRegion>>): void;
 }
 
+export interface PostPrepareProgress {
+  readonly completed: 0 | 1;
+  readonly total: 1;
+}
+
+export interface PostPrepareOptions {
+  readonly onProgress?: (progress: PostPrepareProgress) => void;
+  /** Final output used by the live render loop. Defaults to the canvas. */
+  readonly outputTarget?: THREE.RenderTarget | null;
+  readonly signal?: AbortSignal;
+}
+
 export class PostPipeline {
   readonly renderPipeline: THREE.RenderPipeline;
+  /** Render target used internally by the scene pass. */
+  readonly sceneRenderTarget: THREE.RenderTarget;
   readonly controls: PostPipelineControls;
   readonly order: readonly PostPassKind[];
   readonly #effectDisposables: readonly { dispose(): void }[];
+  readonly #renderer: THREE.WebGPURenderer;
 
   constructor(
     renderer: THREE.WebGPURenderer,
@@ -90,8 +105,17 @@ export class PostPipeline {
     camera: THREE.Camera,
     config: PostPipelineConfig,
   ) {
+    this.#renderer = renderer;
     this.order = resolveOrder(config);
     const scenePass = pass(scene, camera);
+    // PassNode applies these values lazily on its first update. Publish the final context now so
+    // draw preparers can compile against the exact scene-pass cache key before that first frame.
+    scenePass.renderTarget.samples = renderer.samples;
+    scenePass.renderTarget.texture.type = renderer.getOutputBufferType();
+    if (renderer.reversedDepthBuffer && scenePass.renderTarget.depthTexture) {
+      scenePass.renderTarget.depthTexture.type = THREE.FloatType;
+    }
+    this.sceneRenderTarget = scenePass.renderTarget;
     const sceneColor = scenePass.getTextureNode('output');
     let sampler: Sampler = (coordinate) => vec4(sceneColor.sample(coordinate));
     let timeControl: OwnedScalar | null = null;
@@ -234,6 +258,26 @@ export class PostPipeline {
 
   render(): void {
     this.renderPipeline.render();
+  }
+
+  async prepare(options: PostPrepareOptions = {}): Promise<void> {
+    options.signal?.throwIfAborted();
+    options.onProgress?.({ completed: 0, total: 1 });
+    const previousTarget = this.#renderer.getRenderTarget();
+    const previousMrt = this.#renderer.getMRT();
+    try {
+      // The final composite pipeline key includes the output format, sample count, and color
+      // space. Rendering to the live output is the only reliable way to prepare that exact key.
+      this.#renderer.setRenderTarget(options.outputTarget ?? null);
+      this.#renderer.setMRT(null);
+      this.render();
+      await Promise.resolve();
+      options.signal?.throwIfAborted();
+      options.onProgress?.({ completed: 1, total: 1 });
+    } finally {
+      this.#renderer.setRenderTarget(previousTarget);
+      this.#renderer.setMRT(previousMrt);
+    }
   }
 
   dispose(): void {

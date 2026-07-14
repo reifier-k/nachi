@@ -43,6 +43,7 @@ import * as THREE from 'three/webgpu';
 import { cos, float, fract, mix, sin, step, vec3 } from 'three/tsl';
 
 import {
+  createThreeEffectPreparer,
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   createThreeTextureResolver,
@@ -56,6 +57,7 @@ import {
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
 } from './harness';
+import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
 import './ice.css';
 import './embed.css';
@@ -950,6 +952,7 @@ async function run(): Promise<void> {
   system.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
   const effect = createGlacialRequiem(textures, !headless);
   const instance = system.spawn(effect, { position: [0, 0, 0], seed: 0x1ce0 });
+  let effectPreparer: ReturnType<typeof createThreeEffectPreparer> | undefined;
 
   const actions: Array<{ kind: string; localTime: number; target?: string }> = [];
   const markers: string[] = [];
@@ -974,7 +977,9 @@ async function run(): Promise<void> {
         if (lightView !== view) {
           lightDraw?.dispose();
           if (lightDraw) scene.remove(lightDraw.group);
-          lightDraw = materializeThreeLightDraw(view.program, view.kernels);
+          lightDraw =
+            effectPreparer?.takePreparedDraw<ReturnType<typeof materializeThreeLightDraw>>(view) ??
+            materializeThreeLightDraw(view.program, view.kernels);
           lightView = view;
           scene.add(lightDraw.group);
         }
@@ -983,7 +988,9 @@ async function run(): Promise<void> {
       const existing = spriteDraws.get(key);
       if (existing?.view === view) continue;
       if (existing) scene.remove(existing.object);
-      const object = materializeThreeSpriteDraw(view.program, view.kernels, 0, { resolveTexture });
+      const object =
+        effectPreparer?.takePreparedDraw<ReturnType<typeof materializeThreeSpriteDraw>>(view) ??
+        materializeThreeSpriteDraw(view.program, view.kernels, 0, { resolveTexture });
       scene.add(object);
       spriteDraws.set(key, { object, view });
     }
@@ -1088,6 +1095,27 @@ async function run(): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+  const status = required<HTMLElement>('#status-value');
+  const loading = createShowcaseLoading(stage, status);
+  const preparer = createThreeEffectPreparer(renderer, scene, camera, {
+    compileTarget: post.sceneRenderTarget,
+    sprite: { resolveTexture },
+  });
+  effectPreparer = preparer;
+  try {
+    await loading.run('effect resources', (signal, onProgress) =>
+      system.prepare(effect, { onProgress, preparer, signal }),
+    );
+    await loading.run('post pipeline', (signal, onProgress) =>
+      post.prepare({ onProgress, signal }),
+    );
+  } catch (error) {
+    preparer.dispose();
+    loading.fail(error);
+    return;
+  }
+  loading.complete();
+  window.addEventListener('pagehide', () => preparer.dispose(), { once: true });
   attachShowcaseTuning({
     camera,
     cameraBasePosition,
@@ -1096,7 +1124,7 @@ async function run(): Promise<void> {
     instance,
     renderer,
   });
-  required<HTMLElement>('#status-value').textContent = 'looping · watch the freeze';
+  status.textContent = 'looping · watch the freeze';
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
   let previous = performance.now();

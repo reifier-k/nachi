@@ -6,7 +6,13 @@ export {
   screenDistortion,
 } from './authoring.js';
 export { PostDiagnosticError, type PostDiagnostic } from './diagnostics.js';
-export { PostPipeline, createPostPipeline, type PostPipelineControls } from './pipeline.js';
+export {
+  PostPipeline,
+  createPostPipeline,
+  type PostPipelineControls,
+  type PostPrepareOptions,
+  type PostPrepareProgress,
+} from './pipeline.js';
 export {
   WBOIT_ACCUM_ATTACHMENT,
   WBOIT_REVEALAGE_ATTACHMENT,

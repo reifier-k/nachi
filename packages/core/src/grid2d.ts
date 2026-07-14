@@ -1134,6 +1134,36 @@ export class Grid2DRuntime implements Grid2DRuntimeView {
     }
   }
 
+  /** @internal Compiles all grid pipelines once without publishing initialized runtime state. */
+  async preparePipelines(signal?: AbortSignal): Promise<void> {
+    const submit = async (kernel: KernelComputeNode) => {
+      signal?.throwIfAborted();
+      await this.#submit(kernel);
+    };
+    this.#particleCount.value = 0;
+    await submit(this.#clear);
+    for (const { kernels } of this.#stages) {
+      if (this.#renderer.setUniformValue) {
+        this.#renderer.setUniformValue(kernels.deltaTime, 'System.deltaTime', 0);
+      } else {
+        kernels.deltaTime.value = 0;
+      }
+      await submit(kernels.stage);
+      await submit(kernels.commit);
+    }
+    await submit(this.#particleReset);
+    await submit(this.#particleRasterize);
+    for (const kernel of this.#particleResolve.values()) await submit(kernel);
+    for (const kernel of this.#particleSample.values()) await submit(kernel);
+    signal?.throwIfAborted();
+  }
+
+  /** @internal Resets lifecycle flags while retaining nodes and storage for a pooled checkout. */
+  prepareForPooling(): void {
+    this.#initialized = false;
+    this.#particleCount.value = 0;
+  }
+
   async capture(): Promise<Grid2DSnapshot> {
     if (!this.#renderer.readStorage) {
       throw new VfxDiagnosticError([

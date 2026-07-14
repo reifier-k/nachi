@@ -1,6 +1,7 @@
 import type {
   BakedLut,
   BuiltEmitterKernels,
+  CompiledDrawDescription,
   CompiledDrawIndirectDescription,
   CompiledEmitterProgram,
   EffectInstanceState,
@@ -21,6 +22,9 @@ import type {
   Vec3,
   TslStorageType,
   VfxDeviceLossInfo,
+  VfxEffectPreparer,
+  VfxEmitterRuntimeView,
+  VfxPrepareEmitterContext,
   VfxRuntimeRenderer,
 } from '@nachi/core';
 import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS, resolvePackedAttributeAddress } from '@nachi/core';
@@ -522,6 +526,49 @@ export function disposeThreeDraw(
       THREE_DRAW_REGISTRY
     ];
   }
+}
+
+function retainThreeDrawPipeline(
+  kernels: BuiltEmitterKernels,
+  object: THREE.Object3D,
+  renderer: THREE.WebGPURenderer,
+): { activate(): void; dispose(): void } | undefined {
+  const registry = drawRegistry(kernels);
+  if (!registry) return undefined;
+  for (const registration of registry) {
+    if (registration.object !== object) continue;
+    registry.delete(registration);
+    if (registry.size === 0) {
+      delete (kernels as BuiltEmitterKernels & { [THREE_DRAW_REGISTRY]?: unknown })[
+        THREE_DRAW_REGISTRY
+      ];
+    }
+    let active = false;
+    let disposed = false;
+    return {
+      activate(): void {
+        if (disposed || active) return;
+        drawRegistry(kernels, true)!.add(registration);
+        active = true;
+        const state = kernels as BuiltEmitterKernels & { [THREE_RENDER_ORDER]?: number };
+        registration.object.renderOrder =
+          state[THREE_RENDER_ORDER] ?? registration.object.renderOrder;
+        applyDrawVisibility(kernels, registration);
+      },
+      dispose(): void {
+        if (disposed) return;
+        disposed = true;
+        if (active) {
+          disposeThreeDraw(kernels, object, renderer);
+          return;
+        }
+        registration.dispose();
+        const attributes = rendererAttributeManager(renderer);
+        for (const attribute of registration.attributes) attributes?.delete(attribute);
+      },
+    };
+  }
+  return undefined;
 }
 
 /** Alias emphasizing that disposal also unregisters the draw from its kernel owner. */
@@ -1896,4 +1943,260 @@ export function materializeThreeDecalDraw(
   mesh.frustumCulled = false;
   mesh.renderOrder = options.renderOrder ?? 10;
   return Object.assign(mesh, registerDrawObject(kernels, mesh));
+}
+
+export interface ThreePreparedDraw {
+  /** Compile the target scene too because this draw changes its lighting configuration. */
+  readonly affectsLighting?: boolean;
+  dispose(): void;
+  readonly object: THREE.Object3D;
+  prepare?(): Promise<void> | void;
+  /** Value returned by takePreparedDraw(); defaults to object. */
+  readonly value?: unknown;
+}
+
+export interface ThreeDrawPreparationContext extends VfxPrepareEmitterContext {
+  readonly draw: CompiledDrawDescription;
+  readonly drawIndex: number;
+  readonly renderer: THREE.WebGPURenderer;
+}
+
+export type ThreeDrawPreparer = (
+  context: ThreeDrawPreparationContext,
+) => Promise<ThreePreparedDraw> | ThreePreparedDraw;
+
+export interface ThreeEffectPreparerOptions {
+  /** Render target used by the live scene pass. The current target is used when omitted. */
+  readonly compileTarget?: THREE.RenderTarget | null;
+  readonly decal?: ThreeDecalMaterializationOptions;
+  readonly drawPreparers?: Readonly<Record<string, ThreeDrawPreparer>>;
+  readonly light?: ThreeLightPoolOptions;
+  readonly mesh?: ThreeMeshMaterializationOptions;
+  readonly sprite?: ThreeSpriteMaterializationOptions;
+}
+
+export interface ThreeEffectPreparer extends VfxEffectPreparer<THREE.Object3D> {
+  dispose(): void;
+  takePreparedDraw<Value>(emitter: VfxEmitterRuntimeView, drawIndex?: number): Value | undefined;
+}
+
+/** Compiles temporary Three draw objects without leaving them in the visible target scene. */
+export function createThreeEffectPreparer(
+  renderer: THREE.WebGPURenderer,
+  scene: THREE.Scene,
+  camera: THREE.Camera,
+  options: ThreeEffectPreparerOptions = {},
+): ThreeEffectPreparer {
+  const retained: Array<{
+    activate?(): void;
+    dispose(): void;
+    readonly drawIndex?: number;
+    readonly kernels?: BuiltEmitterKernels;
+    readonly object: THREE.Object3D;
+    readonly value?: unknown;
+  }> = [];
+  const compileObject = async (
+    object: THREE.Object3D,
+    signal?: AbortSignal,
+    affectsLighting = false,
+  ): Promise<void> => {
+    const previousTarget = renderer.getRenderTarget();
+    const previousMrt = renderer.getMRT();
+    const previousParent = object.parent;
+    const sceneVisibility = new Map<THREE.Object3D, boolean>();
+    try {
+      if ('compileTarget' in options) renderer.setRenderTarget(options.compileTarget ?? null);
+      renderer.setMRT(null);
+      object.traverse((child) => {
+        child.visible = true;
+      });
+      object.updateMatrixWorld(true);
+      signal?.throwIfAborted();
+      if (affectsLighting) {
+        // Timeline resources are intentionally hidden until their play action. A light changes
+        // their pipeline variants, so make the target scene traversable for this compile only.
+        scene.traverse((child) => {
+          sceneVisibility.set(child, child.visible);
+          child.visible = true;
+        });
+        scene.add(object);
+        await renderer.compileAsync(scene, camera);
+      } else {
+        await renderer.compileAsync(object, camera, scene);
+      }
+      signal?.throwIfAborted();
+    } finally {
+      if (affectsLighting) {
+        object.removeFromParent();
+        if (previousParent) previousParent.add(object);
+      }
+      for (const [child, visible] of sceneVisibility) child.visible = visible;
+      renderer.setRenderTarget(previousTarget);
+      renderer.setMRT(previousMrt);
+    }
+  };
+  const prepareBuiltIn = (context: ThreeDrawPreparationContext): ThreePreparedDraw | undefined => {
+    const { drawIndex, emitter } = context;
+    if (context.draw.kind === 'billboard') {
+      const object = materializeThreeSpriteDraw(
+        emitter.program,
+        emitter.kernels,
+        drawIndex,
+        options.sprite,
+      );
+      return {
+        dispose: () => disposeThreeDraw(emitter.kernels, object, renderer),
+        object,
+      };
+    }
+    if (context.draw.kind === 'mesh') {
+      if (!options.mesh) {
+        throw new Error('NACHI_THREE_PREPARE_MESH_RESOLVER_REQUIRED: mesh options are required.');
+      }
+      const object = materializeThreeMeshDraw(
+        emitter.program,
+        emitter.kernels,
+        drawIndex,
+        options.mesh,
+      );
+      return {
+        dispose: () => disposeThreeDraw(emitter.kernels, object, renderer),
+        object,
+      };
+    }
+    if (context.draw.kind === 'light') {
+      const draw = materializeThreeLightDraw(
+        emitter.program,
+        emitter.kernels,
+        drawIndex,
+        options.light,
+      );
+      return {
+        affectsLighting: true,
+        dispose: () => draw.dispose(renderer),
+        object: draw.group,
+        prepare: async () => {
+          for (const kernel of draw.selectionKernels) {
+            context.signal?.throwIfAborted();
+            await renderer.computeAsync(kernel as never);
+          }
+        },
+        value: draw,
+      };
+    }
+    if (context.draw.kind === 'decal') {
+      if (!options.decal) {
+        throw new Error('NACHI_THREE_PREPARE_DECAL_OPTIONS_REQUIRED: decal options are required.');
+      }
+      const object = materializeThreeDecalDraw(
+        emitter.program,
+        emitter.kernels,
+        drawIndex,
+        options.decal,
+      );
+      return {
+        dispose: () => disposeThreeDraw(emitter.kernels, object, renderer),
+        object,
+      };
+    }
+    return undefined;
+  };
+
+  return {
+    discardEmitter({ emitter }): void {
+      for (let index = retained.length - 1; index >= 0; index -= 1) {
+        const resource = retained[index]!;
+        if (resource.kernels !== emitter.kernels) continue;
+        retained.splice(index, 1);
+        resource.dispose();
+      }
+    },
+    dispose(): void {
+      for (const resource of retained.splice(0).reverse()) resource.dispose();
+    },
+    takePreparedDraw<Value>(emitter: VfxEmitterRuntimeView, drawIndex = 0): Value | undefined {
+      const index = retained.findIndex(
+        (resource) => resource.kernels === emitter.kernels && resource.drawIndex === drawIndex,
+      );
+      if (index < 0) return undefined;
+      const [resource] = retained.splice(index, 1);
+      resource!.activate?.();
+      return resource!.value as Value;
+    },
+    async prepareEmitter(context): Promise<void> {
+      const prepared: Array<{ readonly drawIndex: number; readonly resource: ThreePreparedDraw }> =
+        [];
+      const group = new THREE.Group();
+      let succeeded = false;
+      try {
+        for (const [drawIndex, draw] of context.emitter.program.draws.entries()) {
+          context.signal?.throwIfAborted();
+          const drawContext = { ...context, draw, drawIndex, renderer };
+          const builtIn = prepareBuiltIn(drawContext);
+          const factory = options.drawPreparers?.[draw.kind];
+          const resource = builtIn ?? (factory ? await factory(drawContext) : undefined);
+          if (!resource) {
+            throw new Error(
+              `NACHI_THREE_PREPARE_DRAW_UNSUPPORTED: no preparer is registered for draw kind "${draw.kind}".`,
+            );
+          }
+          prepared.push({ drawIndex, resource });
+          await resource.prepare?.();
+          resource.object.visible = true;
+          group.add(resource.object);
+        }
+        context.signal?.throwIfAborted();
+        if (prepared.length > 0) {
+          await compileObject(
+            group,
+            context.signal,
+            prepared.some(({ resource }) => resource.affectsLighting === true),
+          );
+        }
+        context.signal?.throwIfAborted();
+        succeeded = true;
+      } finally {
+        for (const { drawIndex, resource } of prepared.reverse()) {
+          resource.object.removeFromParent();
+          if (!succeeded) {
+            resource.dispose();
+            continue;
+          }
+          const registration = retainThreeDrawPipeline(
+            context.emitter.kernels,
+            resource.object,
+            renderer,
+          );
+          retained.push({
+            ...(registration === undefined ? {} : { activate: registration.activate }),
+            dispose: registration?.dispose ?? resource.dispose,
+            drawIndex,
+            kernels: context.emitter.kernels,
+            object: resource.object,
+            value: resource.value ?? resource.object,
+          });
+        }
+        group.clear();
+      }
+    },
+    async prepareObject({ object, signal }) {
+      signal?.throwIfAborted();
+      await compileObject(object, signal);
+      retained.push({
+        dispose: () => {
+          object.removeFromParent();
+          object.traverse((child) => {
+            const material = (child as THREE.Mesh).material;
+            if (Array.isArray(material)) {
+              for (const entry of material) entry.dispose();
+            } else {
+              material?.dispose();
+            }
+          });
+        },
+        object,
+      });
+      return { retained: true };
+    },
+  };
 }

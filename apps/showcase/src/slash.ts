@@ -45,6 +45,7 @@ import { materializeThreeRibbonDraw, readRibbonSegments } from '@nachi/trails/th
 import * as THREE from 'three/webgpu';
 
 import {
+  createThreeEffectPreparer,
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   createThreeTextureResolver,
@@ -61,6 +62,7 @@ import {
   createTimestampQueryPoolDrain,
   readLogicalAttribute,
 } from './harness';
+import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
 import './slash.css';
 import './embed.css';
@@ -732,6 +734,8 @@ async function run(): Promise<void> {
   system.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
   const effect = createResonanceSlash(textures, !headless);
   const instance = system.spawn(effect, { position: [0, 0, 0], seed: 0x0a11 });
+  let effectPreparer: ReturnType<typeof createThreeEffectPreparer> | undefined;
+  let trailEffectPreparer: ReturnType<typeof createThreeEffectPreparer> | undefined;
 
   const trailSystem = new CoreVFXSystem(runtime, undefined, { registry });
   trailSystem.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
@@ -777,7 +781,7 @@ async function run(): Promise<void> {
       trail.instance.release();
     }
   };
-  trailRuntimes = spawnTrails();
+  if (headless) trailRuntimes = spawnTrails();
 
   const actions: Array<{ kind: string; localTime: number; target?: string }> = [];
   const markers: string[] = [];
@@ -805,7 +809,9 @@ async function run(): Promise<void> {
         if (lightView !== view) {
           lightDraw?.dispose();
           if (lightDraw) scene.remove(lightDraw.group);
-          lightDraw = materializeThreeLightDraw(view.program, view.kernels);
+          lightDraw =
+            effectPreparer?.takePreparedDraw<ReturnType<typeof materializeThreeLightDraw>>(view) ??
+            materializeThreeLightDraw(view.program, view.kernels);
           lightView = view;
           scene.add(lightDraw.group);
         }
@@ -814,7 +820,9 @@ async function run(): Promise<void> {
       const existing = spriteDraws.get(key);
       if (existing?.view === view) continue;
       if (existing) scene.remove(existing.object);
-      const object = materializeThreeSpriteDraw(view.program, view.kernels, 0, { resolveTexture });
+      const object =
+        effectPreparer?.takePreparedDraw<ReturnType<typeof materializeThreeSpriteDraw>>(view) ??
+        materializeThreeSpriteDraw(view.program, view.kernels, 0, { resolveTexture });
       scene.add(object);
       spriteDraws.set(key, { object, view });
     }
@@ -870,7 +878,10 @@ async function run(): Promise<void> {
       if (trail.draw) continue;
       const view = trail.instance.getEmitter('trail');
       if (!view) continue;
-      trail.draw = materializeThreeRibbonDraw(view.program, view.kernels);
+      trail.draw =
+        trailEffectPreparer?.takePreparedDraw<ReturnType<typeof materializeThreeRibbonDraw>>(
+          view,
+        ) ?? materializeThreeRibbonDraw(view.program, view.kernels);
       scene.add(trail.draw.mesh);
     }
     for (const trail of trailRuntimes) if (trail.draw) await trail.draw.prepare(renderer);
@@ -936,6 +947,57 @@ async function run(): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+  const status = required<HTMLElement>('#status-value');
+  const loading = createShowcaseLoading(stage, status);
+  const preparer = createThreeEffectPreparer(renderer, scene, camera, {
+    compileTarget: post.sceneRenderTarget,
+    sprite: { resolveTexture },
+  });
+  effectPreparer = preparer;
+  const trailPreparer = createThreeEffectPreparer(renderer, scene, camera, {
+    compileTarget: post.sceneRenderTarget,
+    drawPreparers: {
+      ribbon: ({ drawIndex, emitter, renderer: preparationRenderer }) => {
+        const draw = materializeThreeRibbonDraw(emitter.program, emitter.kernels, drawIndex);
+        return {
+          dispose: () => draw.dispose(preparationRenderer),
+          object: draw.mesh,
+          prepare: () => draw.prepare(preparationRenderer),
+          value: draw,
+        };
+      },
+    },
+  });
+  trailEffectPreparer = trailPreparer;
+  try {
+    await loading.run('timeline resources', (signal, onProgress) =>
+      system.prepare(effect, { onProgress, preparer, signal }),
+    );
+    await loading.run('cyan ribbon resources', (signal, onProgress) =>
+      trailSystem.prepare(trailCyan, { onProgress, preparer: trailPreparer, signal }),
+    );
+    await loading.run('gold ribbon resources', (signal, onProgress) =>
+      trailSystem.prepare(trailGold, { onProgress, preparer: trailPreparer, signal }),
+    );
+    await loading.run('post pipeline', (signal, onProgress) =>
+      post.prepare({ onProgress, signal }),
+    );
+  } catch (error) {
+    trailPreparer.dispose();
+    preparer.dispose();
+    loading.fail(error);
+    return;
+  }
+  trailRuntimes = spawnTrails();
+  loading.complete();
+  window.addEventListener(
+    'pagehide',
+    () => {
+      trailPreparer.dispose();
+      preparer.dispose();
+    },
+    { once: true },
+  );
   attachShowcaseTuning({
     camera,
     cameraBasePosition,
@@ -945,7 +1007,7 @@ async function run(): Promise<void> {
     onBeforeHitStop: () => socketPhase.beginHitStop(instance.localTime),
     renderer,
   });
-  required<HTMLElement>('#status-value').textContent = 'looping · watch the slash';
+  status.textContent = 'looping · watch the slash';
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
   let renderedCycle = 0;

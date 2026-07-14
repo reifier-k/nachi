@@ -130,6 +130,51 @@ export interface VfxRuntimeRenderer {
   ): Promise<void> | void;
 }
 
+export type VfxPrepareResourceKind = 'emitter' | 'grid' | 'object';
+
+export interface VfxPrepareProgress {
+  readonly completed: number;
+  readonly resource?: Readonly<{
+    readonly key: string;
+    readonly kind: VfxPrepareResourceKind;
+  }>;
+  readonly total: number;
+}
+
+export interface VfxPrepareEmitterContext {
+  readonly emitter: VfxEmitterRuntimeView;
+  readonly key: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface VfxPrepareObjectContext<ObjectType> {
+  readonly key: string;
+  readonly object: ObjectType;
+  readonly signal?: AbortSignal;
+}
+
+export interface VfxPrepareObjectResult {
+  /** The preparer owns the temporary object and will release it from dispose(). */
+  readonly retained: true;
+}
+
+/** Backend hook for compiling renderer-owned draw and object pipelines during preparation. */
+export interface VfxEffectPreparer<ObjectType = never> {
+  /** Releases renderer resources retained for an emitter when preparation cannot be committed. */
+  discardEmitter?(context: Omit<VfxPrepareEmitterContext, 'signal'>): void;
+  dispose?(): void;
+  prepareEmitter(context: VfxPrepareEmitterContext): Promise<void> | void;
+  prepareObject?(
+    context: VfxPrepareObjectContext<ObjectType>,
+  ): Promise<VfxPrepareObjectResult | undefined> | VfxPrepareObjectResult | undefined;
+}
+
+export interface VfxPrepareOptions<ObjectType = never> {
+  readonly onProgress?: (progress: VfxPrepareProgress) => void;
+  readonly preparer?: VfxEffectPreparer<ObjectType>;
+  readonly signal?: AbortSignal;
+}
+
 export interface VfxFixedTimeStepOptions {
   readonly maxSubSteps?: number;
   readonly stepSeconds: number;
@@ -285,6 +330,11 @@ function requireNonNegativeFinite(value: number, name: string): number {
     throw new RangeError(`${name} must be a non-negative finite number.`);
   }
   return value;
+}
+
+function throwIfPreparationAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException('Effect preparation was aborted.', 'AbortError');
 }
 
 export function normalizeEmitterLifecycle(
@@ -542,6 +592,8 @@ type CompiledEffect = {
 };
 
 type PooledEffectResources = {
+  readonly grids2DByKey: ReadonlyMap<string, Grid2DRuntime>;
+  readonly grids3DByKey: ReadonlyMap<string, Grid3DRuntime>;
   readonly kernelsByEmitter: ReadonlyMap<string, BuiltEmitterKernels>;
 };
 
@@ -1356,6 +1408,77 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#renderer.prepareKernelsForPooling?.(this.kernels);
   }
 
+  /** @internal Compiles every runtime-reachable pipeline without advancing emitter time. */
+  async preparePipelines(signal?: AbortSignal): Promise<void> {
+    const submit = async (kernel: KernelComputeNode, kind: VfxGpuKernelKind) => {
+      throwIfPreparationAborted(signal);
+      await this.#submitCompute(kernel, kind);
+    };
+    const submitIndirect = async (
+      kernel: KernelComputeNode,
+      resource: unknown,
+      kind: VfxGpuKernelKind,
+    ) => {
+      throwIfPreparationAborted(signal);
+      await this.#submitComputeIndirect(kernel, resource, kind);
+    };
+
+    await submit(this.kernels.initialize, 'init');
+    for (const output of Object.values(this.kernels.eventOutputs)) {
+      await submit(output.reset, 'event');
+    }
+    for (const input of this.kernels.eventInputs) {
+      await submit(input.prepare, 'event');
+      await submitIndirect(input.spawn, input.binding.resources.indirect.indirectResource, 'event');
+      await submit(input.finalize, 'event');
+    }
+
+    setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.spawnCount', 0);
+    if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
+      const { finalizeSpawn, prepareSpawn, spawnDispatch } = this.kernels;
+      if (!prepareSpawn || !finalizeSpawn || !spawnDispatch) {
+        throw new GpuSubmissionContextError(
+          this.#emitterPath,
+          'spawn',
+          new Error('WebGPU lifecycle preparation kernels are missing.'),
+        );
+      }
+      await submit(prepareSpawn, 'spawn');
+      await submitIndirect(this.kernels.spawn, spawnDispatch.indirectResource, 'spawn');
+      await submit(finalizeSpawn, 'spawn');
+    } else {
+      await submit(this.kernels.spawn, 'spawn');
+    }
+
+    for (const grid of Object.values(this.kernels.neighborGrids)) {
+      await submit(grid.clear, 'neighbor-grid');
+      await submit(grid.bucket, 'neighbor-grid');
+      for (const constraint of grid.pbdIterations) {
+        await submit(constraint, 'neighbor-grid');
+      }
+    }
+    await submit(this.kernels.update, 'update');
+
+    if (this.kernels.capabilityPath === 'webgpu-atomic-indirect') {
+      const { compact, finalizeIndirect, resetAliveCount } = this.kernels;
+      if (!compact || !finalizeIndirect || !resetAliveCount) {
+        throw new GpuSubmissionContextError(
+          this.#emitterPath,
+          'compaction',
+          new Error('WebGPU lifecycle compaction preparation kernels are missing.'),
+        );
+      }
+      await submit(resetAliveCount, 'compaction');
+      await submit(compact, 'compaction');
+      await submit(finalizeIndirect, 'compaction');
+      if (this.kernels.prepareSort) {
+        await submit(this.kernels.prepareSort, 'sort');
+        for (const pass of this.kernels.sortPasses ?? []) await submit(pass, 'sort');
+      }
+    }
+    throwIfPreparationAborted(signal);
+  }
+
   async #submitCompute(kernel: KernelComputeNode, kind: VfxGpuKernelKind): Promise<void> {
     this.#profileComputeDispatches += 1;
     try {
@@ -1844,7 +1967,7 @@ type ReleasableEffectInstance = {
   emitterKernels(): Iterable<BuiltEmitterKernels>;
   recordDiagnostic(diagnostic: VfxDiagnostic): void;
   recordReleaseDiagnostic(diagnostic: VfxDiagnostic): void;
-  takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels>;
+  takeResourcesForPooling(): PooledEffectResources;
   releaseGrid2D(): void;
 };
 
@@ -2118,6 +2241,41 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
     return this.#emitters.get(key);
   }
 
+  /** @internal Prepares owned GPU resources without advancing clocks or lifecycle state. */
+  async prepareResources(
+    preparer: VfxEffectPreparer | undefined,
+    signal: AbortSignal | undefined,
+    onResource: (key: string, kind: Exclude<VfxPrepareResourceKind, 'object'>) => void,
+  ): Promise<void> {
+    for (const [key, grid] of this.#grids) {
+      throwIfPreparationAborted(signal);
+      await grid.preparePipelines(signal);
+      onResource(key, 'grid');
+    }
+    for (const [key, grid] of this.#grids3D) {
+      throwIfPreparationAborted(signal);
+      await grid.preparePipelines(signal);
+      onResource(key, 'grid');
+    }
+    for (const [key, emitter] of this.#emitters) {
+      throwIfPreparationAborted(signal);
+      await emitter.preparePipelines(signal);
+      await preparer?.prepareEmitter({
+        emitter,
+        key,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      throwIfPreparationAborted(signal);
+      onResource(key, 'emitter');
+    }
+  }
+
+  /** @internal Rolls renderer-owned preparation anchors back before kernels are destroyed. */
+  discardPreparedResources(preparer: VfxEffectPreparer | undefined): void {
+    if (!preparer?.discardEmitter) return;
+    for (const [key, emitter] of this.#emitters) preparer.discardEmitter({ emitter, key });
+  }
+
   beginProfileFrame(): void {
     for (const emitter of this.#emitters.values()) emitter.beginProfileFrame();
   }
@@ -2253,6 +2411,23 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
   takeEmitterKernelsForPooling(): ReadonlyMap<string, BuiltEmitterKernels> {
     for (const emitter of this.#emitters.values()) emitter.prepareForPooling();
     return this.detachEmitterKernels();
+  }
+
+  /** @internal Transfers every reusable compute resource into one atomic pool entry. */
+  takeResourcesForPooling(): PooledEffectResources {
+    const kernelsByEmitter = this.takeEmitterKernelsForPooling();
+    for (const grid of this.#grids.values()) grid.prepareForPooling();
+    for (const grid of this.#grids3D.values()) grid.prepareForPooling();
+    const grids2DByKey = new Map(this.#grids);
+    const grids3DByKey = new Map(this.#grids3D);
+    this.#grids.clear();
+    this.#grids3D.clear();
+    this.#gridViews.clear();
+    this.#grid3DViews.clear();
+    for (const grid of this.#neighborGrids.values()) grid.release();
+    this.#neighborGrids.clear();
+    this.#neighborGridViews.clear();
+    return { grids2DByKey, grids3DByKey, kernelsByEmitter };
   }
 
   releaseGrid2D(): void {
@@ -2467,6 +2642,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   #lastTimestamp?: number;
   #qualitySelection: QualityTierSelection;
   #profileFrame = 0;
+  #preparationSpawn = false;
   #systemTime = 0;
   #updateQueue: Promise<void> = Promise.resolve();
   #updateInFlight = false;
@@ -2636,6 +2812,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     definition: EffectDefinition<Elements, Parameters>,
     options: EffectSpawnOptions<EffectDefinition<Elements, Parameters>> = {},
   ): VfxEffectInstance<EffectDefinition<Elements, Parameters>> {
+    const preparationSpawn = this.#preparationSpawn;
     const id = `nachi-effect-${++this.#instanceSequence}`;
     const parameterDefinitions = (definition.parameters ?? {}) as ParameterSchema;
     if (options.priority !== undefined && !Number.isFinite(options.priority)) {
@@ -2651,12 +2828,13 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       poolKey,
       options.timeScale ?? 1,
       parameterDefinitions,
-      (releasedInstance, poolable) => this.#releaseInstance(releasedInstance, poolable),
+      (releasedInstance, poolable) =>
+        this.#releaseInstance(releasedInstance, poolable, preparationSpawn),
       options.priority ?? 0,
       undefined,
       (capture) => this.#scheduleCapture(capture),
     );
-    this.#instances.set(id, instance);
+    if (!preparationSpawn) this.#instances.set(id, instance);
 
     if (this.#deviceLossDiagnostic) {
       instance.markError(this.#deviceLossDiagnostic);
@@ -2681,32 +2859,36 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       const materializationRenderer = runtimeRenderer;
       const compiled = this.#compile(definition, this.#qualitySelection.tier);
       compileDiagnostics = compiled.emitters.flatMap(({ program }) => program.diagnostics);
+      pooled = this.#takePooledResources(definition, poolKey);
       for (const grid of compiled.grids) {
         if (grid.definition.kind === 'grid2d') {
           instance.addGrid2D(
             grid.key,
-            new Grid2DRuntime(
-              grid.definition,
-              materializationRenderer,
-              grid.stages,
-              this.#grid2DStageRegistry,
-              (error) => new GpuSubmissionContextError(`elements.${grid.key}`, 'sim-stage', error),
-            ),
+            pooled?.grids2DByKey.get(grid.key) ??
+              new Grid2DRuntime(
+                grid.definition,
+                materializationRenderer,
+                grid.stages,
+                this.#grid2DStageRegistry,
+                (error) =>
+                  new GpuSubmissionContextError(`elements.${grid.key}`, 'sim-stage', error),
+              ),
           );
         } else {
           instance.addGrid3D(
             grid.key,
-            new Grid3DRuntime(
-              grid.definition,
-              materializationRenderer,
-              grid.stages,
-              this.#grid3DStageRegistry,
-              (error) => new GpuSubmissionContextError(`elements.${grid.key}`, 'sim-stage', error),
-            ),
+            pooled?.grids3DByKey.get(grid.key) ??
+              new Grid3DRuntime(
+                grid.definition,
+                materializationRenderer,
+                grid.stages,
+                this.#grid3DStageRegistry,
+                (error) =>
+                  new GpuSubmissionContextError(`elements.${grid.key}`, 'sim-stage', error),
+              ),
           );
         }
       }
-      pooled = this.#takePooledResources(definition, poolKey);
       const usesSceneDepth = compiled.emitters.some(({ program }) =>
         program.kernels.update.modules.some(({ type }) => type === 'core/collide-scene-depth'),
       );
@@ -2840,8 +3022,82 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         this.#reportBuildDiagnostic(instance, diagnostic);
       }
     }
-    this.#updateScalability();
+    if (!preparationSpawn) this.#updateScalability();
     return instance;
+  }
+
+  prepare<
+    const Elements extends EffectElements,
+    const Parameters extends ParameterSchema = Readonly<Record<string, never>>,
+    ObjectType = never,
+  >(
+    definition: EffectDefinition<Elements, Parameters>,
+    options: VfxPrepareOptions<ObjectType> = {},
+  ): Promise<void> {
+    const run = async () => {
+      throwIfPreparationAborted(options.signal);
+      if (this.#maxPoolSize === 0) {
+        throw new VfxDiagnosticError([
+          runtimeDiagnostic(
+            'NACHI_PREPARE_POOLING_DISABLED',
+            'VFXSystem.prepare requires maxPoolSize to be greater than zero so prepared resources can be transferred to the next spawn.',
+            'VFXSystem.maxPoolSize',
+          ),
+        ]);
+      }
+      let instance: VfxEffectInstance<EffectDefinition<Elements, Parameters>>;
+      this.#preparationSpawn = true;
+      try {
+        instance = this.spawn(definition);
+      } finally {
+        this.#preparationSpawn = false;
+      }
+      if (instance.state === 'error') {
+        const diagnostics = instance.diagnostics;
+        instance.release();
+        throw new VfxDiagnosticError(diagnostics);
+      }
+
+      const total = Object.values(definition.elements).filter(
+        (element) =>
+          element.kind === 'emitter' || element.kind === 'grid2d' || element.kind === 'grid3d',
+      ).length;
+      let completed = 0;
+      try {
+        options.onProgress?.({ completed, total });
+        await instance.prepareResources(options.preparer, options.signal, (key, kind) => {
+          completed += 1;
+          options.onProgress?.({ completed, resource: { key, kind }, total });
+        });
+        throwIfPreparationAborted(options.signal);
+        instance.release();
+      } catch (error) {
+        try {
+          instance.discardPreparedResources(options.preparer);
+        } catch (cleanupError) {
+          instance.recordDiagnostic(
+            runtimeDiagnostic(
+              'NACHI_PREPARE_CLEANUP_FAILED',
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+              'VFXSystem.prepare',
+              'warning',
+            ),
+          );
+        }
+        instance.markError(
+          runtimeDiagnostic(
+            'NACHI_PREPARE_FAILED',
+            error instanceof Error ? error.message : String(error),
+            'VFXSystem.prepare',
+          ),
+        );
+        instance.release();
+        throw error;
+      }
+    };
+    const scheduled = this.#updateQueue.then(run, run);
+    this.#updateQueue = scheduled.catch(() => undefined);
+    return scheduled;
   }
 
   update(deltaSeconds?: number): Promise<void> {
@@ -3266,10 +3522,16 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       .join('|');
   }
 
-  #releaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
+  #releaseInstance(
+    instance: ReleasableEffectInstance,
+    poolable: boolean,
+    preferForPreparation = false,
+  ): void {
     this.#instances.delete(instance.id);
     for (const kernels of instance.emitterKernels()) this.#deactivateKernels(kernels);
-    this.#afterCurrentUpdate(() => this.#retainOrReleaseInstance(instance, poolable));
+    this.#afterCurrentUpdate(() =>
+      this.#retainOrReleaseInstance(instance, poolable, preferForPreparation),
+    );
   }
 
   #afterCurrentUpdate(release: () => void): void {
@@ -3317,12 +3579,28 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     }
   }
 
-  #retainOrReleaseInstance(instance: ReleasableEffectInstance, poolable: boolean): void {
-    instance.releaseGrid2D();
+  #releasePooledResources(resources: PooledEffectResources): void {
+    for (const grid of resources.grids2DByKey.values()) grid.release();
+    for (const grid of resources.grids3DByKey.values()) grid.release();
+    const renderer = asRuntimeRenderer(this.renderer);
+    for (const kernels of resources.kernelsByEmitter.values()) {
+      if (renderer) this.#releaseKernelsAfterCurrentUpdate(kernels, renderer);
+    }
+  }
+
+  #retainOrReleaseInstance(
+    instance: ReleasableEffectInstance,
+    poolable: boolean,
+    preferForPreparation: boolean,
+  ): void {
     const definition = instance.definition;
     const pools = this.#effectPools.get(definition) ?? new Map<string, EffectResourcePool>();
     const pool = pools.get(instance.poolKey) ?? { resources: [] };
-    if (!poolable || this.#maxPoolSize === 0 || pool.resources.length >= this.#maxPoolSize) {
+    if (
+      !poolable ||
+      this.#maxPoolSize === 0 ||
+      (!preferForPreparation && pool.resources.length >= this.#maxPoolSize)
+    ) {
       if (poolable && pool.resources.length >= this.#maxPoolSize && this.#maxPoolSize > 0) {
         instance.recordReleaseDiagnostic({
           code: 'NACHI_EFFECT_POOL_LIMIT_EXCEEDED',
@@ -3332,15 +3610,26 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           severity: 'warning',
         });
       }
+      instance.releaseGrid2D();
       const renderer = asRuntimeRenderer(this.renderer);
       for (const kernels of instance.detachEmitterKernels().values()) {
         if (renderer) this.#releaseKernelsAfterCurrentUpdate(kernels, renderer);
       }
       return;
     }
-    const kernelsByEmitter = instance.takeEmitterKernelsForPooling();
-    if (kernelsByEmitter.size === 0) return;
-    pool.resources.push({ kernelsByEmitter });
+    if (preferForPreparation && pool.resources.length >= this.#maxPoolSize) {
+      const evicted = pool.resources.shift();
+      if (evicted) this.#releasePooledResources(evicted);
+    }
+    const resources = instance.takeResourcesForPooling();
+    if (
+      resources.kernelsByEmitter.size === 0 &&
+      resources.grids2DByKey.size === 0 &&
+      resources.grids3DByKey.size === 0
+    ) {
+      return;
+    }
+    pool.resources.push(resources);
     pools.set(instance.poolKey, pool);
     this.#effectPools.set(definition, pools);
   }

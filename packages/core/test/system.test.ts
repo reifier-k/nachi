@@ -982,6 +982,7 @@ function fakeAdapter(): KernelTslAdapter {
 
 class FakeRuntimeRenderer implements VfxRuntimeRenderer {
   readonly kernelAdapter = fakeAdapter();
+  readonly submittedKernels: KernelComputeNode[] = [];
   readonly submissions: string[] = [];
   failNextSubmission = false;
   releaseCount = 0;
@@ -996,6 +997,7 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
       this.failNextSubmission = false;
       throw new Error('synthetic submit failure');
     }
+    this.submittedKernels.push(kernel);
     this.submissions.push((kernel as FakeCompute).name);
   }
 
@@ -1790,6 +1792,132 @@ describe('VFXSystem runtime scheduler', () => {
     system.spawn(effect);
     expect(system.compilationCount).toBe(1);
     expect(system.instanceCount).toBe(2);
+  });
+
+  it('prepares every emitter pipeline without advancing public time or publishing an instance', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const effect = runtimeEffect({ duration: 10_000, startDelay: 9_000 });
+    const prepareEmitter = vi.fn();
+    const progress: Array<{ completed: number; total: number }> = [];
+
+    await system.prepare(effect, {
+      onProgress: ({ completed, total }) => progress.push({ completed, total }),
+      preparer: { prepareEmitter },
+    });
+
+    expect(system.time).toBe(0);
+    expect(system.instanceCount).toBe(0);
+    expect(system.getPooledInstanceCount(effect)).toBe(1);
+    expect(system.compilationCount).toBe(1);
+    expect(renderer.submissions).toEqual(
+      expect.arrayContaining([
+        'NachiEmitterInitialize',
+        'NachiEmitterPrepareSpawn',
+        'NachiEmitterSpawn',
+        'NachiEmitterUpdate',
+        'NachiEmitterCompactAlive',
+      ]),
+    );
+    expect(prepareEmitter).toHaveBeenCalledTimes(1);
+    expect(progress).toEqual([
+      { completed: 0, total: 1 },
+      { completed: 1, total: 1 },
+    ]);
+    const preparedKernels = prepareEmitter.mock.calls[0]![0].emitter.kernels;
+    const live = system.spawn(effect);
+    expect(live.getEmitter('particles')?.kernels).toBe(preparedKernels);
+  });
+
+  it('rejects preparation when pooling is disabled instead of retaining dead draw anchors', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 0 });
+
+    await expect(system.prepare(runtimeEffect({ duration: 1 }))).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_PREPARE_POOLING_DISABLED' })],
+    });
+
+    expect(renderer.submissions).toEqual([]);
+    expect(system.instanceCount).toBe(0);
+  });
+
+  it('reuses prepared Grid2D kernel nodes on the next live spawn', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const effect = defineEffect({
+      elements: {
+        fluid: defineGrid2D({
+          channels: { density: { type: 'f32' } },
+          resolution: [2, 2],
+        }),
+      },
+    });
+
+    await system.prepare(effect);
+    const preparedClear = renderer.submittedKernels.find(
+      (kernel) => (kernel as FakeCompute).name === 'NachiGrid2DClear',
+    );
+    const instance = system.spawn(effect);
+    await system.update(0);
+    const clearKernels = renderer.submittedKernels.filter(
+      (kernel) => (kernel as FakeCompute).name === 'NachiGrid2DClear',
+    );
+
+    expect(instance.getGrid2D('fluid')).toBeDefined();
+    expect(clearKernels).toHaveLength(2);
+    expect(clearKernels[1]).toBe(preparedClear);
+  });
+
+  it('keeps the prepared bundle when another release fills the pool during preparation', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 1 });
+    const effect = runtimeEffect({ duration: 1 });
+    const live = system.spawn(effect);
+    let preparedKernels: BuiltEmitterKernels | undefined;
+    let resume: (() => void) | undefined;
+    const preparing = system.prepare(effect, {
+      preparer: {
+        prepareEmitter: ({ emitter }) => {
+          preparedKernels = emitter.kernels;
+          return new Promise<void>((resolve) => {
+            resume = resolve;
+          });
+        },
+      },
+    });
+    while (!resume) await Promise.resolve();
+
+    live.release();
+    resume();
+    await preparing;
+    const spawned = system.spawn(effect);
+
+    expect(spawned.getEmitter('particles')?.kernels).toBe(preparedKernels);
+    expect(renderer.releaseCount).toBe(1);
+  });
+
+  it('aborts preparation cleanly without retaining a partial resource bundle', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const effect = runtimeEffect({ duration: 1 });
+    const controller = new AbortController();
+    const discardEmitter = vi.fn();
+
+    await expect(
+      system.prepare(effect, {
+        preparer: {
+          discardEmitter,
+          prepareEmitter: () => controller.abort(),
+        },
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(system.time).toBe(0);
+    expect(system.instanceCount).toBe(0);
+    expect(system.getPooledInstanceCount(effect)).toBe(0);
+    expect(renderer.releaseCount).toBe(1);
+    expect(discardEmitter).toHaveBeenCalledTimes(1);
   });
 
   it('initializes the free list, spawns indirectly, and updates on time advances', async () => {
@@ -3522,6 +3650,31 @@ describe('M11 VFXSystem scalability scheduling', () => {
     expect(low.scalability.action).toBe('culled');
     expect(low.scalability.reasons).toContain('significance-instance-budget');
     expect(high.scalability.score).toBeGreaterThan(low.scalability.score);
+  });
+
+  it('does not let a hidden preparation spawn perturb significance admission', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      significanceBudget: { maxActiveInstances: 1, maxParticles: 100 },
+    });
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          bounds: { radius: 0.1 },
+          capacity: 1,
+          render: computeRender,
+          spawn: burst({ count: 0 }),
+        }),
+      },
+      scalability: { significance: { priority: 0 } },
+    });
+    const admitted = system.spawn(definition, { priority: 1 });
+    const before = admitted.scalability;
+
+    await system.prepare(definition);
+
+    expect(admitted.scalability).toEqual(before);
+    expect(admitted.scalability.action).toBe('full');
   });
 
   it('suppresses normal scheduler births at the particle budget with the normative reason', async () => {

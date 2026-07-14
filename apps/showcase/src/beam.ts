@@ -42,6 +42,7 @@ import {
 import * as THREE from 'three/webgpu';
 
 import {
+  createThreeEffectPreparer,
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   createThreeTextureResolver,
@@ -55,6 +56,7 @@ import {
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
 } from './harness';
+import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
 import './beam.css';
 import './embed.css';
@@ -1041,6 +1043,7 @@ async function run(): Promise<void> {
   system.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
   const effect = createPlasmaLance(textures, !headless);
   const instance = system.spawn(effect, { position: [0, 0, 0], seed: 0xbea0 });
+  let effectPreparer: ReturnType<typeof createThreeEffectPreparer> | undefined;
 
   // Caster/impact particles live in a separate core system so their emitters
   // can be spawned at world offsets while the timeline effect stays at origin.
@@ -1107,9 +1110,11 @@ async function run(): Promise<void> {
         if (fx.sprites.has(key)) continue;
         const view = fx.instance.getEmitter(key);
         if (!view) continue;
-        const object = materializeThreeSpriteDraw(view.program, view.kernels, 0, {
-          resolveTexture,
-        });
+        const object =
+          effectPreparer?.takePreparedDraw<ReturnType<typeof materializeThreeSpriteDraw>>(view) ??
+          materializeThreeSpriteDraw(view.program, view.kernels, 0, {
+            resolveTexture,
+          });
         scene.add(object);
         fx.sprites.set(key, object);
       }
@@ -1117,13 +1122,15 @@ async function run(): Promise<void> {
         if (fx.lights.has(key)) continue;
         const view = fx.instance.getEmitter(key);
         if (!view) continue;
-        const light = materializeThreeLightDraw(view.program, view.kernels);
+        const light =
+          effectPreparer?.takePreparedDraw<ReturnType<typeof materializeThreeLightDraw>>(view) ??
+          materializeThreeLightDraw(view.program, view.kernels);
         scene.add(light.group);
         fx.lights.set(key, light);
       }
     }
   };
-  spawnCharge();
+  if (headless) spawnCharge();
   let fired = false;
   let impactTriggered = false;
   let cutoffTriggered = false;
@@ -1301,6 +1308,40 @@ async function run(): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+  const status = required<HTMLElement>('#status-value');
+  const loading = createShowcaseLoading(stage, status);
+  const preparer = createThreeEffectPreparer(renderer, scene, camera, {
+    compileTarget: post.sceneRenderTarget,
+    sprite: { resolveTexture },
+  });
+  effectPreparer = preparer;
+  try {
+    await loading.run('timeline resources', (signal, onProgress) =>
+      system.prepare(effect, { onProgress, preparer, signal }),
+    );
+    await loading.run('charge resources', (signal, onProgress) =>
+      coreSystem.prepare(chargeEffect, { onProgress, preparer, signal }),
+    );
+    await loading.run('flash resources', (signal, onProgress) =>
+      coreSystem.prepare(flashEffect, { onProgress, preparer, signal }),
+    );
+    await loading.run('impact resources', (signal, onProgress) =>
+      coreSystem.prepare(impactEffect, { onProgress, preparer, signal }),
+    );
+    await loading.run('afterglow resources', (signal, onProgress) =>
+      coreSystem.prepare(afterglowEffect, { onProgress, preparer, signal }),
+    );
+    await loading.run('post pipeline', (signal, onProgress) =>
+      post.prepare({ onProgress, signal }),
+    );
+  } catch (error) {
+    preparer.dispose();
+    loading.fail(error);
+    return;
+  }
+  spawnCharge();
+  loading.complete();
+  window.addEventListener('pagehide', () => preparer.dispose(), { once: true });
   attachShowcaseTuning({
     camera,
     cameraBasePosition,
@@ -1309,7 +1350,7 @@ async function run(): Promise<void> {
     instance,
     renderer,
   });
-  required<HTMLElement>('#status-value').textContent = 'looping · watch the lance';
+  status.textContent = 'looping · watch the lance';
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
   let renderedCycle = 0;

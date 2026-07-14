@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   billboard,
   bakeSdf,
@@ -49,6 +49,7 @@ import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   createThreeGeometryResolver,
+  createThreeEffectPreparer,
   createThreeMeshSurfaceResolver,
   createThreeMeshSurfaceResource,
   createThreeSdfResolver,
@@ -892,6 +893,73 @@ describe('three kernel adapter', () => {
     expect(words[offset]).toBe(6);
     expect(indirect.updateRanges).toEqual([{ count: 1, start: offset }]);
     expect(mesh.material.blending).toBe(2);
+  });
+
+  it('prepares sprite draws against the target scene and transfers them to matching emitters', async () => {
+    const definition = defineEmitter({
+      capacity: 1,
+      render: billboard({ blending: 'additive' }),
+      spawn: burst({ count: 1 }),
+    });
+    const program = compileEmitter(definition);
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    let compiledObject: THREE.Object3D | undefined;
+    let materialDispose: ReturnType<typeof vi.fn> | undefined;
+    const originalTarget = new THREE.RenderTarget(2, 2);
+    const compileTarget = new THREE.RenderTarget(1, 1, { type: THREE.HalfFloatType });
+    let renderTarget: THREE.RenderTarget | null = originalTarget;
+    let mrt: unknown = { name: 'original' };
+    const compileAsync = vi.fn(async (object: THREE.Object3D) => {
+      expect(renderTarget).toBe(compileTarget);
+      expect(mrt).toBeNull();
+      object.traverse((child) => {
+        if (child instanceof THREE.InstancedMesh) compiledObject = child;
+      });
+      expect(compiledObject).toBeInstanceOf(THREE.InstancedMesh);
+      const material = (compiledObject as THREE.InstancedMesh).material as THREE.Material;
+      if (!materialDispose) {
+        materialDispose = vi.fn<() => void>(material.dispose.bind(material));
+        material.dispose = materialDispose as () => void;
+      }
+    });
+    const renderer = {
+      _attributes: { delete: vi.fn() },
+      compileAsync,
+      getMRT: () => mrt,
+      getRenderTarget: () => renderTarget,
+      setMRT: (value: unknown) => {
+        mrt = value;
+      },
+      setRenderTarget: (value: THREE.RenderTarget | null) => {
+        renderTarget = value;
+      },
+    } as unknown as THREE.WebGPURenderer;
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    const preparer = createThreeEffectPreparer(renderer, scene, camera, { compileTarget });
+
+    await preparer.prepareEmitter({
+      emitter: {
+        definition,
+        kernels,
+        program,
+      } as never,
+      key: 'particles',
+    });
+    expect(compileAsync).toHaveBeenCalledTimes(1);
+    expect(compileAsync).toHaveBeenLastCalledWith(expect.any(THREE.Group), camera, scene);
+    expect(renderTarget).toBe(originalTarget);
+    expect(mrt).toEqual({ name: 'original' });
+    expect(compiledObject?.parent).toBeNull();
+    expect(materialDispose).not.toHaveBeenCalled();
+    const transferred = preparer.takePreparedDraw<THREE.Object3D>({ kernels } as never);
+    expect(transferred).toBe(compiledObject);
+    preparer.dispose();
+    expect(materialDispose).not.toHaveBeenCalled();
+    disposeThreeDraw(kernels, transferred!, renderer);
+    expect(materialDispose).toHaveBeenCalledTimes(1);
+    compileTarget.dispose();
+    originalTarget.dispose();
   });
 
   it('keeps unlit sprites on SpriteNodeMaterial and routes lit sprites through standard lighting', () => {

@@ -2,6 +2,53 @@
 .stage {
   position: relative;
 }
+.showcase-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 24px;
+  background: radial-gradient(circle at 50% 42%, #16213be8, #02040afa 68%);
+  color: #eaf4ff;
+  text-align: center;
+}
+.showcase-loading strong {
+  font-size: clamp(16px, 3vw, 24px);
+  letter-spacing: 0.02em;
+}
+.showcase-loading > span:not(.showcase-loading__track) {
+  max-width: min(520px, 90%);
+  color: #a9bed6;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.showcase-loading__track {
+  width: min(280px, 72%);
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #ffffff1f;
+}
+.showcase-loading__fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #65d9ff, #ffe171);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 120ms ease;
+}
+.showcase-loading--error {
+  background: radial-gradient(circle at 50% 42%, #3b1219f0, #090204fa 70%);
+}
+.showcase-loading--error strong {
+  color: #ffb7bd;
+}
 .stage canvas:focus-visible {
   outline: 2px solid #b9dcff;
   outline-offset: -2px;

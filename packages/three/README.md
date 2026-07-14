@@ -82,6 +82,43 @@ visibility update overwrites that field. Use `setUserVisible(false)` for a persi
 contract to their returned `group` while keeping every pooled child PointLight shader-stably
 visible.
 
+## Preparing first-use pipelines
+
+Use `createThreeEffectPreparer()` with core or timeline `system.prepare()` to compile draw
+pipelines during a loading screen instead of simulating an animation cycle:
+
+```ts
+const preparer = createThreeEffectPreparer(renderer, scene, camera, {
+  // When using @nachi/post, compile draws against its internal scene-pass target.
+  compileTarget: post.sceneRenderTarget,
+  sprite: { resolveTexture },
+});
+await system.prepare(effect, { preparer, signal, onProgress });
+const instance = system.spawn(effect);
+const emitter = instance.getEmitter('particles');
+const draw =
+  (emitter && preparer.takePreparedDraw<THREE.Mesh>(emitter)) ??
+  (emitter && materializeThreeSpriteDraw(emitter.program, emitter.kernels));
+
+// The preparer retains hidden pipeline anchors until the application no longer needs the cache.
+window.addEventListener('pagehide', () => preparer.dispose(), { once: true });
+```
+
+Billboard, mesh, light, and decal draws are built in. Register external draw kinds such as ribbon
+through `drawPreparers`; an unregistered kind rejects preparation explicitly. `takePreparedDraw()`
+transfers the exact prepared draw to the matching live emitter, including auxiliary compute nodes
+used by light or custom draws. Keep the preparer alive through first use—disposing it immediately
+removes any pipeline references that have not been transferred.
+
+`compileTarget` must match the target used by the live scene render. Omitting it uses the currently
+bound renderer target, which is appropriate for direct scene rendering. `@nachi/post` users should
+pass `post.sceneRenderTarget`; render-pipeline cache keys include target format, sample count, and
+color space. Draw preparers that add lights should return `affectsLighting: true`; built-in light
+draws do this automatically so existing scene materials are compiled against that light resource.
+Preparation does not enumerate combinations of independently spawned light draws; hosts that vary
+the simultaneous light set should keep that set structurally stable or prepare those variants
+explicitly at the application level.
+
 ## Draw and pooled-kernel lifetime
 
 Materialized draws are registered against their `BuiltEmitterKernels` so culling, render order, and

@@ -976,6 +976,44 @@ describe('@nachi/timeline runtime', () => {
     expect(first.at(-1)).toMatchObject({ decay: 0, translation: [0, 0, 0] });
   });
 
+  it('prepares each emitter and mesh once without walking a long timeline', async () => {
+    const child = defineEmitter({
+      capacity: 1,
+      init: [lifetime(1)],
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({
+      elements: { arc: mesh(1), child },
+      timeline: timeline([at(9_000, play('arc'), play('child'))], { duration: 10_000 }),
+    });
+    const corePrepare = vi.spyOn(CoreVFXSystem.prototype, 'prepare').mockResolvedValue(undefined);
+    const prepareObject = vi.fn();
+    const progress: Array<{ completed: number; total: number }> = [];
+    try {
+      const system = new VFXSystem({}, new THREE.Scene());
+      await system.prepare(effect, {
+        onProgress: ({ completed, total }) => progress.push({ completed, total }),
+        preparer: { prepareEmitter: vi.fn(), prepareObject },
+      });
+
+      expect(system.time).toBe(0);
+      expect(system.instanceCount).toBe(0);
+      expect(corePrepare).toHaveBeenCalledTimes(1);
+      expect(Object.keys((corePrepare.mock.calls[0]![0] as EffectDefinition).elements)).toEqual([
+        'child',
+      ]);
+      expect(prepareObject).toHaveBeenCalledTimes(1);
+      expect(progress).toEqual([
+        { completed: 0, total: 2 },
+        { completed: 1, total: 2 },
+        { completed: 2, total: 2 },
+      ]);
+    } finally {
+      corePrepare.mockRestore();
+    }
+  });
+
   it('diagnoses and clamps pathological boundary overflow without rejecting', async () => {
     const effect = defineEffect({
       elements: {},

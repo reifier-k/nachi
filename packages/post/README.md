@@ -48,6 +48,12 @@ function frame(localTime: number) {
 }
 ```
 
+Before starting the animation loop, `await post.prepare({ signal, onProgress })` renders one frame
+to the canvas while the loading UI is still covering it. The final composite pipeline cache key
+depends on the live output format, sample count, and color space, so an arbitrary offscreen target
+cannot prepare it reliably. Pass `outputTarget` when the live loop presents to a custom target.
+Preparation restores the caller's RenderTarget/MRT and does not advance any effect clock.
+
 The default order is `distortion -> radialBlur -> bloom`. Supply `order`, for example
 `['bloom', 'distortion', 'radialBlur']`, to choose another permutation. Every configured pass must
 appear exactly once.

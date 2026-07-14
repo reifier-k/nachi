@@ -24,6 +24,7 @@ import {
   type VfxDiagnostic,
   type VfxEffectInstance,
   type VfxEmitterRuntimeView,
+  type VfxPrepareOptions,
   type VfxSystemOptions,
   FixedStepAccumulator,
 } from '@nachi/core';
@@ -79,6 +80,8 @@ export interface TimelineEffectSpawnOptions<Definition = EffectDefinition>
   extends EffectSpawnOptions<Definition> {
   readonly cameraShakeTarget?: CameraShakeTarget;
 }
+
+export type TimelinePrepareOptions = VfxPrepareOptions<MeshFxMesh>;
 
 /** @internal Timeline owns fixed stepping and budgets its choreography as one unit. */
 export function timelineCoreOptions(options: TimelineSystemOptions): VfxSystemOptions {
@@ -1043,6 +1046,57 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     return instance;
   }
 
+  prepare<Definition extends RuntimeDefinition>(
+    definition: Definition,
+    options: TimelinePrepareOptions = {},
+  ): Promise<void> {
+    const run = async () => {
+      options.signal?.throwIfAborted();
+      const emitterKeys = Object.entries(definition.elements)
+        .filter((entry) => entry[1].kind === 'emitter')
+        .map(([key]) => key);
+      const meshResources = [...getMeshFxResources(definition)];
+      const total = emitterKeys.length + meshResources.length;
+      let completed = 0;
+      options.onProgress?.({ completed, total });
+
+      for (const key of emitterKeys) {
+        options.signal?.throwIfAborted();
+        await this.#core.prepare(this.#subDefinition(definition, key), {
+          ...(options.preparer === undefined ? {} : { preparer: options.preparer }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+        completed += 1;
+        options.onProgress?.({ completed, resource: { key, kind: 'emitter' }, total });
+      }
+
+      for (const [key, resource] of meshResources) {
+        options.signal?.throwIfAborted();
+        const { mesh } = cloneMesh(key, resource);
+        // Renderer compilation traverses visible objects; the clone is never attached to a scene.
+        mesh.visible = true;
+        let retained = false;
+        try {
+          const result = await options.preparer?.prepareObject?.({
+            key,
+            object: mesh,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
+          retained = result?.retained === true;
+          options.signal?.throwIfAborted();
+        } finally {
+          mesh.removeFromParent();
+          if (!retained) mesh.material.dispose();
+        }
+        completed += 1;
+        options.onProgress?.({ completed, resource: { key, kind: 'object' }, total });
+      }
+    };
+    const scheduled = this.#updateQueue.then(run, run);
+    this.#updateQueue = scheduled.catch(() => undefined);
+    return scheduled;
+  }
+
   update(deltaSeconds?: number): Promise<void> {
     const delta = deltaSeconds ?? this.#measuredDelta();
     if (!Number.isFinite(delta) || delta < 0) {
@@ -1135,6 +1189,13 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     key: string,
     options: EffectSpawnOptions,
   ): VfxEffectInstance {
+    return this.#core.spawn(this.#subDefinition(definition, key), options);
+  }
+
+  #subDefinition(
+    definition: RuntimeDefinition,
+    key: string,
+  ): EffectDefinition<EffectElements, ParameterSchema> {
     const element = definition.elements[key];
     if (element?.kind !== 'emitter') {
       throw new VfxDiagnosticError([
@@ -1159,6 +1220,6 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       };
       definitions.set(key, subDefinition);
     }
-    return this.#core.spawn(subDefinition!, options);
+    return subDefinition!;
   }
 }

@@ -49,6 +49,12 @@ integrations can capture the exact `VfxEmitterRuntimeView` from `event.emitter` 
 A captured view is invalid after its child emitter is released; pooled storage may then be reused,
 so retaining and using the view can alias a later emitter.
 
+`await timelineSystem.prepare(skill, options)` enumerates each emitter and mesh-fx resource once,
+without walking timeline entries or advancing local/world time. It uses the same stable
+single-element core definitions as later `play()` actions, so prepared kernels are checked out by
+the first real play. Timeline duration, delayed entries, and loop count do not increase preparation
+work. Pass a Three effect preparer to include mesh-fx and renderer draw compilation.
+
 Timeline-external core effects such as socket-following trails can subscribe to the same controls:
 
 ```ts

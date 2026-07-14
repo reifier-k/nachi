@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -108,7 +108,9 @@ describe('@nachi/post authoring', () => {
 
   it('enforces a real pass permutation and the standalone/external time split', () => {
     const renderer = {
+      getOutputBufferType: () => THREE.HalfFloatType,
       outputColorSpace: THREE.NoColorSpace,
+      samples: 4,
       toneMapping: THREE.NoToneMapping,
     } as unknown as THREE.WebGPURenderer;
     const scene = new THREE.Scene();
@@ -136,9 +138,50 @@ describe('@nachi/post authoring', () => {
     ).toThrow(/NACHI_POST_INVALID_ORDER/);
   });
 
+  it('prepares one frame against the live output context and restores renderer targets', async () => {
+    const originalTarget = new THREE.RenderTarget(4, 4);
+    const originalMrt = { name: 'original-mrt' };
+    let target: THREE.RenderTarget | null = originalTarget;
+    let mrt: unknown = originalMrt;
+    const renderer = {
+      getOutputBufferType: () => THREE.HalfFloatType,
+      getMRT: () => mrt,
+      getRenderTarget: () => target,
+      outputColorSpace: THREE.NoColorSpace,
+      samples: 4,
+      setMRT: (value: unknown) => {
+        mrt = value;
+      },
+      setRenderTarget: (value: THREE.RenderTarget | null) => {
+        target = value;
+      },
+      toneMapping: THREE.NoToneMapping,
+    } as unknown as THREE.WebGPURenderer;
+    const pipeline = createPostPipeline(renderer, new THREE.Scene(), new THREE.Camera(), {
+      radialBlur: radialBlur({ samples: 2 }),
+    });
+    const renderedTargets: Array<THREE.RenderTarget | null> = [];
+    const render = vi.spyOn(pipeline, 'render').mockImplementation(() => {
+      renderedTargets.push(target);
+    });
+    const progress: number[] = [];
+
+    await pipeline.prepare({ onProgress: ({ completed }) => progress.push(completed) });
+
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(renderedTargets).toEqual([null]);
+    expect(target).toBe(originalTarget);
+    expect(mrt).toBe(originalMrt);
+    expect(progress).toEqual([0, 1]);
+    pipeline.dispose();
+    originalTarget.dispose();
+  });
+
   it('rewires the bloom input when distortion and bloom order changes', () => {
     const renderer = {
+      getOutputBufferType: () => THREE.HalfFloatType,
       outputColorSpace: THREE.NoColorSpace,
+      samples: 4,
       toneMapping: THREE.NoToneMapping,
     } as unknown as THREE.WebGPURenderer;
     const scene = new THREE.Scene();
@@ -171,7 +214,9 @@ describe('@nachi/post authoring', () => {
 
   it('disposes the scene pass render target with the pipeline', () => {
     const renderer = {
+      getOutputBufferType: () => THREE.HalfFloatType,
       outputColorSpace: THREE.NoColorSpace,
+      samples: 4,
       toneMapping: THREE.NoToneMapping,
     } as unknown as THREE.WebGPURenderer;
     const pipeline = createPostPipeline(renderer, new THREE.Scene(), new THREE.Camera(), {
@@ -193,7 +238,9 @@ describe('@nachi/post authoring', () => {
 
   it('validates control updates atomically with the authoring constraints', () => {
     const renderer = {
+      getOutputBufferType: () => THREE.HalfFloatType,
       outputColorSpace: THREE.NoColorSpace,
+      samples: 4,
       toneMapping: THREE.NoToneMapping,
     } as unknown as THREE.WebGPURenderer;
     const shockwave = {
@@ -248,7 +295,9 @@ describe('@nachi/post authoring', () => {
 
   it('reports setTime as unavailable when distortion is not configured', () => {
     const renderer = {
+      getOutputBufferType: () => THREE.HalfFloatType,
       outputColorSpace: THREE.NoColorSpace,
+      samples: 4,
       toneMapping: THREE.NoToneMapping,
     } as unknown as THREE.WebGPURenderer;
     const pipeline = createPostPipeline(renderer, new THREE.Scene(), new THREE.Camera(), {

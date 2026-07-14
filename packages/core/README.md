@@ -23,3 +23,15 @@ modules, typed `User.*` parameters, `VFXSystem`, JSON-compatible registries, fix
 quality and significance controls, simulation bake/replay, debug snapshots, Grid2D/Grid3D, neighbor
 grids, boids, and PBD constraints. Backend capability failures are explicit diagnostics; core does
 not silently replace WebGPU behavior with CPU simulation.
+
+## Resource preparation
+
+`await system.prepare(effect, { signal, onProgress, preparer })` compiles the current quality
+tier's emitter and grid pipelines without advancing `system.time` or publishing an effect
+instance. Work scales with authored resources, not lifecycle or timeline duration. Successful
+emitter and grid resources enter the normal effect pool, so call `prepare()` before the first
+`spawn()` when the backend needs the exact prepared node objects. Preparation requires
+`maxPoolSize > 0`; it rejects explicitly when pooling is disabled. One call reserves one sequential
+first-use bundle—it does not reserve additional copies for overlapping instances. `preparer` is an
+optional renderer hook; without it, core prepares compute resources only. Abort and backend
+failures reject the promise, roll renderer hooks back, and release partial resources.
