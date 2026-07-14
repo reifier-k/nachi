@@ -35,7 +35,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build documentation and demos
-        run: pnpm --filter @nachi/docs --filter @nachi/playground --filter @nachi/showcase build
+        run: pnpm --filter @nachi/docs --filter @nachi/playground... --filter @nachi/showcase... build
 
       - name: Assemble site
         run: |
