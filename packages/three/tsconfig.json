@@ -1,11 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "baseUrl": "../..",
     "paths": {
-      "@nachi/core": ["packages/core/src/index.ts"],
-      "@nachi/trails": ["packages/trails/src/index.ts"],
-      "@nachi/trails/three": ["packages/trails/src/three.ts"]
+      "@nachi/core": ["../../packages/core/src/index.ts"],
+      "@nachi/trails": ["../../packages/trails/src/index.ts"],
+      "@nachi/trails/three": ["../../packages/trails/src/three.ts"]
     },
     "types": ["node", "vitest/globals"]
   },
