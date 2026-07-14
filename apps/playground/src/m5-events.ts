@@ -7,11 +7,11 @@ import {
   emitTo,
   lifetime,
   positionSphere,
-} from '@nachi/core';
-import type { EffectEventSummary, VfxEmitterRuntimeView } from '@nachi/core';
-import type { CompiledEventQueueDescription, KernelUniformNode } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { EffectEventSummary, VfxEmitterRuntimeView } from '@nachi-vfx/core';
+import type { CompiledEventQueueDescription, KernelUniformNode } from '@nachi-vfx/core';
 
-import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi-vfx/three';
 import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';

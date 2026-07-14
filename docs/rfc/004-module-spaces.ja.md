@@ -3,7 +3,7 @@
 > Language: [English](./004-module-spaces.md) / 日本語 (このページ)
 
 - **状態:** 2026-07-14、H1-5で実装済み
-- **対象:** `@nachi/core` のエミッターモジュールと `@nachi/format` の互換正規化
+- **対象:** `@nachi-vfx/core` のエミッターモジュールと `@nachi-vfx/format` の互換正規化
 - **規範的参照:** [RFC 001](./001-api.ja.md) §4.3、§9、[RFC 003](./003-versioning.ja.md) §2-4
 - **裁定日:** 2026-07-13
 
@@ -86,7 +86,7 @@ GPU回帰を同時に更新しなければならない。
 既存の `nachi-effect` version 1文書は旧意味論を維持しなければならない。したがってH1-5はv1 JSONを
 黙って再解釈せず、次の互換規則を実装する。
 
-1. `@nachi/format` は、影響するv1モジュールで `space` が省略されている場合、明示的な
+1. `@nachi-vfx/format` は、影響するv1モジュールで `space` が省略されている場合、明示的な
    `space: 'world'` としてロードする。
 2. H1-5の作成ヘルパーは、新しい既定をシリアライズ済みmodule config内の明示的な
    `space: 'emitter'` として具現化する。
@@ -97,17 +97,17 @@ format互換正規化を通らない低レベルcore定義では、H1-5後の省
 
 ## 6. SemVerとchangeset
 
-H1-5はRFC 003 §3.1と§3.5に基づく **`@nachi/core` のmajor変更** である。文書化された公開既定値と、
-同一コードファースト定義に対する決定的結果を変更する。`@nachi/format` は、追加的な互換正規化と正規な
+H1-5はRFC 003 §3.1と§3.5に基づく **`@nachi-vfx/core` のmajor変更** である。文書化された公開既定値と、
+同一コードファースト定義に対する決定的結果を変更する。`@nachi-vfx/format` は、追加的な互換正規化と正規な
 明示出力に対する **minor** changesetを必要とする。legacy v1の意味を保持するため、asset envelopeの
 major/version bumpは不要である。
 
 パッケージはまだ実publishされていないため、release ownerはH1-5を初回release plan適用前にlandし、
 HEAVY EXPERIMENTALな0.1.0プレビューへ含められる。この変更は意味上は破壊的なままだが、RFC 003は0.x系の
 破壊的変更を `minor` changesetで表す。後続の0.xリリースでは次のminorが、1.0以降では
-`@nachi/core` の次のmajorリリースが必要になる。
+`@nachi-vfx/core` の次のmajorリリースが必要になる。
 
-現在のH1-4バッチは追加的であり、`@nachi/core` と `@nachi/format` に別々の **minor** changesetを持つ。
+現在のH1-4バッチは追加的であり、`@nachi-vfx/core` と `@nachi-vfx/format` に別々の **minor** changesetを持つ。
 
 ## 7. H1-5で必要な検証
 

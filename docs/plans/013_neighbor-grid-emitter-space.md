@@ -1,7 +1,7 @@
 # 013: NeighborGrid の emitter 空間追従と範囲外診断
 
 - 重大度: 高(移動エフェクトで近傍系が無音全滅)
-- 対象: `@nachi/core`(defineNeighborGrid / 近傍走査カーネル)、RFC 001 §10.7 / 004
+- 対象: `@nachi-vfx/core`(defineNeighborGrid / 近傍走査カーネル)、RFC 001 §10.7 / 004
 - 状態: 起票(H2-5、実装未着手)
 - 出典: H1 後続 Codex 探査 T5 F-01(task-mrklav03-g4d8is、2026-07-14)
 

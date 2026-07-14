@@ -23,7 +23,7 @@
     {
       "files": 38,
       "gzipBytes": 154389,
-      "name": "@nachi/core",
+      "name": "@nachi-vfx/core",
       "rawBytes": 717897,
       "runtimeJsRawBytes": 581687,
       "version": "0.0.0"
@@ -31,7 +31,7 @@
     {
       "files": 10,
       "gzipBytes": 19967,
-      "name": "@nachi/format",
+      "name": "@nachi-vfx/format",
       "rawBytes": 131140,
       "runtimeJsRawBytes": 92931,
       "version": "0.0.0"
@@ -39,7 +39,7 @@
     {
       "files": 10,
       "gzipBytes": 12264,
-      "name": "@nachi/mesh-fx",
+      "name": "@nachi-vfx/mesh-fx",
       "rawBytes": 45204,
       "runtimeJsRawBytes": 34598,
       "version": "0.0.0"
@@ -47,7 +47,7 @@
     {
       "files": 16,
       "gzipBytes": 12357,
-      "name": "@nachi/post",
+      "name": "@nachi-vfx/post",
       "rawBytes": 41924,
       "runtimeJsRawBytes": 32697,
       "version": "0.0.0"
@@ -55,7 +55,7 @@
     {
       "files": 4,
       "gzipBytes": 3023,
-      "name": "@nachi/react",
+      "name": "@nachi-vfx/react",
       "rawBytes": 10770,
       "runtimeJsRawBytes": 8156,
       "version": "0.0.0"
@@ -63,7 +63,7 @@
     {
       "files": 2,
       "gzipBytes": 16281,
-      "name": "@nachi/three",
+      "name": "@nachi-vfx/three",
       "rawBytes": 72059,
       "runtimeJsRawBytes": 64124,
       "version": "0.0.0"
@@ -71,7 +71,7 @@
     {
       "files": 6,
       "gzipBytes": 14631,
-      "name": "@nachi/timeline",
+      "name": "@nachi-vfx/timeline",
       "rawBytes": 59751,
       "runtimeJsRawBytes": 49752,
       "version": "0.0.0"
@@ -79,7 +79,7 @@
     {
       "files": 4,
       "gzipBytes": 7118,
-      "name": "@nachi/trails",
+      "name": "@nachi-vfx/trails",
       "rawBytes": 25175,
       "runtimeJsRawBytes": 21582,
       "version": "0.0.0"
@@ -87,7 +87,7 @@
     {
       "files": 16,
       "gzipBytes": 7111,
-      "name": "@nachi/tsl-kit",
+      "name": "@nachi-vfx/tsl-kit",
       "rawBytes": 18486,
       "runtimeJsRawBytes": 12554,
       "version": "0.0.0"

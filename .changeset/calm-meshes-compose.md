@@ -1,5 +1,5 @@
 ---
-'@nachi/timeline': minor
+'@nachi-vfx/timeline': minor
 ---
 
 Compose each timeline mesh-fx clone's authored local position and quaternion with its effect

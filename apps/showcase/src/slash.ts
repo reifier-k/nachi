@@ -25,9 +25,9 @@ import {
   type Vec3,
   type VfxEffectInstance,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
-import { ring, slashArc } from '@nachi/mesh-fx';
-import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi/post';
+} from '@nachi-vfx/core';
+import { ring, slashArc } from '@nachi-vfx/mesh-fx';
+import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi-vfx/post';
 import {
   at,
   cameraShake,
@@ -39,9 +39,9 @@ import {
   timeline,
   VFXSystem,
   type CameraShakeSample,
-} from '@nachi/timeline';
-import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
-import { materializeThreeRibbonDraw, readRibbonSegments } from '@nachi/trails/three';
+} from '@nachi-vfx/timeline';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi-vfx/trails';
+import { materializeThreeRibbonDraw, readRibbonSegments } from '@nachi-vfx/trails/three';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -52,7 +52,7 @@ import {
   createThreeTransformSource,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { createCompanionSocketPhase } from './companion-socket-phase';
 import {
   allPanelsHaveForeground,

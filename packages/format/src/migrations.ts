@@ -1,4 +1,4 @@
-import { VfxDiagnosticError, type VfxDiagnostic } from '@nachi/core';
+import { VfxDiagnosticError, type VfxDiagnostic } from '@nachi-vfx/core';
 
 import { EFFECT_ASSET_FORMAT, EFFECT_ASSET_VERSION, type EffectAssetMigration } from './types.js';
 

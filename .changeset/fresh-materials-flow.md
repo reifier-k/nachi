@@ -1,6 +1,6 @@
 ---
-'@nachi/mesh-fx': minor
-'@nachi/timeline': minor
+'@nachi-vfx/mesh-fx': minor
+'@nachi-vfx/timeline': minor
 ---
 
 Add writable scalar opacity controls, independently authored dissolve UVs, and configurable

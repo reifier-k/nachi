@@ -1,7 +1,7 @@
 # 004: ドロー可視性のユーザーオーバーライド API
 
 - 重大度: 中(デバッグ体験 / 演出制御)
-- 対象: `@nachi/three` / `@nachi/trails/three`(draw registry)、`@nachi/core`(可視性管理)
+- 対象: `@nachi-vfx/three` / `@nachi-vfx/trails/three`(draw registry)、`@nachi-vfx/core`(可視性管理)
 - 状態: H1-8で実装済み(2026-07-14)
 
 ## 症状

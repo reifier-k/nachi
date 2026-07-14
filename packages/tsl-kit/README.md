@@ -1,16 +1,16 @@
-# @nachi/tsl-kit
+# @nachi-vfx/tsl-kit
 
-Standalone Three.js TSL shader building blocks. This package does not depend on `@nachi/core` or
+Standalone Three.js TSL shader building blocks. This package does not depend on `@nachi-vfx/core` or
 the nachi runtime; it works directly with ordinary Three.js `NodeMaterial` classes.
 
 ```sh
-pnpm add @nachi/tsl-kit three@0.185.1
+pnpm add @nachi-vfx/tsl-kit three@0.185.1
 # TypeScript projects also need Three's separately published declarations:
 pnpm add -D @types/three@0.185.0
 ```
 
 The supported peer is exactly `three@0.185.1`. TSL is not yet a stable cross-release API, so upgrade
-`three` and `@nachi/tsl-kit` together. The emitted declarations refer
+`three` and `@nachi-vfx/tsl-kit` together. The emitted declarations refer
 to `three` node types; `@types/three` is therefore an optional peer for JavaScript consumers but a
 required development dependency for TypeScript consumers.
 
@@ -19,7 +19,7 @@ required development dependency for TypeScript consumers.
 ```ts
 import * as THREE from 'three/webgpu';
 import { texture, uniform, uv } from 'three/tsl';
-import { dissolve, polarUV, uvFlow } from '@nachi/tsl-kit';
+import { dissolve, polarUV, uvFlow } from '@nachi-vfx/tsl-kit';
 
 const threshold = uniform(0.35);
 const localTime = uniform(0);
@@ -64,4 +64,4 @@ All helpers accept a declarative configuration object and return a TSL node:
 time, pausing, or time scaling matters. Constant validation failures throw `TslKitDiagnosticError`
 with a stable diagnostic code and parameter path.
 
-CPU mirrors for coordinate conventions and tests are exported from `@nachi/tsl-kit/math`.
+CPU mirrors for coordinate conventions and tests are exported from `@nachi-vfx/tsl-kit/math`.

@@ -27,8 +27,8 @@ import {
   type VfxPrepareOptions,
   type VfxSystemOptions,
   FixedStepAccumulator,
-} from '@nachi/core';
-import type { FxNodeMaterial, MeshFxMesh } from '@nachi/mesh-fx';
+} from '@nachi-vfx/core';
+import type { FxNodeMaterial, MeshFxMesh } from '@nachi-vfx/mesh-fx';
 
 import {
   cloneTimelineFxMaterial,

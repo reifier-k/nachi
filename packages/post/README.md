@@ -1,11 +1,11 @@
-# @nachi/post
+# @nachi-vfx/post
 
 Composable screen-space effects for Three.js r185's TSL `RenderPipeline`. The package provides
 shockwave and heat-haze distortion, radial blur, bloom presets, and native-WebGPU weighted blended
-OIT without depending on `@nachi/core`.
+OIT without depending on `@nachi-vfx/core`.
 
 ```sh
-pnpm add @nachi/post three@0.185.1
+pnpm add @nachi-vfx/post three@0.185.1
 # TypeScript projects also need Three's separately published declarations:
 pnpm add -D @types/three@0.185.0
 ```
@@ -16,7 +16,7 @@ upgrade Three and this package together.
 ## RenderPipeline integration
 
 ```ts
-import { bloomPreset, createPostPipeline, radialBlur, screenDistortion } from '@nachi/post';
+import { bloomPreset, createPostPipeline, radialBlur, screenDistortion } from '@nachi-vfx/post';
 
 const post = createPostPipeline(renderer, scene, camera, {
   distortion: screenDistortion({

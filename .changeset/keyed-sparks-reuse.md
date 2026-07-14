@@ -1,5 +1,5 @@
 ---
-'@nachi/core': minor
+'@nachi-vfx/core': minor
 ---
 
 Key all core Init randomness, including `positionSphere`, `positionMeshSurface`, `velocityCone`,

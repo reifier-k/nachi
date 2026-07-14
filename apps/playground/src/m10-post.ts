@@ -4,7 +4,7 @@ import {
   radialBlur,
   screenDistortion,
   type PostPipelineConfig,
-} from '@nachi/post';
+} from '@nachi-vfx/post';
 import * as THREE from 'three/webgpu';
 import { texture, uniform, uv } from 'three/tsl';
 

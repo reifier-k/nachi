@@ -1,4 +1,4 @@
-import { MeshFxDiagnosticError, applyVat } from '@nachi/mesh-fx';
+import { MeshFxDiagnosticError, applyVat } from '@nachi-vfx/mesh-fx';
 import * as THREE from 'three/webgpu';
 import { attribute } from 'three/tsl';
 

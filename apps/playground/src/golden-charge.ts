@@ -19,15 +19,15 @@ import {
   velocityCone,
   type EffectInstanceState,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import {
   createCylinderGeometry,
   createMagicCircleGeometry,
   fxMaterial,
   polarUV,
   uvFlow,
-} from '@nachi/mesh-fx';
-import { dissolveCpu, polarUVCpu, uvFlowCpu } from '@nachi/tsl-kit/math';
+} from '@nachi-vfx/mesh-fx';
+import { dissolveCpu, polarUVCpu, uvFlowCpu } from '@nachi-vfx/tsl-kit/math';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -35,7 +35,7 @@ import {
   createThreeRuntimeRenderer,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { compactRgba8Readback } from './readback';

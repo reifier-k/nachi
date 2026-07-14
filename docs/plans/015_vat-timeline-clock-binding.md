@@ -1,7 +1,7 @@
 # 015: VAT の timeline 時計自動バインドと clone 保持
 
 - 重大度: 高
-- 対象: `@nachi/mesh-fx`(vat.ts)、`@nachi/timeline`、RFC 001(M9 責務)
+- 対象: `@nachi-vfx/mesh-fx`(vat.ts)、`@nachi-vfx/timeline`、RFC 001(M9 責務)
 - 状態: 起票(H2-10、実装未着手)
 - 出典: H1 後続 Codex 探査 T4#3(task-mrklb7a0-200ucr、2026-07-14)
 

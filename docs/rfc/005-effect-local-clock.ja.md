@@ -3,7 +3,7 @@
 > Language: [English](./005-effect-local-clock.md) / 日本語 (このページ)
 
 - **状態:** Proposed
-- **対象:** `@nachi/core` のinstance clockと従属spawn、および `@nachi/timeline`、simulation
+- **対象:** `@nachi-vfx/core` のinstance clockと従属spawn、および `@nachi-vfx/timeline`、simulation
   cache、scalabilityとの相互作用
 - **規範的参照:** [RFC 001](./001-api.ja.md) §10.2-10.5
 - **提案日:** 2026-07-14

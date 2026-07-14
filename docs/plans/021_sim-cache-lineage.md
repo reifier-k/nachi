@@ -1,7 +1,7 @@
 # 021: sim-cache の lineage 照合(スロット再利用誤認の排除)
 
 - 重大度: 高(B-3)/中(B-4)
-- 対象: `@nachi/core`(sim-cache)、RFC 001 §10.5、キャッシュフォーマット版数
+- 対象: `@nachi-vfx/core`(sim-cache)、RFC 001 §10.5、キャッシュフォーマット版数
 - 状態: 起票(H2-8、実装未着手)
 - 出典: H1 後続 Codex 探査 T3 B-3/B-4(task-mrklabwk-qlz4jd、2026-07-14)
 

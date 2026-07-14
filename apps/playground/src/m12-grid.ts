@@ -15,10 +15,10 @@ import {
   type Grid2DRuntimeView,
   type ParameterSchema,
   type VfxRuntimeRenderer,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 
 import { createPerformanceMonitor } from './perf';
-import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi-vfx/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m12-grid.css';
 

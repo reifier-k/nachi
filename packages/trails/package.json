@@ -1,5 +1,5 @@
 {
-  "name": "@nachi/trails",
+  "name": "@nachi-vfx/trails",
   "version": "0.0.0",
   "description": "GPU ribbon and trail renderer integration for nachi",
   "keywords": [
@@ -38,7 +38,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:^"
+    "@nachi-vfx/core": "workspace:^"
   },
   "peerDependencies": {
     "@types/three": ">=0.185.0 <0.186.0",

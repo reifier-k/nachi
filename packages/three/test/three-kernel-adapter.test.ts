@@ -37,11 +37,11 @@ import {
   velocityMeshNormal,
   vortex,
   createCoreKernelModuleRegistry,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import { applyEmitterQualityTier } from '../../core/src/scalability.js';
-import type { EffectInstanceState } from '@nachi/core';
-import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
-import { materializeThreeRibbonDraw } from '@nachi/trails/three';
+import type { EffectInstanceState } from '@nachi-vfx/core';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi-vfx/trails';
+import { materializeThreeRibbonDraw } from '@nachi-vfx/trails/three';
 import * as THREE from 'three/webgpu';
 import { context } from 'three/tsl';
 
@@ -513,7 +513,7 @@ describe('three kernel adapter', () => {
     ).toThrowError('NACHI_DECAL_WEBGL2_UNSUPPORTED');
   });
 
-  it('materializes an external @nachi/trails GPU birth-ring draw', async () => {
+  it('materializes an external @nachi-vfx/trails GPU birth-ring draw', async () => {
     const registry = registerTrails(createCoreKernelModuleRegistry());
     const program = compileEmitter(
       defineEmitter({
@@ -1325,7 +1325,7 @@ describe('three kernel adapter', () => {
     const object = new THREE.Group();
     Reflect.set(
       kernels,
-      Symbol.for('@nachi/three/materialized-draw-registry'),
+      Symbol.for('@nachi-vfx/three/materialized-draw-registry'),
       new Set([{ attributes: [], dispose: () => undefined, object }]),
     );
     const runtime = createThreeRuntimeRenderer(

@@ -1,4 +1,4 @@
-import type { ScalarInput } from '@nachi/tsl-kit';
+import type { ScalarInput } from '@nachi-vfx/tsl-kit';
 import { FloatType, HalfFloatType, NoColorSpace } from 'three';
 import type * as THREE from 'three/webgpu';
 import {

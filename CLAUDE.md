@@ -4,7 +4,7 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 
 ## Repository layout
 
-- `packages/core`: public `@nachi/core` API types, compiler, and particle runtime.
+- `packages/core`: public `@nachi-vfx/core` API types, compiler, and particle runtime.
 - `packages/format`: `nachi-effect` JSON schema, strict serializer/loader, migrations, and asset inheritance.
 - `packages/react`: thin React Three Fiber provider/hook/component lifecycle binding.
 - `packages/trails`: ribbon/trail definitions and renderer integration.
@@ -97,7 +97,7 @@ listener: `node tools/spike-runner.mjs 'https://nachi.local/m11-cache/?backend=w
 For pages that publish artifact screenshots, existing PNGs pass when the exact changed-pixel ratio is below `0.5%`; use `--update-screenshots` to intentionally re-record the baselines.
 
 Core `defineEffect()` composes elements and parameters but deliberately does not runtime-validate
-timeline targets or timeline values. That validation belongs to `@nachi/timeline` authoring and its
+timeline targets or timeline values. That validation belongs to `@nachi-vfx/timeline` authoring and its
 defensive runtime normalization, including for definitions created through the core compatibility
 factories.
 
@@ -152,7 +152,7 @@ for the total. SwiftShader values remain smoke observations rather than performa
 performance budgets must use robust aggregates such as the median from warmed samples on the
 relevant hardware.
 
-M12 effect JSON is owned by `@nachi/format`. The v1 envelope is exactly
+M12 effect JSON is owned by `@nachi-vfx/format`. The v1 envelope is exactly
 `{ format: 'nachi-effect', version: 1, effect }`. Keep format-owned structures strict and
 path-diagnostic, while leaving registered module `config` fields to their module-version validator.
 `loadEffect()` must return an ordinary normalized `EffectDefinition` or throw `NACHI_ASSET_*`; it
@@ -185,7 +185,7 @@ counts plus fixed cell-major particle-index slots and rebuilds before each parti
 the Jacobi snapshot is position/velocity only in v1. WebGL2 must report
 `NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED`.
 
-`@nachi/react` is lifecycle-only. `VFXSystemProvider` owns one core system and drives it with R3F
+`@nachi-vfx/react` is lifecycle-only. `VFXSystemProvider` owns one core system and drives it with R3F
 `useFrame`; `useEffectInstance()`/`VFXEffect` release the exact spawned handle on cleanup. Live
 parameter props must be validated and forwarded by core before the binding records them. React,
 R3F, and Three are peers, with Three fixed to 0.185.1 for this release.

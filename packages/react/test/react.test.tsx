@@ -7,7 +7,7 @@ import type {
   KernelUniformNode,
   ParameterPath,
   VfxRuntimeRenderer,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import {
   burst,
   defineEffect,
@@ -16,7 +16,7 @@ import {
   gravity,
   lifetime,
   parameter,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 // React 19 deprecates react-test-renderer; retain it for this canvas-free lifecycle suite until the
 // binding tests migrate to a supported React renderer.
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
@@ -288,7 +288,7 @@ const IDENTITY_FRAME_STATE: R3FFrameState = {
   viewport: { dpr: 1 },
 };
 
-describe('@nachi/react lifecycle', () => {
+describe('@nachi-vfx/react lifecycle', () => {
   beforeEach(() => {
     r3f.frames.clear();
     r3f.scene = new Scene();

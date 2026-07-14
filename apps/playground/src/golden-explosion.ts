@@ -16,9 +16,9 @@ import {
   range,
   sizeOverLife,
   velocityCone,
-} from '@nachi/core';
-import type { GeometryRef, TextureRef, VfxEmitterRuntimeView } from '@nachi/core';
-import { createPostPipeline, screenDistortion } from '@nachi/post';
+} from '@nachi-vfx/core';
+import type { GeometryRef, TextureRef, VfxEmitterRuntimeView } from '@nachi-vfx/core';
+import { createPostPipeline, screenDistortion } from '@nachi-vfx/post';
 import * as THREE from 'three/webgpu';
 import { Pane } from 'tweakpane';
 
@@ -30,7 +30,7 @@ import {
   createThreeTextureResolver,
   materializeThreeMeshDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-explosion.css';

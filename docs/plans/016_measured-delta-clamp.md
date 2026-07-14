@@ -1,7 +1,7 @@
 # 016: 測定 dt の既定クランプ
 
 - 重大度: 高
-- 対象: `@nachi/core`(update 時間源)、RFC 001
+- 対象: `@nachi-vfx/core`(update 時間源)、RFC 001
 - 状態: 起票(H2-11、実装未着手)
 - 出典: H1 後続 Codex 探査 T4#4(task-mrklb7a0-200ucr、2026-07-14)
 

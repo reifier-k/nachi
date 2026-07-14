@@ -11,7 +11,7 @@ import {
   type DebugAttributeValue,
   type VfxEmitterRuntimeView,
   type VfxProfileSnapshot,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -20,7 +20,7 @@ import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m11-debug.css';
 

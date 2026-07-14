@@ -1,5 +1,5 @@
 {
-  "name": "@nachi/react",
+  "name": "@nachi-vfx/react",
   "version": "0.0.0",
   "description": "Thin React Three Fiber lifecycle bindings for nachi VFX systems",
   "keywords": [
@@ -34,7 +34,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:^"
+    "@nachi-vfx/core": "workspace:^"
   },
   "peerDependencies": {
     "@react-three/fiber": ">=9.0.0 <10.0.0",

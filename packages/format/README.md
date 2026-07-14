@@ -1,4 +1,4 @@
-# @nachi/format
+# @nachi-vfx/format
 
 Strict JSON assets for nachi effects. `serializeEffect()` emits the versioned
 `{ format: 'nachi-effect', version: 1, effect }` envelope; `loadEffect()` validates and returns an

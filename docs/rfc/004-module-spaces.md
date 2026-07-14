@@ -3,7 +3,7 @@
 > Language: English (this page) / [日本語](./004-module-spaces.ja.md)
 
 - **Status:** Implemented in H1-5 on 2026-07-14
-- **Scope:** `@nachi/core` emitter modules and `@nachi/format` compatibility normalization
+- **Scope:** `@nachi-vfx/core` emitter modules and `@nachi-vfx/format` compatibility normalization
 - **Normative references:** [RFC 001](./001-api.md) §§4.3, 9; [RFC 003](./003-versioning.md) §§2-4
 - **Decision date:** 2026-07-13
 
@@ -90,7 +90,7 @@ that are intended to follow the effect require no source edit and begin doing so
 Existing `nachi-effect` version-1 documents MUST retain their old meaning. H1-5 therefore MUST use
 the following compatibility rule instead of silently reinterpreting v1 JSON:
 
-1. `@nachi/format` loads an affected v1 module with omitted `space` as explicit `space: 'world'`.
+1. `@nachi-vfx/format` loads an affected v1 module with omitted `space` as explicit `space: 'world'`.
 2. H1-5 authoring helpers materialize the new default as explicit `space: 'emitter'` in serialized
    module config.
 3. Re-serialization is canonical and explicit, so old and new readers agree. The envelope remains
@@ -102,19 +102,19 @@ H1-5 an omitted selector there follows the new `emitter` rule.
 
 ## 6. SemVer and changesets
 
-H1-5 is a **major change to `@nachi/core`** under RFC 003 §3.1 and §3.5: it changes a documented
-public default and deterministic results for the same code-first definition. `@nachi/format` needs
+H1-5 is a **major change to `@nachi-vfx/core`** under RFC 003 §3.1 and §3.5: it changes a documented
+public default and deterministic results for the same code-first definition. `@nachi-vfx/format` needs
 a **minor** changeset for additive compatibility normalization and canonical explicit output; the
 asset envelope does not need a major/version bump because legacy v1 semantics are preserved.
 
 The packages have not yet been publicly released. The release owner can therefore land H1-5 before
 the initial release and include the decision in the heavily experimental 0.1.0 preview. The change
 remains semantically breaking, but RFC 003 represents breaking changes on the 0.x line with a
-`minor` changeset. A later 0.x release would require the next minor; after 1.0, `@nachi/core` would
+`minor` changeset. A later 0.x release would require the next minor; after 1.0, `@nachi-vfx/core` would
 require its next major release.
 
 The current H1-4 batch remains additive and carries separate **minor** changesets for
-`@nachi/core` and `@nachi/format`.
+`@nachi-vfx/core` and `@nachi-vfx/format`.
 
 ## 7. Verification required in H1-5
 

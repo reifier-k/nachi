@@ -33,15 +33,15 @@ body:
       label: Affected package / 対象パッケージ
       multiple: true
       options:
-        - "@nachi/core"
-        - "@nachi/three"
-        - "@nachi/format"
-        - "@nachi/react"
-        - "@nachi/timeline"
-        - "@nachi/trails"
-        - "@nachi/mesh-fx"
-        - "@nachi/post"
-        - "@nachi/tsl-kit"
+        - "@nachi-vfx/core"
+        - "@nachi-vfx/three"
+        - "@nachi-vfx/format"
+        - "@nachi-vfx/react"
+        - "@nachi-vfx/timeline"
+        - "@nachi-vfx/trails"
+        - "@nachi-vfx/mesh-fx"
+        - "@nachi-vfx/post"
+        - "@nachi-vfx/tsl-kit"
         - Playground, showcase, or documentation
         - Not sure / 不明
     validations:

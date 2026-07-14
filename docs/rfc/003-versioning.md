@@ -3,7 +3,7 @@
 > Language: English (this page) / [日本語](./003-versioning.ja.md)
 
 - **Status:** Adopted for the heavily experimental 0.1 line; the 1.0 stability contract remains proposed
-- **Scope:** All public `@nachi/*` packages and the `nachi-effect` asset format
+- **Scope:** All public `@nachi-vfx/*` packages and the `nachi-effect` asset format
 - **Normative references:** [RFC 001](./001-api.md), especially §12, §13, and §16
 
 ## 1. Version lines and the meaning of 1.0

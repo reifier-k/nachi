@@ -3,7 +3,7 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "paths": {
-      "@nachi/core": ["../../packages/core/src/index.ts"]
+      "@nachi-vfx/core": ["../../packages/core/src/index.ts"]
     },
     "types": ["node", "vitest/globals"]
   },

@@ -9,7 +9,7 @@ import {
   type RenderModule,
   type TextureRef,
   type VfxDiagnostic,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 
 export type RibbonUvMode =
   | { readonly mode: 'stretched' }
@@ -135,7 +135,7 @@ function throwIfInvalid(diagnostics: readonly VfxDiagnostic[]): void {
   if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
 }
 
-declare module '@nachi/core' {
+declare module '@nachi-vfx/core' {
   interface CompiledDrawDescriptionMap {
     readonly ribbon: CompiledRibbonDrawDescription;
   }

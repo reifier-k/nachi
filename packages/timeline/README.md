@@ -1,15 +1,15 @@
-# @nachi/timeline
+# @nachi-vfx/timeline
 
-Deterministic effect-local sequencing for `@nachi/core`, including `play`/`stop`, hit stop,
+Deterministic effect-local sequencing for `@nachi-vfx/core`, including `play`/`stop`, hit stop,
 decaying PCG camera shake, gameplay markers, timeline loop/speed, and automatic lifecycle binding
-for `@nachi/mesh-fx` meshes.
+for `@nachi-vfx/mesh-fx` meshes.
 
 Three.js is an exact `three@0.185.1` peer because timeline mesh-fx lifecycle integration shares
 live Three resources with the application.
 
 ```ts
-import { curve, defineEmitter } from '@nachi/core';
-import { slashArc } from '@nachi/mesh-fx';
+import { curve, defineEmitter } from '@nachi-vfx/core';
+import { slashArc } from '@nachi-vfx/mesh-fx';
 import {
   VFXSystem,
   at,
@@ -18,7 +18,7 @@ import {
   fxMaterial,
   hitStop,
   play,
-} from '@nachi/timeline';
+} from '@nachi-vfx/timeline';
 
 const arc = slashArc({
   angle: 140,

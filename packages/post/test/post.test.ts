@@ -36,7 +36,7 @@ function bloomInputNodeKinds(pipeline: ReturnType<typeof createPostPipeline>): S
   return kinds;
 }
 
-describe('@nachi/post authoring', () => {
+describe('@nachi-vfx/post authoring', () => {
   it('matches the McGuire-Bavoil weighted two-layer reference and is order invariant', () => {
     const layers = [
       { alpha: 0.35, color: [0.9, 0.15, 0.05] as const, depth: 0.23 },
@@ -309,7 +309,7 @@ describe('@nachi/post authoring', () => {
   });
 });
 
-describe('@nachi/post CPU mirrors', () => {
+describe('@nachi-vfx/post CPU mirrors', () => {
   it('moves a non-axis-aligned shockwave sample outward with a time envelope', () => {
     const source = {
       center: [0.31, 0.43] as const,

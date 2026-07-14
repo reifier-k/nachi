@@ -43,7 +43,7 @@ function expectNode(node: Node, minimumGraphSize = 2): void {
   expect(count).toBeGreaterThanOrEqual(minimumGraphSize);
 }
 
-describe('@nachi/tsl-kit node graphs', () => {
+describe('@nachi-vfx/tsl-kit node graphs', () => {
   const noise = dataTexture(64, 192, 128, 255, 224, 96, 128, 255);
   const map = dataTexture(0, 32, 255, 255, 255, 64, 0, 255);
 
@@ -149,7 +149,7 @@ describe('@nachi/tsl-kit node graphs', () => {
   });
 });
 
-describe('@nachi/tsl-kit CPU mirror math', () => {
+describe('@nachi-vfx/tsl-kit CPU mirror math', () => {
   it('matches the documented counter-clockwise polar convention', () => {
     expect(polarUVCpu([1, 0.5])).toEqual([0.5, 0.5]);
     expect(polarUVCpu([0.5, 1])).toEqual([0.75, 0.5]);

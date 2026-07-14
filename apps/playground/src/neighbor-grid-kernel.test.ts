@@ -11,12 +11,12 @@ import {
   gravity,
   neighborGridTslModule,
   pbdDistanceConstraint,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { context } from 'three/tsl';
 
-import { createThreeKernelAdapter } from '@nachi/three';
+import { createThreeKernelAdapter } from '@nachi-vfx/three';
 
 const grid = defineNeighborGrid({
   cellCapacity: 8,

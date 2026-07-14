@@ -15,8 +15,8 @@ import {
   resolvePackedAttributeAddress,
   tslModule,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
-import { compositeWboitLayers, createWboitOutput, createWboitPipeline } from '@nachi/post';
+} from '@nachi-vfx/core';
+import { compositeWboitLayers, createWboitOutput, createWboitPipeline } from '@nachi-vfx/post';
 import * as THREE from 'three/webgpu';
 import { float, vec3, vec4 } from 'three/tsl';
 
@@ -31,7 +31,7 @@ import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m10-sort.css';
 

@@ -54,8 +54,8 @@ import {
   velocityCone,
   vortex,
   type TextureRef,
-} from '@nachi/core';
-import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
+} from '@nachi-vfx/core';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi-vfx/trails';
 import { describe, expect, it } from 'vitest';
 
 import {

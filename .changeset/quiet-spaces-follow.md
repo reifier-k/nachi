@@ -1,6 +1,6 @@
 ---
-'@nachi/core': minor
-'@nachi/format': minor
+'@nachi-vfx/core': minor
+'@nachi-vfx/format': minor
 ---
 
 Change the omitted `space` default for vortex, point-attractor, and analytic-collider modules to

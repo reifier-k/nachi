@@ -2,8 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "paths": {
-      "@nachi/core": ["../../packages/core/src/index.ts"],
-      "@nachi/mesh-fx": ["../../packages/mesh-fx/src/index.ts"]
+      "@nachi-vfx/core": ["../../packages/core/src/index.ts"],
+      "@nachi-vfx/mesh-fx": ["../../packages/mesh-fx/src/index.ts"]
     },
     "types": ["node", "vitest/globals"]
   },

@@ -1,6 +1,6 @@
 ---
-'@nachi/core': minor
-'@nachi/trails': minor
+'@nachi-vfx/core': minor
+'@nachi-vfx/trails': minor
 ---
 
 Validate engine-independent module configuration at factory call time while retaining the same

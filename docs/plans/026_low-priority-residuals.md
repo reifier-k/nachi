@@ -1,7 +1,7 @@
 # 026: 低優先残余・文書化バッチ
 
 - 重大度: 低〜中(要検証含む)
-- 対象: `@nachi/core`、`@nachi/three`、docs/rfc
+- 対象: `@nachi-vfx/core`、`@nachi-vfx/three`、docs/rfc
 - 状態: 起票(H2-15、実装未着手)
 - 出典: H1 後続 Codex 探査の残余(2026-07-14)
 

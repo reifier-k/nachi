@@ -1,7 +1,7 @@
 # 005: エフェクトローカル時計の共有(hitStop と随伴システムの同期)
 
 - 重大度: 中(演出品質 / 合成体験)
-- 対象: `@nachi/timeline`(クロック公開)、`@nachi/core`(インスタンスの timeScale 駆動)
+- 対象: `@nachi-vfx/timeline`(クロック公開)、`@nachi-vfx/core`(インスタンスの timeScale 駆動)
 - 状態: (a) H1-8で実装済み(2026-07-14)、(b) RFC 005起票済み(Proposed、実装なし)
 
 ## 症状

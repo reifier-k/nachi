@@ -14,15 +14,15 @@ Fiber bindings, release automation, and a buildable documentation gallery.
 
 | Package           | Purpose                                                                                                                 |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `@nachi/core`     | Definitions, particle modules, compiler, GPU scheduler, scalability, sim cache, debugger, Grid2D/3D, and neighbor grids |
-| `@nachi/three`    | Three.js WebGPU kernel/runtime adapter, resource resolvers, and particle draw materializers                             |
-| `@nachi/format`   | Strict `nachi-effect` v1 JSON schema, serializer/loader, migrations, and asset inheritance                              |
-| `@nachi/react`    | Thin R3F provider, hook, component lifecycle, and `Object3D` attachment                                                 |
-| `@nachi/timeline` | Effect-local sequencing, camera shake, hit stop, markers, and mesh-fx lifecycle                                         |
-| `@nachi/trails`   | GPU ribbons and trails                                                                                                  |
-| `@nachi/mesh-fx`  | Procedural effect geometry, `fxMaterial`, and Blender VAT playback                                                      |
-| `@nachi/post`     | RenderPipeline distortion, radial blur, bloom presets, and WebGPU WBOIT                                                 |
-| `@nachi/tsl-kit`  | Standalone Three.js TSL shader building blocks                                                                          |
+| `@nachi-vfx/core`     | Definitions, particle modules, compiler, GPU scheduler, scalability, sim cache, debugger, Grid2D/3D, and neighbor grids |
+| `@nachi-vfx/three`    | Three.js WebGPU kernel/runtime adapter, resource resolvers, and particle draw materializers                             |
+| `@nachi-vfx/format`   | Strict `nachi-effect` v1 JSON schema, serializer/loader, migrations, and asset inheritance                              |
+| `@nachi-vfx/react`    | Thin R3F provider, hook, component lifecycle, and `Object3D` attachment                                                 |
+| `@nachi-vfx/timeline` | Effect-local sequencing, camera shake, hit stop, markers, and mesh-fx lifecycle                                         |
+| `@nachi-vfx/trails`   | GPU ribbons and trails                                                                                                  |
+| `@nachi-vfx/mesh-fx`  | Procedural effect geometry, `fxMaterial`, and Blender VAT playback                                                      |
+| `@nachi-vfx/post`     | RenderPipeline distortion, radial blur, bloom presets, and WebGPU WBOIT                                                 |
+| `@nachi-vfx/tsl-kit`  | Standalone Three.js TSL shader building blocks                                                                          |
 
 The repository also contains the Vite [playground](./apps/playground) and static
 [documentation site](./apps/docs).
@@ -40,17 +40,17 @@ maintainers, with opt-in co-author credit for substantive issue contributions. S
 Core Three.js usage:
 
 ```sh
-pnpm add @nachi/core @nachi/three three@0.185.1
+pnpm add @nachi-vfx/core @nachi-vfx/three three@0.185.1
 ```
 
 React Three Fiber usage keeps React, R3F, and Three as peers:
 
 ```sh
-pnpm add @nachi/core @nachi/three @nachi/react react@^19 @react-three/fiber@^9 three@0.185.1
+pnpm add @nachi-vfx/core @nachi-vfx/three @nachi-vfx/react react@^19 @react-three/fiber@^9 three@0.185.1
 ```
 
-Packages that expose Three.js types (`@nachi/three`, `@nachi/tsl-kit`, `@nachi/mesh-fx`, `@nachi/trails`,
-`@nachi/timeline`, `@nachi/post`, and `@nachi/react`) also expect the separately published matching
+Packages that expose Three.js types (`@nachi-vfx/three`, `@nachi-vfx/tsl-kit`, `@nachi-vfx/mesh-fx`, `@nachi-vfx/trails`,
+`@nachi-vfx/timeline`, `@nachi-vfx/post`, and `@nachi-vfx/react`) also expect the separately published matching
 declarations in TypeScript projects:
 
 ```sh
@@ -77,12 +77,12 @@ import {
   gravity,
   lifetime,
   positionSphere,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import * as THREE from 'three/webgpu';
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -129,7 +129,7 @@ requestAnimationFrame(frame);
 ```
 
 In R3F, create the same adapter once and let the binding own instance cleanup. The complete
-materialization example is in [`@nachi/react`](./packages/react/README.md).
+materialization example is in [`@nachi-vfx/react`](./packages/react/README.md).
 
 `useEffectInstance()` is the hook form. Live `parameters`, transform, time scale, and attachment are
 forwarded to core; changing seed or priority creates a fresh instance. Keep `definition` at module
@@ -140,7 +140,7 @@ scheduled step.
 ## Assets and advanced simulation
 
 ```ts
-import { loadEffect, serializeEffect } from '@nachi/format';
+import { loadEffect, serializeEffect } from '@nachi-vfx/format';
 
 const document = serializeEffect(effect);
 const loaded = loadEffect(JSON.stringify(document));
@@ -179,6 +179,8 @@ Markdown and YAML are not automatically formatted.
 
 Changesets are independently versioned: run `pnpm changeset`, then `pnpm version-packages` when a
 release versioning pass is intended. `release:dry` never publishes.
+The maintainer release procedure, including the one-time npm bootstrap and token-free trusted
+publishing migration, is documented in [docs/releasing.md](./docs/releasing.md).
 
 Design and status: [PLAN.md](./PLAN.md), [ROADMAP.md](./ROADMAP.md), normative
 [API RFC](./docs/rfc/001-api.md), and the

@@ -6,14 +6,14 @@ import {
   polarUV,
   rimLight,
   uvFlow,
-} from '@nachi/tsl-kit';
+} from '@nachi-vfx/tsl-kit';
 import {
   blendFlowMapSamplesCpu,
   distortionUVCpu,
   flowMapPhasesCpu,
   polarUVCpu,
   uvFlowCpu,
-} from '@nachi/tsl-kit/math';
+} from '@nachi-vfx/tsl-kit/math';
 import * as THREE from 'three/webgpu';
 import { texture, uniform, vec3 } from 'three/tsl';
 

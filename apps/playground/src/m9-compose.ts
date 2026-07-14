@@ -16,8 +16,8 @@ import {
   positionSphere,
   sizeOverLife,
   velocityCone,
-} from '@nachi/core';
-import type { KernelTslAdapter, ModuleDefinition, VfxEmitterRuntimeView } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { KernelTslAdapter, ModuleDefinition, VfxEmitterRuntimeView } from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -26,7 +26,7 @@ import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m9-compose.css';

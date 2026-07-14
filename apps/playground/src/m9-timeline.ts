@@ -14,8 +14,8 @@ import {
   velocityCone,
   type KernelTslAdapter,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
-import { ring, slashArc } from '@nachi/mesh-fx';
+} from '@nachi-vfx/core';
+import { ring, slashArc } from '@nachi-vfx/mesh-fx';
 import {
   VFXSystem,
   at,
@@ -29,7 +29,7 @@ import {
   stop,
   timeline,
   type CameraShakeSample,
-} from '@nachi/timeline';
+} from '@nachi-vfx/timeline';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -39,7 +39,7 @@ import {
   createThreeRuntimeRenderer,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readStorage } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m9-timeline.css';

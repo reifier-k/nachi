@@ -1,7 +1,7 @@
 # 008: エミッタローカルの配置オフセットと空間指定の一貫化
 
 - 重大度: 高(体験。4/5 の制作エージェントが独立に痛点として報告)
-- 対象: `@nachi/core`(init/update モジュールの空間意味論、EmitterConfig)
+- 対象: `@nachi-vfx/core`(init/update モジュールの空間意味論、EmitterConfig)
 - 状態: 実装済み・受入済み(2026-07-14、受入コミット `643ab51` / `df21d5b`)
 - 出典: showcase-ice / showcase-machina / showcase-beam / showcase-barrier 制作エージェント
 - 裁定: 2026-07-13 ユーザー承認 — 追加 API(center/arc/offset)に加え、**RFC を起票した上で

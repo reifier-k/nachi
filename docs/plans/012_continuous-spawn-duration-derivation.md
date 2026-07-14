@@ -1,7 +1,7 @@
 # 012: 連続スポーンの省略時 duration 導出(rate/perDistance の無限継続)
 
 - 重大度: 高(無音の失敗。一粒も出ずに完了する)
-- 対象: `@nachi/core`(spawn 包絡導出・エミッタライフサイクル)、RFC 001
+- 対象: `@nachi-vfx/core`(spawn 包絡導出・エミッタライフサイクル)、RFC 001
 - 状態: 起票(H2-2、実装未着手)
 - 出典: H1 後続 Codex 探査 T1#1(task-mrkl9puw-hbbgor、2026-07-14)
 

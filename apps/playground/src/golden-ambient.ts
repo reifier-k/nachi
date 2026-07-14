@@ -20,8 +20,8 @@ import {
   turbulence,
   velocityCone,
   vortex,
-} from '@nachi/core';
-import type { GeometryRef, TextureRef, VfxEmitterRuntimeView } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { GeometryRef, TextureRef, VfxEmitterRuntimeView } from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 import { Pane } from 'tweakpane';
 
@@ -33,7 +33,7 @@ import {
   createThreeTextureResolver,
   materializeThreeMeshDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-ambient.css';

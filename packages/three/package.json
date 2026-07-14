@@ -1,5 +1,5 @@
 {
-  "name": "@nachi/three",
+  "name": "@nachi-vfx/three",
   "version": "0.0.0",
   "description": "Three.js WebGPU runtime adapter and draw materializers for nachi VFX",
   "keywords": [
@@ -35,7 +35,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:^"
+    "@nachi-vfx/core": "workspace:^"
   },
   "peerDependencies": {
     "@types/three": ">=0.185.0 <0.186.0",
@@ -50,7 +50,7 @@
     "access": "public"
   },
   "devDependencies": {
-    "@nachi/trails": "workspace:^",
+    "@nachi-vfx/trails": "workspace:^",
     "@types/three": "0.185.0",
     "three": "0.185.1"
   }

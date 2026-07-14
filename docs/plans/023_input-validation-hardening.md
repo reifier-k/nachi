@@ -1,7 +1,7 @@
 # 023: 入力検証ハードニングバッチ(12 件)
 
 - 重大度: 高 5 / 中 7(一括)
-- 対象: `@nachi/core`、`@nachi/format`、`@nachi/timeline`、`@nachi/trails`、`@nachi/post`、`@nachi/mesh-fx`
+- 対象: `@nachi-vfx/core`、`@nachi-vfx/format`、`@nachi-vfx/timeline`、`@nachi-vfx/trails`、`@nachi-vfx/post`、`@nachi-vfx/mesh-fx`
 - 状態: 起票(H2-13、実装未着手)
 - 出典: H1 後続 Codex 探査 T1#2〜#11 + T4#2/#6(2026-07-14)
 

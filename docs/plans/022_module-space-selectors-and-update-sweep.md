@@ -1,7 +1,7 @@
 # 022: 空間 selector 拡張・RFC 004 表完備・update 段 transform 補間(sweep)
 
 - 重大度: 高(大型。H1-7 相当の重さ)
-- 対象: `@nachi/core`、`@nachi/format`、RFC 004 / 001
+- 対象: `@nachi-vfx/core`、`@nachi-vfx/format`、RFC 004 / 001
 - 状態: 起票(H2-6、実装未着手)
 - 出典: H1 後続 Codex 探査 T5 F-04/F-05/F-07 + T4#1(2026-07-14)
 

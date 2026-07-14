@@ -4,16 +4,16 @@
     "types": ["vite/client"],
     "noEmit": true,
     "paths": {
-      "@nachi/core": ["../../packages/core/src/index.ts"],
-      "@nachi/format": ["../../packages/format/src/index.ts"],
-      "@nachi/mesh-fx": ["../../packages/mesh-fx/src/index.ts"],
-      "@nachi/post": ["../../packages/post/src/index.ts"],
-      "@nachi/three": ["../../packages/three/src/index.ts"],
-      "@nachi/timeline": ["../../packages/timeline/src/index.ts"],
-      "@nachi/tsl-kit": ["../../packages/tsl-kit/src/index.ts"],
-      "@nachi/tsl-kit/math": ["../../packages/tsl-kit/src/math.ts"],
-      "@nachi/trails": ["../../packages/trails/src/index.ts"],
-      "@nachi/trails/three": ["../../packages/trails/src/three.ts"]
+      "@nachi-vfx/core": ["../../packages/core/src/index.ts"],
+      "@nachi-vfx/format": ["../../packages/format/src/index.ts"],
+      "@nachi-vfx/mesh-fx": ["../../packages/mesh-fx/src/index.ts"],
+      "@nachi-vfx/post": ["../../packages/post/src/index.ts"],
+      "@nachi-vfx/three": ["../../packages/three/src/index.ts"],
+      "@nachi-vfx/timeline": ["../../packages/timeline/src/index.ts"],
+      "@nachi-vfx/tsl-kit": ["../../packages/tsl-kit/src/index.ts"],
+      "@nachi-vfx/tsl-kit/math": ["../../packages/tsl-kit/src/math.ts"],
+      "@nachi-vfx/trails": ["../../packages/trails/src/index.ts"],
+      "@nachi-vfx/trails/three": ["../../packages/trails/src/three.ts"]
     }
   },
   "include": ["src/**/*.ts", "vite.config.ts"]

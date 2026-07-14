@@ -4,8 +4,8 @@ import {
   polarUV as polarUvNode,
   rimLight,
   uvFlow as uvFlowNode,
-} from '@nachi/tsl-kit';
-import type { ColorInput, ScalarInput, TextureInput, Vec2Input } from '@nachi/tsl-kit';
+} from '@nachi-vfx/tsl-kit';
+import type { ColorInput, ScalarInput, TextureInput, Vec2Input } from '@nachi-vfx/tsl-kit';
 import {
   AdditiveBlending,
   MultiplyBlending,

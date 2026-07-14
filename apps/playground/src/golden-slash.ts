@@ -23,9 +23,9 @@ import {
   type EffectInstanceState,
   type Vec3,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
-import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
-import { materializeThreeRibbonDraw, readRibbonSegments } from '@nachi/trails/three';
+} from '@nachi-vfx/core';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi-vfx/trails';
+import { materializeThreeRibbonDraw, readRibbonSegments } from '@nachi-vfx/trails/three';
 import * as THREE from 'three/webgpu';
 import { screenUV, texture, vec4 } from 'three/tsl';
 
@@ -36,7 +36,7 @@ import {
   materializeThreeDecalDraw,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { compactRgba8Readback, createDrainedReadback } from './readback';

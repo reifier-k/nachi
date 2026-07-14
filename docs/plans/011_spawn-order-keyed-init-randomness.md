@@ -1,7 +1,7 @@
 # 011: init 乱数の spawnOrder キー化(スロット再利用下の決定性と分布の正しさ)
 
 - 重大度: 高(決定性/視覚品質。H1-1 検収中に実測で確認)
-- 対象: `@nachi/core`(init モジュールの乱数導出: positionSphere / velocityCone / lifetime(range) 等)
+- 対象: `@nachi-vfx/core`(init モジュールの乱数導出: positionSphere / velocityCone / lifetime(range) 等)
 - 状態: 実装済み・受入済み(2026-07-14、受入コミット `7aea305`)
 - 出典: H1-1 検収(2026-07-13〜14)。showcase-beam のスクリーンショット回帰が発端
 

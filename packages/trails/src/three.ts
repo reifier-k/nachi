@@ -4,8 +4,8 @@ import type {
   KernelStorageNode,
   TextureRef,
   TslStorageType,
-} from '@nachi/core';
-import { resolvePackedAttributeAddress } from '@nachi/core';
+} from '@nachi-vfx/core';
+import { resolvePackedAttributeAddress } from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 import {
   Fn,
@@ -35,9 +35,9 @@ import {
 
 import type { CompiledRibbonDrawDescription } from './index.js';
 
-const THREE_DRAW_REGISTRY = Symbol.for('@nachi/three/materialized-draw-registry');
-const THREE_RENDER_ORDER = Symbol.for('@nachi/three/render-order');
-const THREE_VISIBILITY = Symbol.for('@nachi/three/visibility');
+const THREE_DRAW_REGISTRY = Symbol.for('@nachi-vfx/three/materialized-draw-registry');
+const THREE_RENDER_ORDER = Symbol.for('@nachi-vfx/three/render-order');
+const THREE_VISIBILITY = Symbol.for('@nachi-vfx/three/visibility');
 
 type ThreeDrawRegistration = {
   readonly attributes: readonly THREE.BufferAttribute[];
@@ -204,7 +204,7 @@ export interface ThreeRibbonDraw {
 }
 
 /**
- * Materializes the @nachi/trails WebGPU path. Preparation is a GPU-only sequential birth-ring
+ * Materializes the @nachi-vfx/trails WebGPU path. Preparation is a GPU-only sequential birth-ring
  * scan; callers submit `prepare()` after simulation compaction and before drawing.
  */
 export function materializeThreeRibbonDraw(

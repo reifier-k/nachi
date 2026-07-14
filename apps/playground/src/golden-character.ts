@@ -16,8 +16,8 @@ import {
   velocityCone,
   velocityMeshNormal,
   vortex,
-} from '@nachi/core';
-import type { VfxEmitterRuntimeView } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { VfxEmitterRuntimeView } from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
@@ -29,7 +29,7 @@ import {
   createThreeRuntimeRenderer,
   createThreeTransformSource,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-character.css';

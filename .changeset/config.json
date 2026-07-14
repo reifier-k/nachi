@@ -6,7 +6,7 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [],
-  "ignore": ["@nachi/docs", "@nachi/playground"],
+  "ignore": ["@nachi-vfx/docs", "@nachi-vfx/playground"],
   "linked": [],
   "privatePackages": {
     "tag": false,

@@ -12,8 +12,8 @@ import {
   rate,
   range,
   velocityCone,
-} from '@nachi/core';
-import type { BillboardOptions, TextureRef, Vec4, VfxEmitterRuntimeView } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { BillboardOptions, TextureRef, Vec4, VfxEmitterRuntimeView } from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -21,7 +21,7 @@ import {
   createThreeRuntimeRenderer,
   createThreeTextureResolver,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';

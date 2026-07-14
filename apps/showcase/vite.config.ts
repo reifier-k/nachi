@@ -34,41 +34,41 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: '@nachi/format',
+        find: '@nachi-vfx/format',
         replacement: fileURLToPath(new URL('../../packages/format/src/index.ts', import.meta.url)),
       },
       {
-        find: '@nachi/post',
+        find: '@nachi-vfx/post',
         replacement: fileURLToPath(new URL('../../packages/post/src/index.ts', import.meta.url)),
       },
       {
-        find: '@nachi/timeline',
+        find: '@nachi-vfx/timeline',
         replacement: fileURLToPath(
           new URL('../../packages/timeline/src/index.ts', import.meta.url),
         ),
       },
       {
-        find: '@nachi/mesh-fx',
+        find: '@nachi-vfx/mesh-fx',
         replacement: fileURLToPath(new URL('../../packages/mesh-fx/src/index.ts', import.meta.url)),
       },
       {
-        find: '@nachi/tsl-kit/math',
+        find: '@nachi-vfx/tsl-kit/math',
         replacement: fileURLToPath(new URL('../../packages/tsl-kit/src/math.ts', import.meta.url)),
       },
       {
-        find: '@nachi/tsl-kit',
+        find: '@nachi-vfx/tsl-kit',
         replacement: fileURLToPath(new URL('../../packages/tsl-kit/src/index.ts', import.meta.url)),
       },
       {
-        find: '@nachi/trails/three',
+        find: '@nachi-vfx/trails/three',
         replacement: fileURLToPath(new URL('../../packages/trails/src/three.ts', import.meta.url)),
       },
       {
-        find: '@nachi/trails',
+        find: '@nachi-vfx/trails',
         replacement: fileURLToPath(new URL('../../packages/trails/src/index.ts', import.meta.url)),
       },
       {
-        find: '@nachi/core',
+        find: '@nachi-vfx/core',
         replacement: fileURLToPath(new URL('../../packages/core/src/index.ts', import.meta.url)),
       },
     ],

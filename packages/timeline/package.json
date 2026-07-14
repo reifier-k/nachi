@@ -1,5 +1,5 @@
 {
-  "name": "@nachi/timeline",
+  "name": "@nachi-vfx/timeline",
   "version": "0.0.0",
   "description": "Deterministic effect-local sequencing, hit stop, camera shake, and mesh-fx composition for nachi",
   "keywords": [
@@ -34,8 +34,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:^",
-    "@nachi/mesh-fx": "workspace:^"
+    "@nachi-vfx/core": "workspace:^",
+    "@nachi-vfx/mesh-fx": "workspace:^"
   },
   "peerDependencies": {
     "@types/three": ">=0.185.0 <0.186.0",

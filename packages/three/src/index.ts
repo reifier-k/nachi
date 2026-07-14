@@ -26,8 +26,8 @@ import type {
   VfxEmitterRuntimeView,
   VfxPrepareEmitterContext,
   VfxRuntimeRenderer,
-} from '@nachi/core';
-import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS, resolvePackedAttributeAddress } from '@nachi/core';
+} from '@nachi-vfx/core';
+import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS, resolvePackedAttributeAddress } from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 import {
   Fn,
@@ -403,9 +403,9 @@ type StorageArrayConstructor = new (length: number) => StorageArray;
 
 const THREE_STORAGE_ATTRIBUTE_TYPE = 3;
 const THREE_INDIRECT_ATTRIBUTE_TYPE = 4;
-const THREE_DRAW_REGISTRY = Symbol.for('@nachi/three/materialized-draw-registry');
-const THREE_RENDER_ORDER = Symbol.for('@nachi/three/render-order');
-const THREE_VISIBILITY = Symbol.for('@nachi/three/visibility');
+const THREE_DRAW_REGISTRY = Symbol.for('@nachi-vfx/three/materialized-draw-registry');
+const THREE_RENDER_ORDER = Symbol.for('@nachi-vfx/three/render-order');
+const THREE_VISIBILITY = Symbol.for('@nachi-vfx/three/visibility');
 const indirectAttributesByAdapter = new WeakMap<
   KernelTslAdapter,
   Set<THREE.IndirectStorageBufferAttribute>

@@ -3,8 +3,8 @@
 > Language: English (this page) / [日本語](./005-effect-local-clock.ja.md)
 
 - **Status:** Proposed
-- **Scope:** `@nachi/core` instance clocks and dependent spawning; interaction with
-  `@nachi/timeline`, simulation caches, and scalability
+- **Scope:** `@nachi-vfx/core` instance clocks and dependent spawning; interaction with
+  `@nachi-vfx/timeline`, simulation caches, and scalability
 - **Normative references:** [RFC 001](./001-api.md) §§10.2-10.4, 10.5
 - **Proposal date:** 2026-07-14
 - **Implementation:** None in this RFC; H1-8 implements only the smaller

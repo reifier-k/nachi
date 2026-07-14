@@ -1,7 +1,7 @@
 # 003: perDistance スポーンのフレーム内トランスフォーム補間
 
 - 重大度: 中(視覚品質 / Niagara パリティ)
-- 対象: `@nachi/core`(spawn カーネル、`core/per-distance` および `core/rate`)
+- 対象: `@nachi-vfx/core`(spawn カーネル、`core/per-distance` および `core/rate`)
 - 状態: 実装済み
 
 ## 症状

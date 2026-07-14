@@ -17,8 +17,8 @@ import {
   type VfxDiagnostic,
   type VfxEffectInstance,
   VfxDiagnosticError,
-} from '@nachi/core';
-import { fxMaterial as meshFxMaterial, ring, slashArc } from '@nachi/mesh-fx';
+} from '@nachi-vfx/core';
+import { fxMaterial as meshFxMaterial, ring, slashArc } from '@nachi-vfx/mesh-fx';
 import * as THREE from 'three';
 import { float } from 'three/tsl';
 import { describe, expect, it, vi } from 'vitest';
@@ -105,7 +105,7 @@ function fakeChildInstance(
   };
 }
 
-describe('@nachi/timeline authoring', () => {
+describe('@nachi-vfx/timeline authoring', () => {
   it('returns pure timeline data, sorts entries stably, and adapts mesh resources out of band', () => {
     const effect = defineEffect({
       elements: { arc: mesh() },
@@ -260,7 +260,7 @@ describe('@nachi/timeline authoring', () => {
   });
 });
 
-describe('@nachi/timeline runtime', () => {
+describe('@nachi-vfx/timeline runtime', () => {
   it('returns an error instance when an implicit timeline targets an unsupported element', () => {
     const effect = defineCoreEffect({
       elements: {

@@ -1,13 +1,13 @@
 ---
-'@nachi/core': minor
-'@nachi/format': minor
-'@nachi/mesh-fx': minor
-'@nachi/post': minor
-'@nachi/react': minor
-'@nachi/three': minor
-'@nachi/timeline': minor
-'@nachi/trails': minor
-'@nachi/tsl-kit': minor
+'@nachi-vfx/core': minor
+'@nachi-vfx/format': minor
+'@nachi-vfx/mesh-fx': minor
+'@nachi-vfx/post': minor
+'@nachi-vfx/react': minor
+'@nachi-vfx/three': minor
+'@nachi-vfx/timeline': minor
+'@nachi-vfx/trails': minor
+'@nachi-vfx/tsl-kit': minor
 ---
 
 Release the complete independently versioned nachi package set as the heavily experimental 0.1.0

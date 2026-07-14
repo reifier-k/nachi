@@ -12,16 +12,16 @@ import {
   type UpdateModule,
   type Vec3,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
-import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
+} from '@nachi-vfx/core';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi-vfx/trails';
 import {
   materializeThreeRibbonDraw,
   readRibbonSegments,
   type ThreeRibbonDraw,
-} from '@nachi/trails/three';
+} from '@nachi-vfx/trails/three';
 import * as THREE from 'three/webgpu';
 
-import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';

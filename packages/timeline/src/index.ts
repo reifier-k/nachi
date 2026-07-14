@@ -14,7 +14,7 @@ export {
   type TimelineAction,
   type TimelineDefinition,
   type TimelineEntry,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 export {
   bindMeshFxResources,
   defineEffect,

@@ -1,7 +1,7 @@
 # 014: timeline mesh-fx 状態所有権の完結(clone スナップショット / userVisible / geometry 共有)
 
 - 重大度: 高(C-1)/中(A-3、C-2)
-- 対象: `@nachi/timeline`、`@nachi/mesh-fx`、RFC 001
+- 対象: `@nachi-vfx/timeline`、`@nachi-vfx/mesh-fx`、RFC 001
 - 状態: 起票(H2-9、実装未着手)
 - 出典: H1 後続 Codex 探査 T2 C-1 / A-3 / C-2(task-mrkla9gn-byrcd0、2026-07-14)
 

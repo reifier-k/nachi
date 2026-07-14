@@ -1,4 +1,4 @@
-import type { VfxPrepareProgress } from '@nachi/core';
+import type { VfxPrepareProgress } from '@nachi-vfx/core';
 
 type PreparationProgress = Pick<VfxPrepareProgress, 'completed' | 'total'> & {
   readonly resource?: VfxPrepareProgress['resource'];

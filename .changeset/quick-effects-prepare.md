@@ -1,8 +1,8 @@
 ---
-'@nachi/core': minor
-'@nachi/timeline': minor
-'@nachi/three': minor
-'@nachi/post': minor
+'@nachi-vfx/core': minor
+'@nachi-vfx/timeline': minor
+'@nachi-vfx/three': minor
+'@nachi-vfx/post': minor
 ---
 
 Add resource-oriented effect preparation APIs. Core and timeline systems can now compile compute,

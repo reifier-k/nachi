@@ -17,15 +17,15 @@ import {
   velocityCone,
   type TextureRef,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import {
   EFFECT_ASSET_FORMAT,
   EFFECT_ASSET_VERSION,
   loadEffect,
   serializeEffect,
-} from '@nachi/format';
-import { ring, slashArc } from '@nachi/mesh-fx';
-import { bloomPreset, createPostPipeline, radialBlur, screenDistortion } from '@nachi/post';
+} from '@nachi-vfx/format';
+import { ring, slashArc } from '@nachi-vfx/mesh-fx';
+import { bloomPreset, createPostPipeline, radialBlur, screenDistortion } from '@nachi-vfx/post';
 import {
   VFXSystem,
   at,
@@ -42,9 +42,9 @@ import {
   timeline,
   type CameraShakeSample,
   type TimelineEffectInstance,
-} from '@nachi/timeline';
-import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi/trails';
-import { materializeThreeRibbonDraw, readRibbonSegments } from '@nachi/trails/three';
+} from '@nachi-vfx/timeline';
+import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '@nachi-vfx/trails';
+import { materializeThreeRibbonDraw, readRibbonSegments } from '@nachi-vfx/trails/three';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -55,7 +55,7 @@ import {
   createThreeTextureResolver,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './golden-ultimate.css';

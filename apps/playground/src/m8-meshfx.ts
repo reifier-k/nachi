@@ -7,8 +7,8 @@ import {
   fxMaterial,
   polarUV,
   uvFlow,
-} from '@nachi/mesh-fx';
-import { polarUVCpu, uvFlowCpu } from '@nachi/tsl-kit/math';
+} from '@nachi-vfx/mesh-fx';
+import { polarUVCpu, uvFlowCpu } from '@nachi-vfx/tsl-kit/math';
 import * as THREE from 'three/webgpu';
 import { color, uv, vec3 } from 'three/tsl';
 

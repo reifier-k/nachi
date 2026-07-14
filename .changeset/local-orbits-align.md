@@ -1,6 +1,6 @@
 ---
-'@nachi/core': minor
-'@nachi/format': minor
+'@nachi-vfx/core': minor
+'@nachi-vfx/format': minor
 ---
 
 Add emitter-local placement controls: `positionSphere` now supports a sampled `center` and an

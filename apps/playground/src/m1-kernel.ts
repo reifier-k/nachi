@@ -16,12 +16,12 @@ import {
   sizeOverLife,
   tslModule,
   velocityCone,
-} from '@nachi/core';
-import type { KernelTslAdapter, ModuleDefinition } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { KernelTslAdapter, ModuleDefinition } from '@nachi-vfx/core';
 import type * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
-import { createThreeKernelAdapter } from '@nachi/three';
+import { createThreeKernelAdapter } from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';

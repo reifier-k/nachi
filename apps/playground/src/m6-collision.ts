@@ -15,8 +15,8 @@ import {
   lifetime,
   positionSphere,
   velocityCone,
-} from '@nachi/core';
-import type { Vec3, VfxEmitterRuntimeView } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { Vec3, VfxEmitterRuntimeView } from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 import { screenUV, texture, vec4 } from 'three/tsl';
 
@@ -25,7 +25,7 @@ import {
   createThreeRuntimeRenderer,
   createThreeSdfResolver,
   createThreeSdfResource,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';

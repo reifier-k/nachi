@@ -49,7 +49,7 @@
           <article>
             <span>01</span>
             <h3>Install</h3>
-            <pre><code>pnpm add @nachi/core @nachi/three three@0.185.1
+            <pre><code>pnpm add @nachi-vfx/core @nachi-vfx/three three@0.185.1
 pnpm add -D @types/three@0.185.0 # TypeScript</code></pre>
           </article>
           <article>
@@ -59,12 +59,12 @@ pnpm add -D @types/three@0.185.0 # TypeScript</code></pre>
   VFXSystem, billboard, burst, defineEffect,
   defineEmitter, drag, gravity, lifetime,
   positionSphere,
-} from '@nachi/core'
+} from '@nachi-vfx/core'
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-} from '@nachi/three'
+} from '@nachi-vfx/three'
 import * as THREE from 'three/webgpu'
 
 const sparks = defineEmitter({
@@ -111,7 +111,7 @@ requestAnimationFrame(frame)</code></pre>
           </article>
         </div>
         <aside class="react-note">
-          <strong>Using R3F?</strong> Install <code>@nachi/react</code> and use its package README's
+          <strong>Using R3F?</strong> Install <code>@nachi-vfx/react</code> and use its package README's
           complete adapter, materializer, provider, and cleanup example. The provider drives updates
           and the component releases automatically.
         </aside>

@@ -195,8 +195,8 @@ export function createMinimalVfxApp(renderer, scene) {
           {
             name: 'nachi-workspace-resolution',
             resolveId(identifier) {
-              if (identifier === '@nachi/core') return coreEntry;
-              if (identifier === '@nachi/three') return threeEntry;
+              if (identifier === '@nachi-vfx/core') return coreEntry;
+              if (identifier === '@nachi-vfx/three') return threeEntry;
               return null;
             },
           },
@@ -275,7 +275,7 @@ ${rows}
 | Core public runtime | ${consumer.core.rawBytes} (${kibibytes(consumer.core.rawBytes)}) | ${consumer.core.gzipBytes} (${kibibytes(consumer.core.gzipBytes)}) | ${consumer.core.budgetGzipBytes} (${kibibytes(consumer.core.budgetGzipBytes)}) | **${consumer.core.passed ? 'PASS' : 'FAIL'}** |
 | Minimal consumer app | ${consumer.consumer.rawBytes} (${kibibytes(consumer.consumer.rawBytes)}) | ${consumer.consumer.gzipBytes} (${kibibytes(consumer.consumer.gzipBytes)}) | ${consumer.consumer.budgetGzipBytes} (${kibibytes(consumer.consumer.budgetGzipBytes)}) | **${consumer.consumer.passed ? 'PASS' : 'FAIL'}** |
 
-The consumer probe bundles \`@nachi/core\`, \`@nachi/three\`, \`VFXSystem\`, a billboard emitter, the
+The consumer probe bundles \`@nachi-vfx/core\`, \`@nachi-vfx/three\`, \`VFXSystem\`, a billboard emitter, the
 Three runtime adapter, and the sprite materializer as a minimal working application. Three.js and
 its subpaths are external, matching the exact \`three@0.185.1\` peer contract. The core probe exports
 the complete core runtime surface. Both budgets are enforced by this tool and an overage exits
@@ -284,7 +284,7 @@ non-zero. Bundler: \`${consumer.bundler}\`.
 ## Tree-shaking probe
 
 - Bundler: \`${shaking.bundler}\`
-- Entry imports: \`defineEffect\` and \`billboard\` only from \`@nachi/core\`
+- Entry imports: \`defineEffect\` and \`billboard\` only from \`@nachi-vfx/core\`
 - Minimal bundle: ${shaking.rawBytes} bytes (${kibibytes(shaking.rawBytes)}) raw;
   ${shaking.gzipBytes} bytes (${kibibytes(shaking.gzipBytes)}) gzip
 - Core runtime-JS reference: ${shaking.referenceCoreRuntimeJsRawBytes} bytes
@@ -310,8 +310,8 @@ browser builds. Hardware GPU acceptance requires a separately controlled benchma
 }
 
 const packages = await Promise.all((await publicPackages()).map(measurePackage));
-const core = packages.find((entry) => entry.name === '@nachi/core');
-if (!core) throw new Error('The @nachi/core public package was not found.');
+const core = packages.find((entry) => entry.name === '@nachi-vfx/core');
+if (!core) throw new Error('The @nachi-vfx/core public package was not found.');
 const consumerBundles = await consumerBundleMeasurements();
 const report = {
   consumerBundles,

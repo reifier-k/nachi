@@ -1,7 +1,7 @@
 # 001: timeline mesh-fx クローンの作者ローカル変換を合成する
 
 - 重大度: 高(silent failure / 作者体験)
-- 対象: `@nachi/timeline` (`packages/timeline/src/runtime.ts`)
+- 対象: `@nachi-vfx/timeline` (`packages/timeline/src/runtime.ts`)
 - 状態: 実装済み・受入済み(2026-07-14、受入コミット `df565d7`)
 - 裁定: 2026-07-13 ユーザー承認 — **合成案を採用**(挙動変更、changeset minor)。代替案(警告のみ)は棄却。
   実装時はショーケース各ページのジオメトリ焼き込み回避策をローカル変換指定へ置換すること。
@@ -34,7 +34,7 @@ cloneWorld = effectTransform * authoredLocalTransform
 - `setMeshTransform()` を `compose(effect, authoredLocal)` に変更(scale も合成対象に含め、
   既存のページ駆動 scale アニメーションとの衝突を避けるため「ランタイムが scale を書くのは
   play 時の初期化 1 回のみ」という現行挙動は維持する)。
-- シリアライズ(`@nachi/format`)には影響しない: mesh-fx リソースはもともと文書外の
+- シリアライズ(`@nachi-vfx/format`)には影響しない: mesh-fx リソースはもともと文書外の
   ライブリソースであり、変換はリソース側に付随する。
 
 代替案(非推奨): 現状を仕様と割り切り、`meshFxElement()` で非単位変換を検出したら

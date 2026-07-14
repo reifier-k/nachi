@@ -1,7 +1,7 @@
 # 007: burst 多サイクルのスポーン/描画バグ群
 
 - 重大度: 高(実バグ。最小再現あり)
-- 対象: `@nachi/core`(spawn サイクル制御、lifecycle、compaction)
+- 対象: `@nachi-vfx/core`(spawn サイクル制御、lifecycle、compaction)
 - 状態: 実装済み・受入済み(2026-07-14、受入コミット `a7a94cf`)
 - 出典: showcase-heal / showcase-beam 制作エージェントの独立報告
 - 裁定: 2026-07-13 ユーザー承認 — (b) は無条件修正、(a) は**案 A(スポーン包絡からの

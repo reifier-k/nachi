@@ -9,7 +9,11 @@ const packageDirectories = (await readdir(path.join(root, 'packages'), { withFil
   .filter((entry) => entry.isDirectory())
   .map((entry) => path.join(root, 'packages', entry.name))
   .sort();
-const versionExportPackages = new Set(['@nachi/core', '@nachi/format', '@nachi/trails']);
+const versionExportPackages = new Set([
+  '@nachi-vfx/core',
+  '@nachi-vfx/format',
+  '@nachi-vfx/trails',
+]);
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {

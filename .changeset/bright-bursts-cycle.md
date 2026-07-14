@@ -1,5 +1,5 @@
 ---
-'@nachi/core': minor
+'@nachi-vfx/core': minor
 ---
 
 Fix multi-cycle burst effects whose earlier particles die while later cycles spawn. As amended in

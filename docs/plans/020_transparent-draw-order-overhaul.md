@@ -1,7 +1,7 @@
 # 020: 透明描画順の全面対応(sorted 既定見直し・renderOrder 合成・decal 拡張)
 
 - 重大度: 高(破壊的成分あり=RFC 起票の上で断行)
-- 対象: `@nachi/core`、`@nachi/three`、RFC(新設または RFC 001 拡張)
+- 対象: `@nachi-vfx/core`、`@nachi-vfx/three`、RFC(新設または RFC 001 拡張)
 - 状態: 起票(H2-7、実装未着手。RFC 起票→設計確定→実装の 2 段構え)
 - 出典: H1 後続 Codex 探査 T3 C-1/C-2 + T2 A-2 + T5 F-03(2026-07-14)
 

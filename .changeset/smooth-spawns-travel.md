@@ -1,6 +1,6 @@
 ---
-'@nachi/core': minor
-'@nachi/three': minor
+'@nachi-vfx/core': minor
+'@nachi-vfx/three': minor
 ---
 
 Interpolate emitter transforms within rate, burst, and per-distance spawn batches. Moving emitters

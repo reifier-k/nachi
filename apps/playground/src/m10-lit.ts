@@ -10,7 +10,7 @@ import {
   positionSphere,
   type TextureRef,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -21,7 +21,7 @@ import {
   createThreeTextureResolver,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m10-lit.css';
 

@@ -1,11 +1,11 @@
-# @nachi/three
+# @nachi-vfx/three
 
-The official Three.js r185 runtime adapter for `@nachi/core`. It supplies the TSL kernel adapter,
+The official Three.js r185 runtime adapter for `@nachi-vfx/core`. It supplies the TSL kernel adapter,
 WebGPU submission bridge, Three resource resolvers, transform sources, and billboard, mesh, light,
 and decal draw materializers needed to render a `VFXSystem`.
 
 ```sh
-pnpm add @nachi/core @nachi/three three@0.185.1
+pnpm add @nachi-vfx/core @nachi-vfx/three three@0.185.1
 # TypeScript projects also need Three's separately published declarations:
 pnpm add -D @types/three@0.185.0
 ```
@@ -24,13 +24,13 @@ import {
   defineEmitter,
   lifetime,
   positionSphere,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   disposeThreeDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import * as THREE from 'three/webgpu';
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -89,7 +89,7 @@ pipelines during a loading screen instead of simulating an animation cycle:
 
 ```ts
 const preparer = createThreeEffectPreparer(renderer, scene, camera, {
-  // When using @nachi/post, compile draws against its internal scene-pass target.
+  // When using @nachi-vfx/post, compile draws against its internal scene-pass target.
   compileTarget: post.sceneRenderTarget,
   sprite: { resolveTexture },
 });
@@ -111,7 +111,7 @@ used by light or custom draws. Keep the preparer alive through first use—dispo
 removes any pipeline references that have not been transferred.
 
 `compileTarget` must match the target used by the live scene render. Omitting it uses the currently
-bound renderer target, which is appropriate for direct scene rendering. `@nachi/post` users should
+bound renderer target, which is appropriate for direct scene rendering. `@nachi-vfx/post` users should
 pass `post.sceneRenderTarget`; render-pipeline cache keys include target format, sample count, and
 color space. Draw preparers that add lights should return `affectsLighting: true`; built-in light
 draws do this automatically so existing scene materials are compiled against that light resource.

@@ -1,7 +1,7 @@
 # 017: runtime 診断の既定 console 昇格(H1-3 の runtime 拡張)
 
 - 重大度: 高(#12)/中(#13、#14)
-- 対象: `@nachi/core`、`@nachi/three`(light pool)、`@nachi/timeline`、RFC 001
+- 対象: `@nachi-vfx/core`、`@nachi-vfx/three`(light pool)、`@nachi-vfx/timeline`、RFC 001
 - 状態: 起票(H2-12、実装未着手)
 - 出典: H1 後続 Codex 探査 T1#12/#13/#14(task-mrkl9puw-hbbgor、2026-07-14)
 

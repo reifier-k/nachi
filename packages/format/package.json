@@ -1,5 +1,5 @@
 {
-  "name": "@nachi/format",
+  "name": "@nachi-vfx/format",
   "version": "0.0.0",
   "description": "Versioned JSON effect assets, validation, migration, and inheritance for nachi",
   "keywords": [
@@ -34,10 +34,10 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:^"
+    "@nachi-vfx/core": "workspace:^"
   },
   "devDependencies": {
-    "@nachi/trails": "workspace:^"
+    "@nachi-vfx/trails": "workspace:^"
   },
   "publishConfig": {
     "access": "public"

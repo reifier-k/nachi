@@ -41,28 +41,28 @@ importers:
 
   apps/playground:
     dependencies:
-      '@nachi/core':
+      '@nachi-vfx/core':
         specifier: workspace:^
         version: link:../../packages/core
-      '@nachi/format':
+      '@nachi-vfx/format':
         specifier: workspace:^
         version: link:../../packages/format
-      '@nachi/mesh-fx':
+      '@nachi-vfx/mesh-fx':
         specifier: workspace:^
         version: link:../../packages/mesh-fx
-      '@nachi/post':
+      '@nachi-vfx/post':
         specifier: workspace:^
         version: link:../../packages/post
-      '@nachi/three':
+      '@nachi-vfx/three':
         specifier: workspace:^
         version: link:../../packages/three
-      '@nachi/timeline':
+      '@nachi-vfx/timeline':
         specifier: workspace:^
         version: link:../../packages/timeline
-      '@nachi/trails':
+      '@nachi-vfx/trails':
         specifier: workspace:^
         version: link:../../packages/trails
-      '@nachi/tsl-kit':
+      '@nachi-vfx/tsl-kit':
         specifier: workspace:^
         version: link:../../packages/tsl-kit
       three:
@@ -84,25 +84,25 @@ importers:
 
   apps/showcase:
     dependencies:
-      '@nachi/core':
+      '@nachi-vfx/core':
         specifier: workspace:^
         version: link:../../packages/core
-      '@nachi/mesh-fx':
+      '@nachi-vfx/mesh-fx':
         specifier: workspace:^
         version: link:../../packages/mesh-fx
-      '@nachi/post':
+      '@nachi-vfx/post':
         specifier: workspace:^
         version: link:../../packages/post
-      '@nachi/three':
+      '@nachi-vfx/three':
         specifier: workspace:^
         version: link:../../packages/three
-      '@nachi/timeline':
+      '@nachi-vfx/timeline':
         specifier: workspace:^
         version: link:../../packages/timeline
-      '@nachi/trails':
+      '@nachi-vfx/trails':
         specifier: workspace:^
         version: link:../../packages/trails
-      '@nachi/tsl-kit':
+      '@nachi-vfx/tsl-kit':
         specifier: workspace:^
         version: link:../../packages/tsl-kit
       three:
@@ -126,17 +126,17 @@ importers:
 
   packages/format:
     dependencies:
-      '@nachi/core':
+      '@nachi-vfx/core':
         specifier: workspace:^
         version: link:../core
     devDependencies:
-      '@nachi/trails':
+      '@nachi-vfx/trails':
         specifier: workspace:^
         version: link:../trails
 
   packages/mesh-fx:
     dependencies:
-      '@nachi/tsl-kit':
+      '@nachi-vfx/tsl-kit':
         specifier: workspace:^
         version: link:../tsl-kit
     devDependencies:
@@ -158,7 +158,7 @@ importers:
 
   packages/react:
     dependencies:
-      '@nachi/core':
+      '@nachi-vfx/core':
         specifier: workspace:^
         version: link:../core
     devDependencies:
@@ -192,11 +192,11 @@ importers:
 
   packages/three:
     dependencies:
-      '@nachi/core':
+      '@nachi-vfx/core':
         specifier: workspace:^
         version: link:../core
     devDependencies:
-      '@nachi/trails':
+      '@nachi-vfx/trails':
         specifier: workspace:^
         version: link:../trails
       '@types/three':
@@ -208,10 +208,10 @@ importers:
 
   packages/timeline:
     dependencies:
-      '@nachi/core':
+      '@nachi-vfx/core':
         specifier: workspace:^
         version: link:../core
-      '@nachi/mesh-fx':
+      '@nachi-vfx/mesh-fx':
         specifier: workspace:^
         version: link:../mesh-fx
     devDependencies:
@@ -224,7 +224,7 @@ importers:
 
   packages/trails:
     dependencies:
-      '@nachi/core':
+      '@nachi-vfx/core':
         specifier: workspace:^
         version: link:../core
     devDependencies:

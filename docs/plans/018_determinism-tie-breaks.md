@@ -1,7 +1,7 @@
 # 018: 決定性の残余バッチ(tie-break 数値化・論理順固定・既知制限明文化)
 
 - 重大度: 高
-- 対象: `@nachi/core`、`@nachi/three`、RFC 001
+- 対象: `@nachi-vfx/core`、`@nachi-vfx/three`、RFC 001
 - 状態: 起票(H2-4、実装未着手)
 - 出典: H1 後続 Codex 探査 T3 D-1/D-2/B-2/B-7(修正)+B-1/B-6(文書化)(task-mrklabwk-qlz4jd、2026-07-14)
 

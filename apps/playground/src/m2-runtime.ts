@@ -10,12 +10,17 @@ import {
   range,
   rate,
   velocityCone,
-} from '@nachi/core';
-import type { ModuleDefinition, SpawnModule, ValueInput, VfxEmitterRuntimeView } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type {
+  ModuleDefinition,
+  SpawnModule,
+  ValueInput,
+  VfxEmitterRuntimeView,
+} from '@nachi-vfx/core';
 import type * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
-import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi/three';
+import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi-vfx/three';
 import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';

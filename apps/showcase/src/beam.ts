@@ -24,9 +24,9 @@ import {
   type TextureRef,
   type Vec3,
   type VfxEffectInstance,
-} from '@nachi/core';
-import { cylinder, ring, uvFlow } from '@nachi/mesh-fx';
-import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi/post';
+} from '@nachi-vfx/core';
+import { cylinder, ring, uvFlow } from '@nachi-vfx/mesh-fx';
+import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi-vfx/post';
 import {
   at,
   cameraShake,
@@ -38,7 +38,7 @@ import {
   timeline,
   VFXSystem,
   type CameraShakeSample,
-} from '@nachi/timeline';
+} from '@nachi-vfx/timeline';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -48,7 +48,7 @@ import {
   createThreeTextureResolver,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import {
   allPanelsHaveForeground,
   createDrainedReadback,

@@ -1,10 +1,10 @@
-# @nachi/mesh-fx
+# @nachi-vfx/mesh-fx
 
 Procedural effect meshes and a declarative Three.js `NodeMaterial` factory. The package is
-standalone: it depends on `@nachi/tsl-kit` and Three.js, but not `@nachi/core`.
+standalone: it depends on `@nachi-vfx/tsl-kit` and Three.js, but not `@nachi-vfx/core`.
 
 ```ts
-import { fxMaterial, polarUV, slashArc } from '@nachi/mesh-fx';
+import { fxMaterial, polarUV, slashArc } from '@nachi-vfx/mesh-fx';
 
 const material = fxMaterial({
   color: '#66ddff',
@@ -50,7 +50,7 @@ as `uv1`.
 omitted `opacity` likewise creates a writable opacity uniform; a TSL opacity node is composed at
 compile time instead, and `setOpacity()` rejects mutation. Pass TSL nodes through `time` and
 `normalizedLife` for standalone externally owned bindings. The
-`@nachi/timeline` adapter drives its effect-local clock through the writable controls, so timeline
+`@nachi-vfx/timeline` adapter drives its effect-local clock through the writable controls, so timeline
 materials must omit `time`; no wall clock is read implicitly.
 
 By default, `dissolve` samples the same authored UV as `map`, preserving the original composition.
@@ -73,7 +73,7 @@ Three.js is an exact `three@0.185.1` peer. The package is ESM-only and declares
 an externally owned TSL clock for effect-local playback.
 
 ```ts
-import { applyVat } from '@nachi/mesh-fx';
+import { applyVat } from '@nachi-vfx/mesh-fx';
 
 const vat = applyVat(mesh, {
   positionTexture, // FloatType or HalfFloatType, NoColorSpace

@@ -9,7 +9,7 @@ import {
   type ParameterSchema,
   type VfxRuntimeRenderer,
   type VfxSystemOptions,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import { useFrame, useThree } from '@react-three/fiber';
 import {
   createContext,

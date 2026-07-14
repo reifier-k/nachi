@@ -77,7 +77,7 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Build playground dependencies
-        run: pnpm --filter @nachi/playground^... build
+        run: pnpm --filter @nachi-vfx/playground^... build
 
       - name: Start playground and run golden regression suite with SwiftShader
         run: |

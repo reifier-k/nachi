@@ -1,5 +1,5 @@
 ---
-'@nachi/timeline': patch
+'@nachi-vfx/timeline': patch
 ---
 
 Keep an emitter element's final local time in `getElementState()` after it completes, matching the

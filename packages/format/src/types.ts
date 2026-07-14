@@ -7,7 +7,7 @@ import type {
   JsonValue,
   ParameterSchema,
   VfxAssetDocument,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 
 export const EFFECT_ASSET_FORMAT = 'nachi-effect' as const;
 export const EFFECT_ASSET_VERSION = 1 as const;

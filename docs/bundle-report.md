@@ -9,15 +9,15 @@ level 9.
 
 | Package | Files | Raw | Gzip |
 |---|---:|---:|---:|
-| `@nachi/core` | 38 | 717897 (701.07 KiB) | 154389 (150.77 KiB) |
-| `@nachi/format` | 10 | 131140 (128.07 KiB) | 19967 (19.50 KiB) |
-| `@nachi/mesh-fx` | 10 | 45204 (44.14 KiB) | 12264 (11.98 KiB) |
-| `@nachi/post` | 16 | 41924 (40.94 KiB) | 12357 (12.07 KiB) |
-| `@nachi/react` | 4 | 10770 (10.52 KiB) | 3023 (2.95 KiB) |
-| `@nachi/three` | 2 | 72059 (70.37 KiB) | 16281 (15.90 KiB) |
-| `@nachi/timeline` | 6 | 59751 (58.35 KiB) | 14631 (14.29 KiB) |
-| `@nachi/trails` | 4 | 25175 (24.58 KiB) | 7118 (6.95 KiB) |
-| `@nachi/tsl-kit` | 16 | 18486 (18.05 KiB) | 7111 (6.94 KiB) |
+| `@nachi-vfx/core` | 38 | 717897 (701.07 KiB) | 154389 (150.77 KiB) |
+| `@nachi-vfx/format` | 10 | 131140 (128.07 KiB) | 19967 (19.50 KiB) |
+| `@nachi-vfx/mesh-fx` | 10 | 45204 (44.14 KiB) | 12264 (11.98 KiB) |
+| `@nachi-vfx/post` | 16 | 41924 (40.94 KiB) | 12357 (12.07 KiB) |
+| `@nachi-vfx/react` | 4 | 10770 (10.52 KiB) | 3023 (2.95 KiB) |
+| `@nachi-vfx/three` | 2 | 72059 (70.37 KiB) | 16281 (15.90 KiB) |
+| `@nachi-vfx/timeline` | 6 | 59751 (58.35 KiB) | 14631 (14.29 KiB) |
+| `@nachi-vfx/trails` | 4 | 25175 (24.58 KiB) | 7118 (6.95 KiB) |
+| `@nachi-vfx/tsl-kit` | 16 | 18486 (18.05 KiB) | 7111 (6.94 KiB) |
 
 **Total:** 106 files, 1122406 bytes
 (1096.10 KiB) raw, 247141 bytes
@@ -30,7 +30,7 @@ level 9.
 | Core public runtime | 579407 (565.83 KiB) | 111874 (109.25 KiB) | 123904 (121.00 KiB) | **PASS** |
 | Minimal consumer app | 522409 (510.17 KiB) | 100960 (98.59 KiB) | 107520 (105.00 KiB) | **PASS** |
 
-The consumer probe bundles `@nachi/core`, `@nachi/three`, `VFXSystem`, a billboard emitter, the
+The consumer probe bundles `@nachi-vfx/core`, `@nachi-vfx/three`, `VFXSystem`, a billboard emitter, the
 Three runtime adapter, and the sprite materializer as a minimal working application. Three.js and
 its subpaths are external, matching the exact `three@0.185.1` peer contract. The core probe exports
 the complete core runtime surface. Both budgets are enforced by this tool and an overage exits
@@ -39,7 +39,7 @@ non-zero. Bundler: `rollup@4.62.2`.
 ## Tree-shaking probe
 
 - Bundler: `rollup@4.62.2`
-- Entry imports: `defineEffect` and `billboard` only from `@nachi/core`
+- Entry imports: `defineEffect` and `billboard` only from `@nachi-vfx/core`
 - Minimal bundle: 12233 bytes (11.95 KiB) raw;
   3385 bytes (3.31 KiB) gzip
 - Core runtime-JS reference: 581687 bytes

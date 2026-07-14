@@ -12,7 +12,7 @@ import {
   type TimelineDefinition,
   type TimelineEntry,
   type VisualElementDefinition,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import {
   fxMaterial as createMeshFxMaterial,
   type FxDissolveConfig,
@@ -21,7 +21,7 @@ import {
   type MeshFxMesh,
   type OverLifeCurve,
   type OverLifeInput,
-} from '@nachi/mesh-fx';
+} from '@nachi-vfx/mesh-fx';
 
 export type TimelineAuthoringElement = EffectElementDefinition | MeshFxElement | MeshFxMesh;
 export type TimelineAuthoringElements = Readonly<Record<string, TimelineAuthoringElement>>;
@@ -319,7 +319,7 @@ export function cloneTimelineFxMaterial(
   throw new VfxDiagnosticError([
     diagnostic(
       'NACHI_MESH_FX_MATERIAL_CLONE_UNSUPPORTED',
-      'mesh-fx materials used in timeline elements must be created with @nachi/timeline fxMaterial() so instance controls can be regenerated safely.',
+      'mesh-fx materials used in timeline elements must be created with @nachi-vfx/timeline fxMaterial() so instance controls can be regenerated safely.',
       path,
     ),
   ]);

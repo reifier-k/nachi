@@ -1,8 +1,8 @@
 ---
-'@nachi/core': patch
-'@nachi/three': minor
-'@nachi/trails': minor
-'@nachi/timeline': minor
+'@nachi-vfx/core': patch
+'@nachi-vfx/three': minor
+'@nachi-vfx/trails': minor
+'@nachi-vfx/timeline': minor
 ---
 
 Add persistent user visibility controls to Three sprite, mesh, decal, light-pool, and ribbon

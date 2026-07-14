@@ -770,7 +770,7 @@ export interface CompiledEmitterProgram {
   readonly uniforms: readonly CompiledUniformDescription[];
 }
 
-/** Declaration-merging extension point used by renderer packages such as @nachi/trails. */
+/** Declaration-merging extension point used by renderer packages such as @nachi-vfx/trails. */
 export interface CompiledDrawDescriptionMap {
   readonly billboard: CompiledSpriteDrawDescription;
   readonly decal: CompiledDecalDrawDescription;

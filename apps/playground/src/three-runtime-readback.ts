@@ -1,5 +1,9 @@
-import type { BuiltEmitterKernels, CompiledEmitterProgram, KernelStorageNode } from '@nachi/core';
-import { attributeStorageComponentIndex } from '@nachi/core';
+import type {
+  BuiltEmitterKernels,
+  CompiledEmitterProgram,
+  KernelStorageNode,
+} from '@nachi-vfx/core';
+import { attributeStorageComponentIndex } from '@nachi-vfx/core';
 import type * as THREE from 'three/webgpu';
 
 /** Playground smoke helper; reads a raw GPU storage node without extending the public adapter API. */

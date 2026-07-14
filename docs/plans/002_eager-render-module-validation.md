@@ -1,7 +1,7 @@
 # 002: レンダーモジュールの早期検証と「無音の error state」の可視化
 
 - 重大度: 高(silent failure / 作者体験)
-- 対象: `@nachi/trails`(および各モジュールファクトリ全般)、`@nachi/core` の spawn 経路
+- 対象: `@nachi-vfx/trails`(および各モジュールファクトリ全般)、`@nachi-vfx/core` の spawn 経路
 - 状態: 実装済み・受入済み(2026-07-14、受入コミット `85f4948`)
 
 ## 症状

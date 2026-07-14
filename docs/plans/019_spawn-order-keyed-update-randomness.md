@@ -1,7 +1,7 @@
 # 019: update 段乱数の spawnOrder キー化(H1-10 続編)
 
 - 重大度: 高
-- 対象: `@nachi/core`(乱数導出)、RFC 001
+- 対象: `@nachi-vfx/core`(乱数導出)、RFC 001
 - 状態: 起票(H2-3、実装未着手)
 - 出典: H1 後続 Codex 探査 T3 A-1(task-mrklabwk-qlz4jd、2026-07-14)。
   plan 011 / H1-10 の意図的据え置き範囲

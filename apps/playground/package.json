@@ -1,5 +1,5 @@
 {
-  "name": "@nachi/playground",
+  "name": "@nachi-vfx/playground",
   "version": "0.0.0",
   "license": "MIT",
   "private": true,
@@ -15,14 +15,14 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/core": "workspace:^",
-    "@nachi/format": "workspace:^",
-    "@nachi/mesh-fx": "workspace:^",
-    "@nachi/post": "workspace:^",
-    "@nachi/three": "workspace:^",
-    "@nachi/timeline": "workspace:^",
-    "@nachi/trails": "workspace:^",
-    "@nachi/tsl-kit": "workspace:^",
+    "@nachi-vfx/core": "workspace:^",
+    "@nachi-vfx/format": "workspace:^",
+    "@nachi-vfx/mesh-fx": "workspace:^",
+    "@nachi-vfx/post": "workspace:^",
+    "@nachi-vfx/three": "workspace:^",
+    "@nachi-vfx/timeline": "workspace:^",
+    "@nachi-vfx/trails": "workspace:^",
+    "@nachi-vfx/tsl-kit": "workspace:^",
     "three": "0.185.1",
     "tweakpane": "4.0.5"
   },

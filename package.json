@@ -12,11 +12,11 @@
   },
   "packageManager": "pnpm@10.28.2",
   "scripts": {
-    "dev": "pnpm --filter @nachi/playground dev",
-    "showcase:dev": "pnpm --filter @nachi/showcase dev",
-    "showcase:build": "pnpm --filter @nachi/showcase build",
-    "docs:dev": "pnpm --filter @nachi/docs dev",
-    "docs:build": "pnpm --filter @nachi/docs build",
+    "dev": "pnpm --filter @nachi-vfx/playground dev",
+    "showcase:dev": "pnpm --filter @nachi-vfx/showcase dev",
+    "showcase:build": "pnpm --filter @nachi-vfx/showcase build",
+    "docs:dev": "pnpm --filter @nachi-vfx/docs dev",
+    "docs:build": "pnpm --filter @nachi-vfx/docs build",
     "build": "pnpm -r --if-present build",
     "test": "vitest run",
     "typecheck": "pnpm -r --if-present typecheck",
@@ -28,7 +28,8 @@
     "esm:check": "node tools/check-all-package-esm.mjs",
     "esm-all": "node tools/check-all-package-esm.mjs",
     "golden:regress": "node tools/golden-runner.mjs",
-    "release:dry": "pnpm build && pnpm esm:check && node tools/release-dry.mjs"
+    "release:dry": "pnpm build && pnpm esm:check && node tools/release-dry.mjs",
+    "release": "pnpm build && pnpm esm:check && changeset publish"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",

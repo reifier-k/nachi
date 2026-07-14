@@ -43,7 +43,7 @@ body:
     id: scope
     attributes:
       label: Relevant packages or APIs / 関連パッケージまたはAPI
-      placeholder: "@nachi/core, @nachi/three, asset format, ..."
+      placeholder: "@nachi-vfx/core, @nachi-vfx/three, asset format, ..."
   - type: dropdown
     id: credit
     attributes:

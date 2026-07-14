@@ -88,7 +88,7 @@ function expectCounts(
   expect(geometry.index?.count).toBe(indices);
 }
 
-describe('@nachi/mesh-fx analytic geometry', () => {
+describe('@nachi-vfx/mesh-fx analytic geometry', () => {
   it('builds a tapered slash arc with arc/radius UVs and +Z normals', () => {
     const geometry = createSlashArcGeometry({
       angle: 90,
@@ -190,7 +190,7 @@ describe('@nachi/mesh-fx analytic geometry', () => {
   });
 });
 
-describe('@nachi/mesh-fx Blender VAT runtime', () => {
+describe('@nachi-vfx/mesh-fx Blender VAT runtime', () => {
   function vatTexture(width = 3, height = 4): DataTexture {
     const result = new DataTexture(
       new Float32Array(width * height * 4),
@@ -353,7 +353,7 @@ describe('@nachi/mesh-fx Blender VAT runtime', () => {
   });
 });
 
-describe('@nachi/mesh-fx fxMaterial', () => {
+describe('@nachi-vfx/mesh-fx fxMaterial', () => {
   it('deep-freezes fluent UV authoring arrays and tuple inputs', () => {
     const center: [number, number] = [0.25, 0.75];
     const speed: [number, number] = [0.3, -0.1];

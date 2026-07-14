@@ -1,10 +1,10 @@
-# @nachi/react
+# @nachi-vfx/react
 
-Thin React Three Fiber bindings for `@nachi/core`. React, R3F, and Three.js are peer dependencies;
+Thin React Three Fiber bindings for `@nachi-vfx/core`. React, R3F, and Three.js are peer dependencies;
 the package does not create a second renderer or VFX runtime.
 
 ```sh
-pnpm add @nachi/core @nachi/three @nachi/react react@^19 @react-three/fiber@^9 three@0.185.1
+pnpm add @nachi-vfx/core @nachi-vfx/three @nachi-vfx/react react@^19 @react-three/fiber@^9 three@0.185.1
 pnpm add -D @types/three@0.185.0
 ```
 
@@ -16,13 +16,13 @@ import {
   defineEmitter,
   lifetime,
   positionSphere,
-} from '@nachi/core';
-import { VFXSystemProvider, useEffectInstance } from '@nachi/react';
+} from '@nachi-vfx/core';
+import { VFXSystemProvider, useEffectInstance } from '@nachi-vfx/react';
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { Canvas, useThree } from '@react-three/fiber';
 import { useEffect } from 'react';
 import * as THREE from 'three/webgpu';

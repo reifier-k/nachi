@@ -1,5 +1,5 @@
 {
-  "name": "@nachi/mesh-fx",
+  "name": "@nachi-vfx/mesh-fx",
   "version": "0.0.0",
   "description": "Procedural Three.js VFX meshes and declarative NodeMaterial composition",
   "keywords": [
@@ -33,7 +33,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nachi/tsl-kit": "workspace:^"
+    "@nachi-vfx/tsl-kit": "workspace:^"
   },
   "peerDependencies": {
     "@types/three": ">=0.185.0 <0.186.0",

@@ -7,8 +7,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 1. System/emitter hierarchy and emitter inheritance
 
-- **Implementation:** `@nachi/core` `defineEffect()` and `defineEmitter(base, overrides)` provide
-  keyed element composition and keyed module-list overrides; `@nachi/format` preserves the result
+- **Implementation:** `@nachi-vfx/core` `defineEffect()` and `defineEmitter(base, overrides)` provide
+  keyed element composition and keyed module-list overrides; `@nachi-vfx/format` preserves the result
   through JSON and asset-reference inheritance.
 - **Verification:** `/m9-compose/`, `packages/core/test/composition.test.ts`, and
   `packages/format/test/asset.test.ts` cover keyed merge, conflict diagnostics, inheritance cycles,
@@ -18,7 +18,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 2. Dynamic particle attributes
 
-- **Implementation:** `@nachi/core` attribute declarations compile per emitter to packed SoA
+- **Implementation:** `@nachi-vfx/core` attribute declarations compile per emitter to packed SoA
   storage through `resolveAttributeSchema()` and `compileEmitter()`.
 - **Verification:** `/m1-kernel/`, `packages/core/test/attributes.test.ts`, and
   `packages/core/test/compiler.test.ts` cover logical/physical layouts, custom fields, access
@@ -28,7 +28,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 3. Namespaced parameters
 
-- **Implementation:** `@nachi/core` models `System.*`, `Emitter.*`, `Particles.*`, and typed mutable
+- **Implementation:** `@nachi-vfx/core` models `System.*`, `Emitter.*`, `Particles.*`, and typed mutable
   `User.*` references with `parameter()` and effect-level schema composition.
 - **Verification:** `/m1-kernel/`, `/m9-compose/`, compiler/composition/system tests, and GPU
   readback verify namespace validation and per-instance `User.*` propagation.
@@ -37,7 +37,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 4. GPU simulation (compute)
 
-- **Implementation:** `@nachi/core` `compileEmitter()` and `VFXSystem` materialize TSL compute,
+- **Implementation:** `@nachi-vfx/core` `compileEmitter()` and `VFXSystem` materialize TSL compute,
   free-list lifecycle, compaction, and indirect dispatch/draw through a renderer adapter.
 - **Verification:** `/spike-compute/`, `/m1-kernel/`, `/m2-runtime/`, compiler/system tests, and
   storage-buffer readback validate kernels and lifecycle counters.
@@ -46,7 +46,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 5. Spawn: rate, burst, and per-distance
 
-- **Implementation:** `@nachi/core` `rate()`, `burst()`, and `perDistance()` feed GPU allocation and
+- **Implementation:** `@nachi-vfx/core` `rate()`, `burst()`, and `perDistance()` feed GPU allocation and
   capacity diagnostics.
 - **Verification:** `/m2-runtime/` plus compiler/system tests cover fractional accumulation,
   timestep splitting, distance accumulation, overflow, and indirect dispatch.
@@ -55,7 +55,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 6. Emitter lifecycle
 
-- **Implementation:** `@nachi/core` lifecycle config supports start delay, duration, finite/infinite
+- **Implementation:** `@nachi-vfx/core` lifecycle config supports start delay, duration, finite/infinite
   loops, and deterministic prewarm through `VFXSystem`.
 - **Verification:** `/m2-runtime/` and system tests cover boundaries, loop generations, prewarm
   bit identity, stop, release, and pooling.
@@ -64,8 +64,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 7. Local time and time scale
 
-- **Implementation:** `@nachi/core` effect clocks, fixed-step scheduling, `setTimeScale()`, and
-  `applyHitStop()` separate effect/emitter time from host time; `@nachi/timeline` sequences them.
+- **Implementation:** `@nachi-vfx/core` effect clocks, fixed-step scheduling, `setTimeScale()`, and
+  `applyHitStop()` separate effect/emitter time from host time; `@nachi-vfx/timeline` sequences them.
 - **Verification:** `/m2-runtime/`, `/m9-timeline/`, system tests, and timeline tests cover split-step
   invariance, fixed-step limits, hit stop, and independent instances.
 - **Residual:** Reverse playback and general time seeking are absent; culled effects pause without
@@ -73,7 +73,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 8. Sprite renderer
 
-- **Implementation:** `@nachi/core` `billboard()` covers camera/velocity/custom-axis facing,
+- **Implementation:** `@nachi-vfx/core` `billboard()` covers camera/velocity/custom-axis facing,
   velocity stretch, cutout geometry, flipbooks, motion-vector blending, and blend modes.
 - **Verification:** `/m3-sprites/`, `/golden-explosion/`, and compiler plus Three-adapter tests cover
   twelve renderer cases and pixel/readback checks.
@@ -82,7 +82,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 9. Mesh renderer
 
-- **Implementation:** `@nachi/core` `meshRenderer()` supplies instanced geometry with orientation,
+- **Implementation:** `@nachi-vfx/core` `meshRenderer()` supplies instanced geometry with orientation,
   particle color, and scale; playground Three adapters resolve geometry references.
 - **Verification:** `/golden-explosion/`, `/golden-ambient/`, and
   `packages/three/test/three-kernel-adapter.test.ts` verify transforms, instance data, geometry
@@ -101,7 +101,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 11. Forces
 
-- **Implementation:** `@nachi/core` provides `gravity()`, `drag()`, `vortex()`, `pointAttractor()`,
+- **Implementation:** `@nachi-vfx/core` provides `gravity()`, `drag()`, `vortex()`, `pointAttractor()`,
   `linearForce()`, `curlNoise()`, and `turbulence()`.
 - **Verification:** `/m4-behaviors/` and compiler tests compare module mathematics, deterministic
   simplex curl, access declarations, and GPU results.
@@ -110,7 +110,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 12. Vector fields (FGA)
 
-- **Implementation:** `@nachi/core` parses ASCII FGA and `vectorField()` samples it trilinearly at
+- **Implementation:** `@nachi-vfx/core` parses ASCII FGA and `vectorField()` samples it trilinearly at
   texel centers.
 - **Verification:** `/m4-behaviors/` and `packages/core/test/fga.test.ts` cover parsing, bounds,
   interpolation, transforms, and GPU sampling.
@@ -119,7 +119,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 13. Orientation, rotation, and kill volumes
 
-- **Implementation:** `@nachi/core` exposes orientation/rotation modules and `killVolume()` with
+- **Implementation:** `@nachi-vfx/core` exposes orientation/rotation modules and `killVolume()` with
   sphere/box tests in emitter-local space.
 - **Verification:** `/m4-behaviors/` and compiler tests cover shortest-arc quaternion mathematics,
   degenerate cases, rotation evolution, and volume boundaries.
@@ -128,7 +128,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 14. GPU events and sub-emitters
 
-- **Implementation:** `@nachi/core` event queues and `emitTo()` support GPU `onDeath` and
+- **Implementation:** `@nachi-vfx/core` event queues and `emitTo()` support GPU `onDeath` and
   begin-contact `onCollision`, with selected inherited float attributes.
 - **Verification:** `/m5-events/`, `/m6-collision/`, compiler/system tests, and multi-stage GPU
   readback cover queue drain, overflow, target resolution, and chains.
@@ -146,7 +146,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 16. Analytic collider and SDF collision
 
-- **Implementation:** `@nachi/core` supplies plane/sphere/box collision plus `bakeSdf()` and
+- **Implementation:** `@nachi-vfx/core` supplies plane/sphere/box collision plus `bakeSdf()` and
   `collideSdf()` for sampled signed-distance volumes.
 - **Verification:** `/m6-collision/`, `packages/core/test/sdf.test.ts`, compiler tests, and four-case
   GPU probes compare pushout, normals, bounce, and SDF sampling.
@@ -173,8 +173,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 19. Ribbon renderer
 
-- **Implementation:** `@nachi/trails` registers `ribbon()` with a GPU birth-index ring, multiple
-  ribbon IDs, indirect segment preparation, and `@nachi/trails/three` materialization.
+- **Implementation:** `@nachi-vfx/trails` registers `ribbon()` with a GPU birth-index ring, multiple
+  ribbon IDs, indirect segment preparation, and `@nachi-vfx/trails/three` materialization.
 - **Verification:** `/m7-ribbons/`, `/golden-slash/`, and `packages/trails/test/trails.test.ts` cover
   order, death gaps, wrap, UV, overflow, and eleven GPU/readback cases.
 - **Residual:** No width curve, smoothing, twist/custom facing, per-particle width, arbitrary link
@@ -183,7 +183,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 20. Light renderer
 
-- **Implementation:** `@nachi/core` `lightRenderer()` selects GPU top-N particles and the Three
+- **Implementation:** `@nachi-vfx/core` `lightRenderer()` selects GPU top-N particles and the Three
   adapter updates a bounded `PointLight` pool one frame later.
 - **Verification:** `/golden-slash/`, `/golden-charge/`, `/m10-lit/`, and compiler/adapter tests cover
   selection, limits, pool reuse, and offscreen lighting.
@@ -202,8 +202,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 22. Material expression building blocks
 
-- **Implementation:** `@nachi/tsl-kit` provides dissolve, UV flow, polar UV, Fresnel, lighting,
-  depth fade, and distortion helpers; `@nachi/mesh-fx` composes them through `fxMaterial()`.
+- **Implementation:** `@nachi-vfx/tsl-kit` provides dissolve, UV flow, polar UV, Fresnel, lighting,
+  depth fade, and distortion helpers; `@nachi-vfx/mesh-fx` composes them through `fxMaterial()`.
 - **Verification:** `/m8-tslkit/`, `/m8-meshfx/`, tsl-kit/mesh-fx tests, and WebGPU/WebGL2 render-
   target byte comparisons verify each mathematical term.
 - **Residual:** The generic `fxMaterial()` surface is unlit and has no procedural-noise graph,
@@ -211,7 +211,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 23. VAT runtime
 
-- **Implementation:** `@nachi/mesh-fx` decodes flement Blender VAT position/normal textures with
+- **Implementation:** `@nachi-vfx/mesh-fx` decodes flement Blender VAT position/normal textures with
   frame selection and interpolation.
 - **Verification:** `/m8-vat/` and mesh-fx tests compare CPU/GPU branches, mirrored-axis convention,
   normal transforms, frame boundaries, and both backends.
@@ -220,7 +220,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 24. Timeline/Sequencer integration
 
-- **Implementation:** `@nachi/timeline` provides `at()`, play/stop/marker/callback actions, loops,
+- **Implementation:** `@nachi-vfx/timeline` provides `at()`, play/stop/marker/callback actions, loops,
   speed, camera shake, hit stop, and mesh-fx lifecycle on an effect-local timeline.
 - **Verification:** `/m9-timeline/`, `/golden-slash/`, `/golden-ultimate/`, and timeline tests cover
   boundary splitting, deterministic shake, loop invariance, errors, and cleanup.
@@ -238,7 +238,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 26. Post integration and lit particles
 
-- **Implementation:** `@nachi/post` supplies distortion, heat haze, radial blur, bloom presets, and
+- **Implementation:** `@nachi-vfx/post` supplies distortion, heat haze, radial blur, bloom presets, and
   pipeline composition; `billboard({ lit: true })` uses Three's physical lighting path.
 - **Verification:** `/m10-post/`, `/m10-lit/`, `/golden-explosion/`, `/golden-ultimate/`, post tests,
   and offscreen probes cover both backends where supported and lit normal bases.
@@ -248,8 +248,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 27. Alpha sorting and OIT
 
-- **Implementation:** `@nachi/core` combines emitter coarse order and GPU bitonic particle sort;
-  `@nachi/post` provides weighted blended OIT.
+- **Implementation:** `@nachi-vfx/core` combines emitter coarse order and GPU bitonic particle sort;
+  `@nachi-vfx/post` provides weighted blended OIT.
 - **Verification:** `/m10-sort/`, `/golden-explosion/`, compiler/post tests, exhaustive 0-1 sort
   probes, reverse-order OIT checks, and status regression tests verify the three layers.
 - **Residual:** No custom sort key or translucency priority, sorted capacity is 65,536, sort is
@@ -258,7 +258,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 28. Scalability, significance, and pooling
 
-- **Implementation:** `@nachi/core` provides quality tiers, distance/frustum culling, deterministic
+- **Implementation:** `@nachi-vfx/core` provides quality tiers, distance/frustum culling, deterministic
   significance ranking, instance/particle budgets, structural quality variants, and bounded pools.
 - **Verification:** `/m11-scale/`, `/golden-ambient/`, scalability/system tests, and tier pixel/
   readback probes cover ordering, pause/resume, next-spawn variants, and reuse.
@@ -267,7 +267,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 29. Simulation caching
 
-- **Implementation:** `@nachi/core` `bakeSimulation()` and `replaySimulation()` store renderer-read
+- **Implementation:** `@nachi-vfx/core` `bakeSimulation()` and `replaySimulation()` store renderer-read
   attributes and alive indirection in Float32 or bounded-error u16 cache frames.
 - **Verification:** `/m11-cache/`, sim-cache/system tests, and independent analytic GPU probes cover
   endianness, interpolation, loop endpoints, backend checks, and replay without simulation passes.
@@ -285,7 +285,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 31. Asset format and loader
 
-- **Implementation:** `@nachi/format` owns strict `{ format: 'nachi-effect', version: 1, effect }`
+- **Implementation:** `@nachi-vfx/format` owns strict `{ format: 'nachi-effect', version: 1, effect }`
   documents, schema, serializer/loader, migration registry, resources, and referenced inheritance.
 - **Verification:** `/golden-ultimate/`, `/m9-compose/`, format tests, schema validation, and JSON→GPU
   audit probes cover closed shapes, paths, references, registrations, and round trips.
@@ -294,7 +294,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 32. Grid2D/3D fluids
 
-- **Implementation:** `@nachi/core` `defineGrid2D()`, `defineGrid3D()`, `defineSimStage()`, and built-in
+- **Implementation:** `@nachi-vfx/core` `defineGrid2D()`, `defineGrid3D()`, `defineSimStage()`, and built-in
   inject/advection/buoyancy/Jacobi/project/sample stages use packed storage and explicit submits.
 - **Verification:** `/m12-grid/`, `/golden-fluid/`, grid2d/grid3d/system tests, and GPU snapshots cover
   ordering, bounds, transfer, limits, stability, and 2D/3D sampling.
@@ -304,7 +304,7 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 33. Neighbor grid, boids, and PBD
 
-- **Implementation:** `@nachi/core` `defineNeighborGrid()`, `boids()`, `pbdDistanceConstraint()`, and
+- **Implementation:** `@nachi-vfx/core` `defineNeighborGrid()`, `boids()`, `pbdDistanceConstraint()`, and
   `neighborGridTslModule()` use atomic bounded buckets, snapshot neighbors, and submit-separated
   Jacobi constraints.
 - **Verification:** `/m12-neighbors/`, neighbor-grid/compiler/system tests, and GPU kernel probes

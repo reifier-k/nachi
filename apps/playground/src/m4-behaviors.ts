@@ -21,8 +21,8 @@ import {
   velocityOverLife,
   vectorField,
   vortex,
-} from '@nachi/core';
-import type { UpdateModule, Vec3, VfxEmitterRuntimeView } from '@nachi/core';
+} from '@nachi-vfx/core';
+import type { UpdateModule, Vec3, VfxEmitterRuntimeView } from '@nachi-vfx/core';
 import type * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
@@ -31,7 +31,7 @@ import {
   createThreeRuntimeRenderer,
   createThreeVectorFieldResolver,
   createThreeVectorFieldResource,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import { readLogicalAttribute } from './three-runtime-readback';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m3-sprites.css';

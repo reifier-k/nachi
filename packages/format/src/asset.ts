@@ -15,7 +15,7 @@ import {
   type JsonValue,
   type ParameterSchema,
   type VfxDiagnostic,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 
 import { defaultEffectAssetMigrations } from './migrations.js';
 import {

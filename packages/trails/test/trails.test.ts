@@ -5,7 +5,7 @@ import {
   createCoreKernelModuleRegistry,
   defineEmitter,
   lifetime,
-} from '@nachi/core';
+} from '@nachi-vfx/core';
 import { describe, expect, it } from 'vitest';
 
 import { registerTrails, ribbon, ribbonId, ribbonIdAttribute } from '../src/index.js';
@@ -52,7 +52,7 @@ function compileRawRibbon(
   );
 }
 
-describe('@nachi/trails renderer registration', () => {
+describe('@nachi-vfx/trails renderer registration', () => {
   it('throws taper diagnostics immediately from the ribbon factory', () => {
     try {
       ribbon({ taper: { end: 0.6, start: 0.6 }, width: 0.2 });

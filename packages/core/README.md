@@ -1,4 +1,4 @@
-# @nachi/core
+# @nachi-vfx/core
 
 Renderer-independent authoring, compilation, scheduling, deterministic lifecycle, scalability,
 simulation caches, debugging, and data interfaces for nachi VFX.
@@ -6,16 +6,16 @@ simulation caches, debugging, and data interfaces for nachi VFX.
 Install the Three.js runtime adapter with core to create a renderable system:
 
 ```sh
-pnpm add @nachi/core @nachi/three three@0.185.1
+pnpm add @nachi-vfx/core @nachi-vfx/three three@0.185.1
 # TypeScript projects also need Three's separately published declarations:
 pnpm add -D @types/three@0.185.0
 ```
 
-`@nachi/core` deliberately does not import Three.js. Use `createThreeKernelAdapter()` and
-`createThreeRuntimeRenderer()` from `@nachi/three`, then materialize each spawned emitter's draw and
+`@nachi-vfx/core` deliberately does not import Three.js. Use `createThreeKernelAdapter()` and
+`createThreeRuntimeRenderer()` from `@nachi-vfx/three`, then materialize each spawned emitter's draw and
 add it to your Three scene. See the repository
 [Quick start](https://github.com/reifier-k/nachi#quick-start) and the
-[`@nachi/three` README](https://github.com/reifier-k/nachi/tree/main/packages/three#readme) for a
+[`@nachi-vfx/three` README](https://github.com/reifier-k/nachi/tree/main/packages/three#readme) for a
 complete rendering example.
 
 The public authoring surface includes emitter/effect definitions, built-in Init/Update/Render

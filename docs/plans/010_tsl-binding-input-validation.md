@@ -1,7 +1,7 @@
 # 010: tslModule バインディング入力の検証/自動変換
 
 - 重大度: 中(silent failure → 不可解な GPU エラー)
-- 対象: `@nachi/core`(tslModule バインディングプロキシ、TslExpression 型)
+- 対象: `@nachi-vfx/core`(tslModule バインディングプロキシ、TslExpression 型)
 - 状態: 実装済み・受入済み(2026-07-14、受入コミット `85f4948`)
 - 出典: showcase-ice 制作エージェント
 

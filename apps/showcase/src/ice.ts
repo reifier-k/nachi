@@ -23,9 +23,9 @@ import {
   type TslExpression,
   type Vec3,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
-import { cone, ring, uvFlow, type MeshFxMesh } from '@nachi/mesh-fx';
-import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi/post';
+} from '@nachi-vfx/core';
+import { cone, ring, uvFlow, type MeshFxMesh } from '@nachi-vfx/mesh-fx';
+import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi-vfx/post';
 import {
   at,
   cameraShake,
@@ -38,7 +38,7 @@ import {
   VFXSystem,
   type CameraShakeSample,
   type TimelineEntry,
-} from '@nachi/timeline';
+} from '@nachi-vfx/timeline';
 import * as THREE from 'three/webgpu';
 import { cos, float, fract, mix, sin, step, vec3 } from 'three/tsl';
 
@@ -49,7 +49,7 @@ import {
   createThreeTextureResolver,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import {
   allPanelsHaveForeground,
   createDrainedReadback,

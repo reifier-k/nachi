@@ -13,11 +13,11 @@ boundaries may change significantly between releases.
 
 - Added the code-first staged particle model, deterministic generators, typed parameters, GPU
   lifecycle/indirect rendering, events, collision, render modules, quality management, simulation
-  caching, debugging, Grid2D/3D fluids, neighbor grids, boids, and PBD in `@nachi/core`.
+  caching, debugging, Grid2D/3D fluids, neighbor grids, boids, and PBD in `@nachi-vfx/core`.
 - Added strict version-1 JSON assets, migrations, registered executable references, resource
-  binding, and referenced emitter inheritance in `@nachi/format`.
+  binding, and referenced emitter inheritance in `@nachi-vfx/format`.
 - Added deterministic sequencing, markers, camera shake, hit stop, and mesh lifecycle composition
-  in `@nachi/timeline`, plus GPU ribbons in `@nachi/trails`.
+  in `@nachi-vfx/timeline`, plus GPU ribbons in `@nachi-vfx/trails`.
 
 ### Rendering and integrations
 

@@ -21,9 +21,9 @@ import {
   velocityCone,
   type TextureRef,
   type VfxEmitterRuntimeView,
-} from '@nachi/core';
-import { fxMaterial as meshFxMaterial, ring, uvFlow } from '@nachi/mesh-fx';
-import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi/post';
+} from '@nachi-vfx/core';
+import { fxMaterial as meshFxMaterial, ring, uvFlow } from '@nachi-vfx/mesh-fx';
+import { bloomPreset, createPostPipeline, screenDistortion } from '@nachi-vfx/post';
 import {
   at,
   cameraShake,
@@ -35,7 +35,7 @@ import {
   timeline,
   VFXSystem,
   type CameraShakeSample,
-} from '@nachi/timeline';
+} from '@nachi-vfx/timeline';
 import * as THREE from 'three/webgpu';
 
 import {
@@ -45,7 +45,7 @@ import {
   createThreeTextureResolver,
   materializeThreeLightDraw,
   materializeThreeSpriteDraw,
-} from '@nachi/three';
+} from '@nachi-vfx/three';
 import {
   allPanelsHaveForeground,
   createDrainedReadback,
