@@ -37,7 +37,9 @@ export {
 export { MeshFxDiagnosticError, type MeshFxDiagnostic } from './diagnostics.js';
 export {
   applyVat,
+  cloneVatBindings,
   resolveVatFrames,
+  setVatTimelineTime,
   type VatAxisMap,
   type VatConfig,
   type VatControls,

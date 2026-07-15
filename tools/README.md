@@ -69,6 +69,13 @@ readback; direct `spike-runner.mjs` execution must fail with exactly
 dirty-lane M9 regression. Headless M9 runs publish readback contracts without adding screenshot
 baselines.
 
+The same `/m9-timeline/` entry also rebuilds a real fxMaterial+VAT mesh for two timeline clones and
+uses vertex/pixel-centroid readback to distinguish normal advance, time-scale changes, zero-scale
+pause, hit stop, resume, stop, loop reset, clone clock independence, and an untouched external VAT
+clock. `?forceFailure=timeline-vat-clock` leaves the measured evidence intact but makes exactly
+`vatTimelineClockGpu=false`; the direct runner must fail. `/m8-vat/?backend=webgpu` and
+`/m8-vat/?backend=webgl` remain the standalone cross-backend VAT regression.
+
 The existing `/m11-cache/` page also verifies simulation-cache v2 lineage. Its WebGPU fixture bakes
 a capacity-one emitter whose physical slot is reused by a different `spawnOrder` between two cache
 frames, then proves that a linear sample at fraction 0.25 chooses the left/nearest frame in both GPU

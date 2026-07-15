@@ -51,6 +51,35 @@ stencil controls, blending, `colorWrite`, clipping planes, `name`, and a deep co
 Later changes to the source or another instance do not change that snapshot. Textures and other
 externally owned resources retain Three's normal shared-reference clone semantics.
 
+Meshes configured with `applyVat()` receive the same clone and lifecycle treatment. Timeline
+rebuilds the source's ordered graph-reachable VAT layers after material cloning, preserving an
+existing pre-VAT position node and avoiding both fxMaterial graph loss and generic NodeMaterial
+graph/uniform aliasing. Reachable controls are the ordered unique union of position layers from the
+latest `absolute` layer onward and the latest normal-producing layer. An older clock survives only
+when its normal remains the final normal; clocks represented by neither final channel are not cloned
+or driven. Omitted VAT `time` creates one independent package-owned clock per clone;
+its current source value is part of the spawn/prepare snapshot, and every mesh `play()` resets it to
+zero. While the element is playing, timeline writes seconds since that latest play from the same
+scaled segment delta used by mesh life. Time scale zero, hit stop, explicit stop, natural expiry,
+and completed/stopped instances therefore freeze it; loop replay and a fresh instance restart at
+zero. This VAT clock is separate from `material.fx.time`, which keeps its established effect-local
+timeline clock, and from `fx.normalizedLife`.
+
+VAT ownership is tracked independently for the position and normal root references. If authoring
+code replaces either final root after `applyVat()`, timeline preserves that current root as an
+external shared clone binding, does not resurrect the detached VAT graph, and drives only controls
+still represented by the other active channel. Replacing both roots or the material yields no stale
+VAT controls. Between `applyVat()` calls, replacing only normal keeps the existing VAT position
+layers active; replacing position starts a new chain from that authored root. In-place mutation below
+an unchanged root cannot be observed, so ownership transfer requires replacing the root reference.
+
+An explicit numeric or TSL `VatConfig.time` remains externally owned and non-writable. Timeline
+clones retain that exact external binding, never write it, and emit no binding diagnostic. For an
+owned non-looping VAT whose element duration exceeds the clip, the internal lifecycle writer allows
+elapsed time past the standalone `setTime()` range and the shader holds the last frame; standalone
+validation is unchanged. Textures remain externally owned shared references and are never disposed
+by timeline clone, prepare, error, or release cleanup.
+
 `instance.setUserVisible(meshKey, visible)` controls an adapted mesh-fx element without competing
 with timeline lifecycle writes. Final visibility is `runtimeVisible && userVisible`; the user value
 defaults to `true` and persists through play, stop, natural expiry, loop replay, and transform

@@ -28,7 +28,13 @@ import {
   type VfxSystemOptions,
   FixedStepAccumulator,
 } from '@nachi-vfx/core';
-import type { FxNodeMaterial, MeshFxMesh } from '@nachi-vfx/mesh-fx';
+import {
+  cloneVatBindings,
+  setVatTimelineTime,
+  type FxNodeMaterial,
+  type MeshFxMesh,
+  type VatControls,
+} from '@nachi-vfx/mesh-fx';
 
 import {
   cloneTimelineFxMaterial,
@@ -113,6 +119,7 @@ type MeshRuntime = {
   playing: boolean;
   runtimeVisible: boolean;
   userVisible: boolean;
+  readonly vatControls: readonly VatControls[];
 };
 
 export type TimelineMeshFxElementKey<Definition extends RuntimeDefinition> =
@@ -280,7 +287,11 @@ function cloneMaterial(material: MeshFxMesh['material'], path: string): MeshFxMe
 function cloneMesh(
   key: string,
   resource: MeshFxRuntimeResource,
-): { readonly authoredLocal: AuthoredLocalTransform; readonly mesh: MeshFxMesh } {
+): {
+  readonly authoredLocal: AuthoredLocalTransform;
+  readonly mesh: MeshFxMesh;
+  readonly vatControls: readonly VatControls[];
+} {
   const authoredLocal = Object.freeze({
     position: Object.freeze([
       resource.mesh.position.x,
@@ -300,8 +311,20 @@ function cloneMesh(
     ] as const),
   });
   const mesh = resource.mesh.clone() as MeshFxMesh;
-  mesh.material = cloneMaterial(resource.mesh.material, `elements.${key}.material`);
-  return { authoredLocal, mesh };
+  let ownsMaterial = false;
+  try {
+    mesh.material = cloneMaterial(resource.mesh.material, `elements.${key}.material`);
+    ownsMaterial = mesh.material !== resource.mesh.material;
+    const vatControls = cloneVatBindings(
+      resource.mesh,
+      mesh,
+      'fx' in resource.mesh.material ? 'cloned-material' : 'source-before-vat',
+    );
+    return { authoredLocal, mesh, vatControls };
+  } catch (error) {
+    if (ownsMaterial) mesh.material.dispose();
+    throw error;
+  }
 }
 
 function setMeshTransform(
@@ -411,7 +434,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     }
     try {
       for (const [key, resource] of getMeshFxResources(definition)) {
-        const { authoredLocal, mesh } = cloneMesh(key, resource);
+        const { authoredLocal, mesh, vatControls } = cloneMesh(key, resource);
         const runtime: MeshRuntime = {
           authoredLocal,
           duration: resource.duration,
@@ -420,6 +443,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
           playing: false,
           runtimeVisible: false,
           userVisible: true,
+          vatControls,
         };
         publishMeshVisibility(runtime);
         setMeshTransform(mesh, authoredLocal, this.#position, this.#rotation);
@@ -730,6 +754,11 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     for (const runtime of this.#meshRuntimes.values()) {
       if (!runtime.playing) continue;
       runtime.elapsed += localDelta;
+      for (const controls of runtime.vatControls) {
+        // Non-looping VAT sampling clamps in the shader. The mesh-fx internal lifecycle writer
+        // permits an element to outlive its clip without weakening standalone setTime().
+        if (controls.time) setVatTimelineTime(controls, runtime.elapsed);
+      }
       const normalizedLife = Math.min(1, runtime.elapsed / runtime.duration);
       for (const material of fxMaterials(runtime.mesh)) {
         material.fx.setTime(this.#localTime);
@@ -857,6 +886,9 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     if (mesh) {
       mesh.elapsed = 0;
       mesh.playing = true;
+      for (const controls of mesh.vatControls) {
+        if (controls.time) setVatTimelineTime(controls, 0);
+      }
       setMeshRuntimeVisible(mesh, true);
       for (const material of fxMaterials(mesh.mesh)) {
         material.fx.setTime(this.#localTime);

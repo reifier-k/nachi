@@ -15,7 +15,7 @@ import {
   type KernelTslAdapter,
   type VfxEmitterRuntimeView,
 } from '@nachi-vfx/core';
-import { ring, slashArc } from '@nachi-vfx/mesh-fx';
+import { applyVat, ring, slashArc } from '@nachi-vfx/mesh-fx';
 import {
   VFXSystem,
   at,
@@ -31,6 +31,8 @@ import {
   type CameraShakeSample,
 } from '@nachi-vfx/timeline';
 import * as THREE from 'three/webgpu';
+import { uniform as tslUniform } from 'three/tsl';
+import type UniformNode from 'three/src/nodes/core/UniformNode.js';
 
 import { createPerformanceMonitor } from './perf';
 import { compactRgba8Readback } from './readback';
@@ -211,6 +213,217 @@ function changedPixels(left: Uint8Array, right: Uint8Array): number {
       count += 1;
   }
   return count;
+}
+
+function vatProbeTexture(width: number): THREE.DataTexture {
+  const offsets = [-0.7, -0.25, 0.25, 0.7];
+  const data = new Float32Array(width * offsets.length * 4);
+  for (const [frame, x] of offsets.entries()) {
+    for (let vertex = 0; vertex < width; vertex += 1) {
+      const offset = (frame * width + vertex) * 4;
+      data[offset] = x;
+      data[offset + 3] = 1;
+    }
+  }
+  const texture = new THREE.DataTexture(data, width, offsets.length, THREE.RGBAFormat);
+  texture.type = THREE.FloatType;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createVatProbeMesh(name: string, externalTime?: UniformNode<'float', number>) {
+  const material = fxMaterial({ blending: 'additive', color: '#ffffff' });
+  material.side = THREE.DoubleSide;
+  const mesh = ring({ innerRadius: 0.12, material, outerRadius: 0.22, segments: 32 });
+  mesh.name = name;
+  const texture = vatProbeTexture(mesh.geometry.getAttribute('position').count);
+  const sourceControls = applyVat(mesh, {
+    axisMap: 'xyz',
+    fps: 4,
+    frameCount: 4,
+    interpolation: 'nearest',
+    loop: false,
+    positionTexture: texture,
+    ...(externalTime === undefined ? {} : { time: externalTime }),
+    vertexLookup: 'vertex-index',
+  });
+  return { material, mesh, sourceControls, texture };
+}
+
+async function vatTimelineClockGpuProbe(renderer: THREE.WebGPURenderer) {
+  const target = new THREE.RenderTarget(96, 96, { depthBuffer: true });
+  target.texture.colorSpace = THREE.NoColorSpace;
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  camera.position.z = 3;
+  const captureCentroid = async (scene: THREE.Scene) => {
+    renderer.setRenderTarget(target);
+    renderer.render(scene, camera);
+    const pixels = compactRgba8Readback(
+      new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, 96, 96)),
+      96,
+      96,
+      true,
+    );
+    let count = 0;
+    let sumX = 0;
+    for (let y = 0; y < 96; y += 1) {
+      for (let x = 0; x < 96; x += 1) {
+        const offset = (y * 96 + x) * 4;
+        if ((pixels[offset] ?? 0) + (pixels[offset + 1] ?? 0) + (pixels[offset + 2] ?? 0) <= 24)
+          continue;
+        count += 1;
+        sumX += x;
+      }
+    }
+    return { count, x: count === 0 ? -1 : sumX / count };
+  };
+
+  const owned = createVatProbeMesh('m9-vat-owned');
+  owned.sourceControls.setTime(0.125);
+  const ownedEffect = defineEffect({
+    elements: { vat: meshFxElement(owned.mesh, { duration: 1 }) },
+    timeline: timeline([at(0, play('vat'))], { duration: 1 }),
+  });
+  const ownedScene = new THREE.Scene();
+  ownedScene.background = new THREE.Color(0);
+  const ownedSystem = new VFXSystem({}, ownedScene);
+  const first = ownedSystem.spawn(ownedEffect);
+  const second = ownedSystem.spawn(ownedEffect);
+  const [firstMesh, secondMesh] = ownedScene.children.filter(
+    ({ name }) => name === 'm9-vat-owned',
+  ) as THREE.Mesh[];
+  const snapshotIndependent =
+    owned.sourceControls.time?.value === 0.125 &&
+    (firstMesh!.material as THREE.MeshBasicNodeMaterial).positionNode !==
+      (secondMesh!.material as THREE.MeshBasicNodeMaterial).positionNode &&
+    (firstMesh!.material as THREE.MeshBasicNodeMaterial).positionNode !==
+      owned.material.positionNode;
+  await ownedSystem.update(0);
+  second.setUserVisible('vat', false);
+  const firstAtZero = await captureCentroid(ownedScene);
+  first.setTimeScale(2);
+  second.setTimeScale(0.5);
+  await ownedSystem.update(0.125);
+  const firstAdvanced = await captureCentroid(ownedScene);
+  first.setUserVisible('vat', false);
+  second.setUserVisible('vat', true);
+  const secondIndependent = await captureCentroid(ownedScene);
+  first.setUserVisible('vat', true);
+  second.setUserVisible('vat', false);
+  first.setTimeScale(0);
+  second.setTimeScale(0);
+  await ownedSystem.update(0.125);
+  const firstPaused = await captureCentroid(ownedScene);
+  first.setTimeScale(1);
+  first.applyHitStop(125, 0);
+  await ownedSystem.update(0.125);
+  const firstHitStopped = await captureCentroid(ownedScene);
+  await ownedSystem.update(0.125);
+  const firstResumed = await captureCentroid(ownedScene);
+  first.stop();
+  await ownedSystem.update(0.125);
+  const firstStoppedTime = first.getElementState('vat')?.localTime;
+  const secondTime = second.getElementState('vat')?.localTime;
+  const lifecycleDriven =
+    firstStoppedTime === 0.375 &&
+    secondTime === 0.0625 &&
+    firstAdvanced.x - firstAtZero.x > 10 &&
+    Math.abs(firstPaused.x - firstAdvanced.x) < 0.01 &&
+    Math.abs(firstHitStopped.x - firstAdvanced.x) < 0.01 &&
+    firstResumed.x - firstHitStopped.x > 10;
+  const cloneIndependent =
+    owned.sourceControls.time?.value === 0.125 &&
+    secondTime === 0.0625 &&
+    Math.abs(secondIndependent.x - firstAtZero.x) < 0.01;
+
+  const looped = createVatProbeMesh('m9-vat-loop');
+  const loopEffect = defineEffect({
+    elements: { vat: meshFxElement(looped.mesh, { duration: 1 }) },
+    timeline: timeline([at(0, play('vat'))], { duration: 0.5, loop: 2 }),
+  });
+  const loopScene = new THREE.Scene();
+  loopScene.background = new THREE.Color(0);
+  const loopSystem = new VFXSystem({}, loopScene);
+  const loopInstance = loopSystem.spawn(loopEffect);
+  await loopSystem.update(0);
+  const loopStart = await captureCentroid(loopScene);
+  await loopSystem.update(0.5);
+  const loopReplay = await captureCentroid(loopScene);
+  const loopReset =
+    loopInstance.cycle === 1 &&
+    loopInstance.getElementState('vat')?.localTime === 0 &&
+    Math.abs(loopReplay.x - loopStart.x) < 0.01;
+
+  const externalTime = tslUniform(0) as UniformNode<'float', number>;
+  const external = createVatProbeMesh('m9-vat-external', externalTime);
+  const externalEffect = defineEffect({
+    elements: { vat: meshFxElement(external.mesh, { duration: 1 }) },
+    timeline: timeline([at(0, play('vat'))], { duration: 1 }),
+  });
+  const externalScene = new THREE.Scene();
+  externalScene.background = new THREE.Color(0);
+  const externalSystem = new VFXSystem({}, externalScene);
+  const externalInstance = externalSystem.spawn(externalEffect);
+  await externalSystem.update(0);
+  const externalStart = await captureCentroid(externalScene);
+  await externalSystem.update(0.25);
+  const externalUnwritten = await captureCentroid(externalScene);
+  externalTime.value = 0.25;
+  const externalAdvanced = await captureCentroid(externalScene);
+  const externalPreserved =
+    external.sourceControls.time === null &&
+    externalInstance.diagnostics.length === 0 &&
+    Math.abs(externalUnwritten.x - externalStart.x) < 0.01 &&
+    externalAdvanced.x - externalUnwritten.x > 10;
+
+  const actualOk =
+    snapshotIndependent && lifecycleDriven && cloneIndependent && loopReset && externalPreserved;
+  const ok = forceFailure === 'timeline-vat-clock' ? false : actualOk;
+  first.release();
+  second.release();
+  loopInstance.release();
+  externalInstance.release();
+  renderer.setRenderTarget(null);
+  owned.material.dispose();
+  owned.mesh.geometry.dispose();
+  owned.texture.dispose();
+  looped.material.dispose();
+  looped.mesh.geometry.dispose();
+  looped.texture.dispose();
+  external.material.dispose();
+  external.mesh.geometry.dispose();
+  external.texture.dispose();
+  target.dispose();
+  return {
+    cloneIndependent,
+    externalPreserved,
+    fault: forceFailure,
+    lifecycleDriven,
+    ok,
+    readback: {
+      externalAdvanced,
+      externalStart,
+      externalUnwritten,
+      firstAdvanced,
+      firstAtZero,
+      firstHitStopped,
+      firstPaused,
+      firstResumed,
+      loopReplay,
+      loopStart,
+      secondIndependent,
+    },
+    snapshotIndependent,
+    loopReset,
+    times: {
+      external: externalTime.value,
+      first: firstStoppedTime,
+      second: secondTime,
+    },
+  };
 }
 
 async function meshFxStateOwnershipGpuProbe(renderer: THREE.WebGPURenderer) {
@@ -702,7 +915,11 @@ async function measurePerformance(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  if (forceFailure !== null && forceFailure !== 'timeline-user-visible') {
+  if (
+    forceFailure !== null &&
+    forceFailure !== 'timeline-user-visible' &&
+    forceFailure !== 'timeline-vat-clock'
+  ) {
     throw new Error(`Unknown M9 timeline fault: ${forceFailure}`);
   }
   root.dataset.rendererStatus = 'initializing';
@@ -796,6 +1013,7 @@ async function run(): Promise<void> {
   const overLifeGpu = await meshFxOverLifeGpuProbe(renderer, runtime);
   const opacityOverLifeGpu = await meshFxOpacityOverLifeGpuProbe(renderer, runtime);
   const stateOwnershipGpu = await meshFxStateOwnershipGpuProbe(renderer);
+  const vatTimelineGpu = await vatTimelineClockGpuProbe(renderer);
   await system.update(0.15);
   const stopEffects = {
     arcHidden: instance.getElementState('arc')?.visible === false,
@@ -835,6 +1053,7 @@ async function run(): Promise<void> {
     meshFxOverLifeGpu: overLifeGpu.ok,
     meshFxOpacityOverLifeGpu: opacityOverLifeGpu.ok,
     meshFxStateOwnershipGpu: stateOwnershipGpu.ok,
+    vatTimelineClockGpu: vatTimelineGpu.ok,
     playEffects: flashDeferredUntilUpdate && arcVisibleAtPlay && shockwaveVisible,
     stopEffects: Object.values(stopEffects).every(Boolean),
     stress600:
@@ -858,6 +1077,7 @@ async function run(): Promise<void> {
         times: [0.05, 0.3],
       },
       stateOwnershipGpu,
+      vatTimelineGpu,
       hitStopSeparation,
       linearReadbackThreshold: 24,
       loop,

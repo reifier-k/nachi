@@ -84,6 +84,31 @@ type NodeMaterialLike = THREE.Material & {
 
 export type VatMesh = THREE.Mesh<THREE.BufferGeometry, NodeMaterialLike>;
 
+type VatBinding = Readonly<{
+  config: VatConfig;
+  controls: VatControls;
+}>;
+
+type VatBindingMetadata = {
+  baseNormalNode: Node<'vec3'> | null;
+  basePositionNode: Node<'vec3'> | null;
+  readonly bindings: VatBinding[];
+  readonly material: NodeMaterialLike;
+  appliedNormalNode: Node<'vec3'> | null | undefined;
+  appliedPositionNode: Node<'vec3'> | null | undefined;
+  normalBindingIndex: number;
+};
+
+type VatBindingActivity = Readonly<{
+  readonly materialMatches: boolean;
+  readonly metadata: VatBindingMetadata;
+  readonly normalBindingIndex: number;
+  readonly normalActive: boolean;
+  readonly positionActive: boolean;
+}>;
+
+const vatBindings = new WeakMap<THREE.Mesh, VatBindingMetadata>();
+
 /**
  * Applies a Blender-compatible one-frame-per-row VAT to an ordinary Three NodeMaterial mesh.
  * Position and optional normal textures are sampled in the TSL vertex stage.
@@ -91,6 +116,30 @@ export type VatMesh = THREE.Mesh<THREE.BufferGeometry, NodeMaterialLike>;
 export function applyVat(mesh: THREE.Mesh, config: VatConfig): VatControls {
   const validated = validateVat(mesh, config);
   const material = validated.material;
+  const previous = vatBindings.get(mesh);
+  const continuesTrackedPosition =
+    previous?.material === material && previous.appliedPositionNode === material.positionNode;
+  if (
+    continuesTrackedPosition &&
+    previous.normalBindingIndex >= 0 &&
+    previous.appliedNormalNode !== material.normalNode
+  ) {
+    // A manually replaced normal no longer consumes the prior VAT normal clock. Position VAT
+    // layers remain active and can continue composing without turning that authored normal back
+    // into a timeline-owned binding.
+    previous.normalBindingIndex = -1;
+  }
+  const metadata: VatBindingMetadata = continuesTrackedPosition
+    ? previous
+    : {
+        baseNormalNode: material.normalNode,
+        basePositionNode: material.positionNode,
+        bindings: [],
+        material,
+        appliedNormalNode: material.normalNode,
+        appliedPositionNode: material.positionNode,
+        normalBindingIndex: -1,
+      };
   const timeUniform = config.time === undefined ? uniform(0) : null;
   const timeNode = config.time ?? timeUniform!;
   const frameNodes = buildFrameNodes(timeNode, validated);
@@ -146,7 +195,189 @@ export function applyVat(mesh: THREE.Mesh, config: VatConfig): VatControls {
       });
     },
   });
+  const bindingIndex = metadata.bindings.length;
+  metadata.bindings.push(Object.freeze({ config: snapshotVatConfig(config), controls }));
+  if (config.normalTexture) metadata.normalBindingIndex = bindingIndex;
+  metadata.appliedNormalNode = material.normalNode;
+  metadata.appliedPositionNode = material.positionNode;
+  vatBindings.set(mesh, metadata);
+  compactVatBindings(vatBindingActivity(mesh)!);
   return controls;
+}
+
+/**
+ * @internal Rebuilds every tracked `applyVat()` layer on a mesh clone and returns the cloned
+ * controls. Textures and explicit external TSL nodes retain their shared-reference contract;
+ * omitted clocks receive fresh uniforms whose source values are snapshotted before timeline play.
+ */
+export function cloneVatBindings(
+  source: THREE.Mesh,
+  clone: THREE.Mesh,
+  baseGraph: 'cloned-material' | 'source-before-vat' = 'source-before-vat',
+): readonly VatControls[] {
+  const activity = currentVatBindingActivity(source);
+  if (!activity) return Object.freeze([]);
+  const { metadata } = activity;
+  const sourceMaterial = nodeMaterial(source.material);
+  if (!activity.materialMatches && !sourceMaterial) return Object.freeze([]);
+  const material = requiredNodeMaterial(clone.material);
+  if (!activity.materialMatches || (!activity.positionActive && !activity.normalActive)) {
+    material.positionNode = sourceMaterial!.positionNode;
+    material.normalNode = sourceMaterial!.normalNode;
+    material.needsUpdate = true;
+    return Object.freeze([]);
+  }
+  if (baseGraph === 'source-before-vat') {
+    material.positionNode = metadata.basePositionNode;
+    material.normalNode = metadata.baseNormalNode;
+  } else {
+    // Timeline fxMaterial regeneration owns its ordinary package graph, but an explicitly authored
+    // position/normal node that existed before VAT is an external binding and must remain shared.
+    material.positionNode = metadata.basePositionNode ?? material.positionNode;
+    material.normalNode = metadata.baseNormalNode ?? material.normalNode;
+  }
+  const frustumCulled = source.frustumCulled;
+  for (const index of reachableVatBindingIndices(activity)) {
+    const binding = metadata.bindings[index]!;
+    const cloned = applyVat(clone, binding.config);
+    if (cloned.time && binding.controls.time) {
+      setVatTimelineTime(cloned, binding.controls.time.value);
+    }
+  }
+  if (!activity.positionActive && sourceMaterial) {
+    material.positionNode = sourceMaterial.positionNode;
+  }
+  if (!activity.normalActive && sourceMaterial) {
+    material.normalNode = sourceMaterial.normalNode;
+  }
+  material.needsUpdate = true;
+  // Mesh.clone() snapshots the source object's current culling choice. Reapplying the VAT config
+  // must not undo an author's later conservative-bounds opt-in.
+  clone.frustumCulled = frustumCulled;
+  return getVatControls(clone);
+}
+
+/** @internal Returns controls for the VAT layers currently tracked on a mesh. */
+export function getVatControls(mesh: THREE.Mesh): readonly VatControls[] {
+  const activity = currentVatBindingActivity(mesh);
+  if (!activity?.materialMatches) return Object.freeze([]);
+  return Object.freeze(
+    activeVatControls(
+      activity,
+      activity.metadata.bindings.map(({ controls }) => controls),
+    ),
+  );
+}
+
+function vatBindingActivity(mesh: THREE.Mesh): VatBindingActivity | undefined {
+  const metadata = vatBindings.get(mesh);
+  if (!metadata) return undefined;
+  const materialMatches = metadata.material === mesh.material;
+  const normalBindingIndex = metadata.normalBindingIndex;
+  return {
+    materialMatches,
+    metadata,
+    normalBindingIndex,
+    normalActive:
+      materialMatches &&
+      normalBindingIndex >= 0 &&
+      metadata.appliedNormalNode === metadata.material.normalNode,
+    positionActive:
+      materialMatches && metadata.appliedPositionNode === metadata.material.positionNode,
+  };
+}
+
+function currentVatBindingActivity(mesh: THREE.Mesh): VatBindingActivity | undefined {
+  let activity = vatBindingActivity(mesh);
+  if (!activity?.materialMatches) return activity;
+  compactVatBindings(activity);
+  activity = vatBindingActivity(mesh);
+  return activity;
+}
+
+function activeVatControls(
+  activity: VatBindingActivity,
+  controls: readonly VatControls[],
+): VatControls[] {
+  return reachableVatBindingIndices(activity).map((index) => controls[index]!);
+}
+
+function reachableVatBindingIndices(activity: VatBindingActivity): number[] {
+  const indices = new Set<number>();
+  const { bindings } = activity.metadata;
+  if (activity.positionActive) {
+    let positionStart = 0;
+    for (let index = 0; index < bindings.length; index += 1) {
+      if (bindings[index]!.config.positionMode === 'absolute') positionStart = index;
+    }
+    for (let index = positionStart; index < bindings.length; index += 1) indices.add(index);
+  }
+  if (activity.normalActive) indices.add(activity.normalBindingIndex);
+  return [...indices].sort((left, right) => left - right);
+}
+
+function compactVatBindings(activity: VatBindingActivity): void {
+  const { metadata } = activity;
+  const indices = reachableVatBindingIndices(activity);
+  const activeNormalBinding = activity.normalActive
+    ? metadata.bindings[activity.normalBindingIndex]
+    : undefined;
+  const reachableBindings = indices.map((index) => {
+    const binding = metadata.bindings[index]!;
+    if (binding === activeNormalBinding || binding.config.normalTexture === undefined)
+      return binding;
+    const positionOnlyConfig = { ...binding.config };
+    delete positionOnlyConfig.normalTexture;
+    return Object.freeze({
+      config: Object.freeze(positionOnlyConfig),
+      controls: binding.controls,
+    });
+  });
+  metadata.bindings.splice(0, metadata.bindings.length, ...reachableBindings);
+  metadata.normalBindingIndex =
+    activeNormalBinding === undefined ? -1 : reachableBindings.indexOf(activeNormalBinding);
+  if (!activity.positionActive) {
+    metadata.basePositionNode = metadata.material.positionNode;
+    metadata.appliedPositionNode = undefined;
+  }
+  if (!activity.normalActive) {
+    metadata.baseNormalNode = metadata.material.normalNode;
+    metadata.appliedNormalNode = undefined;
+  }
+}
+
+function nodeMaterial(material: THREE.Material | THREE.Material[]): NodeMaterialLike | null {
+  if (
+    Array.isArray(material) ||
+    (material as { isNodeMaterial?: boolean }).isNodeMaterial !== true
+  ) {
+    return null;
+  }
+  return material as NodeMaterialLike;
+}
+
+/**
+ * @internal Writes timeline element-local time to a package-owned VAT clock. Unlike standalone
+ * `setTime()`, this permits a non-looping element to outlive its clip so the shader can hold the
+ * final frame. Timeline deltas are still required to be finite and non-negative.
+ */
+export function setVatTimelineTime(controls: VatControls, value: number): void {
+  if (!controls.time) invalid('applyVat.time', 'is externally bound and cannot be assigned');
+  finite(value, 'timeline.vat.time');
+  if (value < 0) invalid('timeline.vat.time', 'must be >= 0');
+  controls.time.value = value;
+}
+
+function snapshotVatConfig(config: VatConfig): VatConfig {
+  return Object.freeze({
+    ...config,
+    ...(config.frameRange === undefined
+      ? {}
+      : { frameRange: Object.freeze([...config.frameRange] as [number, number]) }),
+    ...(config.positionRange === undefined
+      ? {}
+      : { positionRange: Object.freeze({ ...config.positionRange }) }),
+  });
 }
 
 export function resolveVatFrames(

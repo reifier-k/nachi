@@ -120,3 +120,29 @@ position-attribute count. The v1 runtime deliberately rejects wrapped/cropped la
 PNG position textures; convert them to a non-color float texture or export OpenEXR. Variable topology
 is not representable. Dynamic VAT bounds disable frustum culling by default; applications may opt out
 after supplying conservative mesh bounds.
+
+`applyVat()` also retains internal, cloneable binding metadata for the timeline adapter. A timeline
+clone rebuilds graph-reachable VAT layers in order instead of trusting Three's generic NodeMaterial
+clone, which can alias the source VAT graph. Position reachability starts at the latest `absolute`
+layer, or the first layer when all are offsets; normal reachability is the latest layer that supplies
+a normal texture. Their ordered, de-duplicated union owns the active controls. Package-owned VAT
+clocks become independent uniforms for the source and every clone; position/normal textures and
+explicit external TSL clock nodes keep their normal shared-reference ownership. A current
+package-owned source time is snapshotted when the clone is created, then timeline `play()` resets the
+clone to element-local time zero. Detached metadata is compacted without disposing caller-owned
+textures or controls, and clone rebuild skips detached graphs entirely.
+
+Clone metadata remains active per channel only while the mesh still uses the material and the exact
+position or normal root installed by `applyVat()`. Replacing a final root after VAT application makes
+that channel an externally authored, shared clone binding; timeline neither rebuilds its detached VAT
+graph nor writes its detached clock. The other channel remains independently active. Replacing only
+the normal root between calls preserves the accumulated VAT position layers, while replacing the
+position root starts a new VAT chain from that authored root. Replacing both roots or the material
+leaves no stale timeline-owned VAT clock. Mutating inside an unchanged root object is not detectable;
+replace the root reference when transferring ownership.
+
+Standalone behavior is unchanged: `controls.setTime()` validates a non-looping clip's authored time
+range, and external numeric/TSL clocks remain non-writable. Timeline uses a package-internal writer
+that still requires a finite, non-negative element-local time but permits the element to outlive a
+non-looping clip; the VAT shader then holds its final frame. VAT textures are always caller-owned:
+timeline release, failed clone/prepare, and retained preparation never dispose them.
