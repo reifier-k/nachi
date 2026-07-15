@@ -51,6 +51,7 @@ and 5174:
 pnpm verify:gpu
 ```
 
-The 14-page suite covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope and canonical
+The 15-page suite covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope and canonical
 event routing, Grid2D, WBOIT, logical light top-N selection, VAT, textured ribbons, NeighborGrid,
-and all six showcase pages.
+H2-6 world/emitter selectors plus shared Update-midpoint collision response, and all six showcase
+pages.

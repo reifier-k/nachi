@@ -34,6 +34,7 @@ import {
   tslModule,
   vectorField,
   velocityOverLife,
+  velocityCone,
   velocityMeshNormal,
   vortex,
   createCoreKernelModuleRegistry,
@@ -204,6 +205,7 @@ describe('three kernel adapter', () => {
       program.kernels.update.modules.find(({ type }) => type === 'core/linear-force')?.access.reads,
     ).toEqual([
       'Emitter.deltaTime',
+      'Emitter.updateInterpolatedTransform',
       'Particles.velocity',
       'Emitter.seed',
       'Particles.spawnOrder',
@@ -264,6 +266,124 @@ describe('three kernel adapter', () => {
     );
     expect(() =>
       reducedProgram.buildKernels(
+        createThreeKernelAdapter({
+          backend: 'webgl2',
+          maxTransformFeedbackSeparateAttribs: 8,
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('preserves pre-H2-6 omitted and explicit-world selector WGSL exactly', () => {
+    const renderer = {
+      backend: {
+        capabilities: { getUniformBufferLimit: () => 64 },
+        compatibilityMode: false,
+      },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      hasFeature: () => false,
+    };
+    const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const programHashes = (program: ReturnType<typeof compileEmitter>) => {
+      const kernels = program.buildKernels(createThreeKernelAdapter({ backend: 'webgpu' }));
+      const hash = (kernel: unknown) => {
+        const builder = new NodeBuilder(kernel, renderer);
+        builder.build();
+        return createHash('sha256').update(builder.computeShader).digest('hex');
+      };
+      return { initialize: hash(kernels.initialize), update: hash(kernels.update) };
+    };
+    const shaderHashes = (explicitWorld: boolean) =>
+      programHashes(
+        compileEmitter(
+          defineEmitter({
+            capacity: 1,
+            init: [
+              velocityCone({
+                angle: 0,
+                direction: [1, 0, 0],
+                ...(explicitWorld ? { space: 'world' as const } : {}),
+                speed: 2,
+              }),
+              lifetime(10),
+            ],
+            integration: 'none',
+            render: billboard({}),
+            spawn: burst({ count: 1 }),
+            update: [
+              linearForce({
+                force: [1, 2, 3],
+                ...(explicitWorld ? { space: 'world' as const } : {}),
+              }),
+            ],
+          }),
+        ),
+      );
+    const legacyCone = {
+      ...velocityCone({ angle: 0, direction: [1, 0, 0], space: 'emitter', speed: 2 }),
+      access: { reads: ['Emitter.seed', 'Particles.spawnOrder'], writes: ['Particles.velocity'] },
+      version: 1,
+    } as ReturnType<typeof velocityCone>;
+    const legacyForce = {
+      ...linearForce({ force: [1, 2, 3], space: 'emitter' }),
+      access: {
+        reads: ['Emitter.deltaTime', 'Particles.velocity'],
+        writes: ['Particles.velocity'],
+      },
+      version: 1,
+    } as ReturnType<typeof linearForce>;
+    const legacy = programHashes(
+      compileEmitter(
+        defineEmitter({
+          capacity: 1,
+          init: [legacyCone, lifetime(10)],
+          integration: 'none',
+          render: billboard({}),
+          spawn: burst({ count: 1 }),
+          update: [legacyForce],
+        }),
+      ),
+    );
+    const omitted = shaderHashes(false);
+    const explicit = shaderHashes(true);
+
+    expect(explicit).toEqual(omitted);
+    expect(legacy).toEqual(omitted);
+    expect(omitted).toEqual({
+      initialize: '995776cef488f7ef5a096c8d536c5d1615ad8ef879d083e19c7cd85339da3872',
+      update: '2b4577d2bc2ee750d5bd9882c4f115a56aa5905b301facbb6ec3aebca3a15e43',
+    });
+  });
+
+  it.each([
+    'world',
+    'emitter',
+  ] as const)('materializes %s velocity and force selectors for the WebGL2 adapter', (space) => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [velocityCone({ angle: 0, direction: [1, 0, 0], space, speed: 1 })],
+        integration: 'none',
+        render: {
+          access: { reads: [], writes: [] },
+          config: {},
+          kind: 'module',
+          stage: 'render',
+          type: 'test/compute-only',
+          version: 1,
+        },
+        spawn: burst({ count: 1 }),
+        update: [linearForce({ force: [1, 0, 0], space })],
+      }),
+    );
+
+    expect(() =>
+      program.buildKernels(
         createThreeKernelAdapter({
           backend: 'webgl2',
           maxTransformFeedbackSeparateAttribs: 8,

@@ -168,6 +168,7 @@ function createModule<Stage extends ModuleStage, Config extends object>(
   type: string,
   config: Config,
   access?: ModuleAccess,
+  version = 1,
 ): ModuleDefinition<Stage, Config> {
   const parameterReads = collectParameterReads(config);
   const normalizedAccess =
@@ -183,7 +184,7 @@ function createModule<Stage extends ModuleStage, Config extends object>(
     kind: 'module',
     stage,
     type,
-    version: 1,
+    version,
   };
 
   const diagnostics = collectCoreModuleConfigDiagnostics(
@@ -721,10 +722,16 @@ export function positionMeshSurface(options: PositionMeshSurfaceOptions): InitMo
 }
 
 export function velocityCone(options: VelocityConeOptions): InitModule {
-  return createModule('init', 'core/velocity-cone', options, {
-    reads: ['Emitter.seed', 'Particles.spawnOrder'],
-    writes: ['Particles.velocity'],
-  });
+  return createModule(
+    'init',
+    'core/velocity-cone',
+    { ...options, space: options.space ?? 'world' },
+    {
+      reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnOrder'],
+      writes: ['Particles.velocity'],
+    },
+    2,
+  );
 }
 
 export function velocityMeshNormal(options: VelocityMeshNormalOptions): InitModule {
@@ -833,9 +840,15 @@ export function vortex(options: VortexOptions): UpdateModule {
     'core/vortex',
     { ...options, space: options.space ?? 'emitter' },
     {
-      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      reads: [
+        'Emitter.deltaTime',
+        'Emitter.updateInterpolatedTransform',
+        'Particles.position',
+        'Particles.velocity',
+      ],
       writes: ['Particles.velocity'],
     },
+    2,
   );
 }
 
@@ -845,17 +858,29 @@ export function pointAttractor(options: PointAttractorOptions): UpdateModule {
     'core/point-attractor',
     { ...options, space: options.space ?? 'emitter' },
     {
-      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      reads: [
+        'Emitter.deltaTime',
+        'Emitter.updateInterpolatedTransform',
+        'Particles.position',
+        'Particles.velocity',
+      ],
       writes: ['Particles.velocity'],
     },
+    2,
   );
 }
 
 export function linearForce(options: LinearForceOptions): UpdateModule {
-  return createModule('update', 'core/linear-force', options, {
-    reads: ['Emitter.deltaTime', 'Particles.velocity'],
-    writes: ['Particles.velocity'],
-  });
+  return createModule(
+    'update',
+    'core/linear-force',
+    { ...options, space: options.space ?? 'world' },
+    {
+      reads: ['Emitter.deltaTime', 'Emitter.updateInterpolatedTransform', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    2,
+  );
 }
 
 export function turbulence(options: TurbulenceOptions): UpdateModule {
@@ -873,7 +898,7 @@ export function vectorField(options: VectorFieldOptions): UpdateModule {
 }
 
 const COLLISION_ACCESS: ModuleAccess = {
-  reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+  reads: ['Emitter.updateInterpolatedTransform', 'Particles.position', 'Particles.velocity'],
   writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
 };
 
@@ -883,6 +908,7 @@ export function collidePlane(options: CollidePlaneOptions): UpdateModule {
     'core/collide-plane',
     { ...options, space: options.space ?? 'emitter' },
     COLLISION_ACCESS,
+    2,
   );
 }
 
@@ -892,6 +918,7 @@ export function collideSphere(options: CollideSphereOptions): UpdateModule {
     'core/collide-sphere',
     { ...options, space: options.space ?? 'emitter' },
     COLLISION_ACCESS,
+    2,
   );
 }
 
@@ -901,6 +928,7 @@ export function collideBox(options: CollideBoxOptions): UpdateModule {
     'core/collide-box',
     { ...options, space: options.space ?? 'emitter' },
     COLLISION_ACCESS,
+    2,
   );
 }
 
@@ -1002,10 +1030,16 @@ export function velocityOverLife(value: CurveGenerator<number>): UpdateModule {
 }
 
 export function killVolume(options: KillVolumeOptions): UpdateModule {
-  return createModule('update', 'core/kill-volume', options, {
-    reads: ['Emitter.transform', 'Particles.position'],
-    writes: ['Particles.alive'],
-  });
+  return createModule(
+    'update',
+    'core/kill-volume',
+    options,
+    {
+      reads: ['Emitter.updateInterpolatedTransform', 'Particles.position'],
+      writes: ['Particles.alive'],
+    },
+    2,
+  );
 }
 
 export function colorOverLife(value: GradientGenerator): UpdateModule {

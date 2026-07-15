@@ -39,6 +39,7 @@ import {
   hitStop,
   lifetime,
   lightIntensity,
+  linearForce,
   marker,
   meshRenderer,
   parameter,
@@ -470,10 +471,24 @@ describe('effect asset v1', () => {
     const omittedSelectorV1Fixture = structuredClone(canonicalAuthored);
     const fixtureModules = (
       omittedSelectorV1Fixture.effect as {
-        elements: { particles: { update: Array<{ config: { space?: string } }> } };
+        elements: {
+          particles: {
+            update: Array<{
+              access?: { reads: string[] };
+              config: { space?: string };
+              version: number;
+            }>;
+          };
+        };
       }
     ).elements.particles.update;
-    for (const { config } of fixtureModules) delete config.space;
+    for (const module of fixtureModules) {
+      module.version = 1;
+      delete module.config.space;
+      module.access!.reads = module.access!.reads.map((path) =>
+        path === 'Emitter.updateInterpolatedTransform' ? 'Emitter.transform' : path,
+      );
+    }
 
     const loaded = loadEffect(omittedSelectorV1Fixture);
     const loadedEmitter = loaded.elements.particles;
@@ -494,6 +509,230 @@ describe('effect asset v1', () => {
       Array.from({ length: 5 }, () => 'world'),
     );
     expect(serializeEffect(loadEffect(canonicalLegacy))).toEqual(canonicalLegacy);
+  });
+
+  it('normalizes new selector spaces without mutating legacy v1 documents or access manifests', () => {
+    const authored = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 1,
+          init: [velocityCone({ angle: 0, direction: [1, 0, 0], speed: 1 }), lifetime(1)],
+          integration: 'none',
+          render: billboard({}),
+          spawn: burst({ count: 1 }),
+          update: [linearForce({ force: [0, 1, 0] })],
+        }),
+      },
+    });
+    const canonical = serializeEffect(authored);
+    const canonicalEmitter = (
+      canonical.effect as {
+        elements: {
+          particles: {
+            init: Array<{
+              access?: { reads: string[] };
+              config: { space?: string };
+              type: string;
+              version: number;
+            }>;
+            update: Array<{
+              access?: { reads: string[] };
+              config: { space?: string };
+              type: string;
+              version: number;
+            }>;
+          };
+        };
+      }
+    ).elements.particles;
+    expect(canonicalEmitter.init[0]?.config.space).toBe('world');
+    expect(canonicalEmitter.update[0]?.config.space).toBe('world');
+    expect(canonicalEmitter.init[0]?.version).toBe(2);
+    expect(canonicalEmitter.update[0]?.version).toBe(2);
+
+    const legacy = structuredClone(canonical);
+    const legacyEmitter = (
+      legacy.effect as (typeof canonical)['effect'] & {
+        elements: {
+          particles: {
+            init: Array<{
+              access?: { reads: string[] };
+              config: { space?: string };
+              type: string;
+              version: number;
+            }>;
+            update: Array<{
+              access?: { reads: string[] };
+              config: { space?: string };
+              type: string;
+              version: number;
+            }>;
+          };
+        };
+      }
+    ).elements.particles;
+    legacyEmitter.init[0]!.version = 1;
+    legacyEmitter.update[0]!.version = 1;
+    delete legacyEmitter.init[0]!.config.space;
+    delete legacyEmitter.update[0]!.config.space;
+    legacyEmitter.init[0]!.access!.reads = legacyEmitter.init[0]!.access!.reads.filter(
+      (path) => path !== 'Emitter.spawnInterpolatedTransform',
+    );
+    legacyEmitter.update[0]!.access!.reads = legacyEmitter.update[0]!.access!.reads.filter(
+      (path) => path !== 'Emitter.updateInterpolatedTransform',
+    );
+    const sourceBeforeLoad = structuredClone(legacy);
+    const loaded = loadEffect(legacy);
+    expect(legacy).toEqual(sourceBeforeLoad);
+
+    const loadedEmitter = loaded.elements.particles;
+    expect(loadedEmitter?.kind).toBe('emitter');
+    if (loadedEmitter?.kind !== 'emitter') throw new Error('Expected an emitter.');
+    const [loadedInit] = loadedEmitter.init ?? [];
+    const [loadedUpdate] = loadedEmitter.update ?? [];
+    if (!loadedInit || !loadedUpdate) throw new Error('Expected Init and Update modules.');
+    expect((loadedInit.config as { space?: string }).space).toBe('world');
+    expect((loadedUpdate.config as { space?: string }).space).toBe('world');
+    expect(loadedInit.version).toBe(1);
+    expect(loadedUpdate.version).toBe(1);
+    const loadedBeforeCompile = structuredClone(loaded);
+    expect(compileEmitter(loadedEmitter).diagnostics).toEqual([]);
+    expect(loaded).toEqual(loadedBeforeCompile);
+
+    const firstCanonical = serializeEffect(loaded);
+    expect(serializeEffect(loadEffect(firstCanonical))).toEqual(firstCanonical);
+  });
+
+  it('round-trips emitter selectors and strictly rejects invalid or unknown selector config', () => {
+    const emitter = serializeEffect(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            init: [
+              velocityCone({
+                angle: 0,
+                direction: [1, 0, 0],
+                space: 'emitter',
+                speed: 1,
+              }),
+            ],
+            integration: 'none',
+            render: billboard({}),
+            spawn: burst({ count: 1 }),
+            update: [linearForce({ force: [0, 1, 0], space: 'emitter' })],
+          }),
+        },
+      }),
+    );
+    const serializedEmitter = (
+      emitter.effect as {
+        elements: {
+          particles: { init: Array<{ version: number }>; update: Array<{ version: number }> };
+        };
+      }
+    ).elements.particles;
+    expect(serializedEmitter.init[0]?.version).toBe(2);
+    expect(serializedEmitter.update[0]?.version).toBe(2);
+    expect(serializeEffect(loadEffect(emitter))).toEqual(emitter);
+
+    const invalid = structuredClone(emitter) as unknown as {
+      effect: {
+        elements: {
+          particles: {
+            init: Array<{ config: { mystery?: boolean; space?: string } }>;
+            update: Array<{ config: { space?: string } }>;
+          };
+        };
+      };
+    };
+    invalid.effect.elements.particles.init[0]!.config.mystery = true;
+    invalid.effect.elements.particles.update[0]!.config.space = 'camera';
+    const diagnostics = validateEffectAsset(invalid);
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_UNKNOWN_FIELD',
+        path: '$.effect.elements.particles.init[0].config.mystery',
+      }),
+    );
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_VALUE_INVALID',
+        path: '$.effect.elements.particles.update[0].config.space',
+      }),
+    );
+  });
+
+  it('preserves module-v1 meaning while version 2 owns H2-6 behavior', () => {
+    const document = serializeEffect(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            init: [
+              velocityCone({
+                angle: 0,
+                direction: [1, 0, 0],
+                space: 'emitter',
+                speed: 1,
+              }),
+            ],
+            integration: 'none',
+            render: billboard({}),
+            spawn: burst({ count: 1 }),
+            update: [
+              linearForce({ force: [0, 1, 0], space: 'emitter' }),
+              pointAttractor({ position: [0, 0, 0], space: 'emitter', strength: 1 }),
+            ],
+          }),
+        },
+      }),
+    );
+    const legacy = structuredClone(document) as unknown as {
+      effect: {
+        elements: {
+          particles: {
+            init: Array<{ config: { space?: string }; version: number }>;
+            update: Array<{
+              access?: { reads: string[] };
+              config: { space?: string };
+              type: string;
+              version: number;
+            }>;
+          };
+        };
+      };
+    };
+    const emitter = legacy.effect.elements.particles;
+    emitter.init[0]!.version = 1;
+    emitter.update[0]!.version = 1;
+    emitter.update[1]!.version = 1;
+    emitter.update[1]!.access!.reads = emitter.update[1]!.access!.reads.map((path) =>
+      path === 'Emitter.updateInterpolatedTransform' ? 'Emitter.transform' : path,
+    );
+
+    const loaded = loadEffect(legacy);
+    const loadedEmitter = loaded.elements.particles;
+    if (loadedEmitter?.kind !== 'emitter') throw new Error('Expected an emitter.');
+    expect(loadedEmitter.init?.[0]).toMatchObject({ config: { space: 'world' }, version: 1 });
+    expect(loadedEmitter.update?.[0]).toMatchObject({ config: { space: 'world' }, version: 1 });
+    expect(loadedEmitter.update?.[1]).toMatchObject({ config: { space: 'emitter' }, version: 1 });
+    expect(compileEmitter(loadedEmitter).diagnostics).toEqual([]);
+
+    const roundTrip = serializeEffect(loaded);
+    const roundTripEmitter = (
+      roundTrip.effect as {
+        elements: {
+          particles: {
+            init: Array<{ config: { space?: string }; version: number }>;
+            update: Array<{ config: { space?: string }; version: number }>;
+          };
+        };
+      }
+    ).elements.particles;
+    expect(roundTripEmitter.init[0]).toMatchObject({ config: { space: 'world' }, version: 1 });
+    expect(roundTripEmitter.update[0]).toMatchObject({ config: { space: 'world' }, version: 1 });
+    expect(roundTripEmitter.update[1]).toMatchObject({ config: { space: 'emitter' }, version: 1 });
   });
 
   it('supports an explicit future migration registration point', () => {

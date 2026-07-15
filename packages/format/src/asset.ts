@@ -67,6 +67,7 @@ const EMITTER_DEFAULT_SPACE_MODULES = new Set([
   'core/point-attractor',
   'core/vortex',
 ]);
+const WORLD_DEFAULT_SPACE_MODULES = new Set(['core/linear-force', 'core/velocity-cone']);
 const MAX_JSON_DEPTH = 256;
 const GRID2D_BUILTIN_STAGE_SOURCES = new Set([
   'core/grid2d-advect',
@@ -120,27 +121,26 @@ function jsonClone(value: unknown): JsonValue {
   );
 }
 
-/**
- * Version 1 already admits both selector literals. Its compatibility boundary therefore
- * materializes the meaning of an omitted selector without changing the envelope version.
- */
-function materializeOmittedModuleSpaces(value: JsonValue, omittedSpace: 'emitter' | 'world'): void {
+/** Materialize module-version semantics without changing the versioned source object. */
+function materializeOmittedModuleSpaces(value: JsonValue, source: 'authoring' | 'legacy-v1'): void {
   if (Array.isArray(value)) {
-    for (const item of value) materializeOmittedModuleSpaces(item, omittedSpace);
+    for (const item of value) materializeOmittedModuleSpaces(item, source);
     return;
   }
   if (!isRecord(value)) return;
-  if (
-    value.kind === 'module' &&
-    typeof value.type === 'string' &&
-    EMITTER_DEFAULT_SPACE_MODULES.has(value.type) &&
-    isRecord(value.config) &&
-    value.config.space === undefined
-  ) {
-    value.config.space = omittedSpace;
+  if (value.kind === 'module' && typeof value.type === 'string' && isRecord(value.config)) {
+    if (WORLD_DEFAULT_SPACE_MODULES.has(value.type)) {
+      // These selectors did not exist in module v1. Old readers ignored even an authored field,
+      // so v1 remains unconditionally world-space; module v2 owns both selector meanings.
+      if (value.version === 1 || value.config.space === undefined) value.config.space = 'world';
+    } else if (EMITTER_DEFAULT_SPACE_MODULES.has(value.type) && value.config.space === undefined) {
+      // Pre-H1 legacy documents omitted a world selector. Module v1 explicit emitter remains the
+      // accepted H1 endpoint behavior, while module v2 omission uses the current emitter default.
+      value.config.space = source === 'legacy-v1' && value.version === 1 ? 'world' : 'emitter';
+    }
   }
   for (const item of Object.values(value)) {
-    materializeOmittedModuleSpaces(item as JsonValue, omittedSpace);
+    materializeOmittedModuleSpaces(item as JsonValue, source);
   }
 }
 
@@ -591,6 +591,10 @@ class AssetValidator {
     if (this.record(value.config, `${path}.config`)) {
       if (value.type === 'core/position-sphere') {
         this.positionSphereConfig(value.config, `${path}.config`);
+      } else if (value.type === 'core/velocity-cone') {
+        this.velocityConeConfig(value.config, `${path}.config`);
+      } else if (value.type === 'core/linear-force') {
+        this.linearForceConfig(value.config, `${path}.config`);
       } else {
         this.json(value.config, `${path}.config`);
       }
@@ -627,6 +631,34 @@ class AssetValidator {
     this.numericValueInput(value.arc.thetaMax, 'scalar', `${path}.arc.thetaMax`);
     if (value.arc.axis !== undefined) {
       this.numberTuple(value.arc.axis, 3, `${path}.arc.axis`);
+    }
+  }
+
+  velocityConeConfig(value: UnknownRecord, path: string): void {
+    this.json(value, path);
+    this.unknownFields(value, new Set(['angle', 'direction', 'space', 'speed']), path);
+    this.required(value, ['angle', 'direction', 'speed'], path);
+    this.numericValueInput(value.angle, 'scalar', `${path}.angle`);
+    this.numberTuple(value.direction, 3, `${path}.direction`);
+    this.moduleSpace(value.space, `${path}.space`);
+    this.numericValueInput(value.speed, 'scalar', `${path}.speed`);
+  }
+
+  linearForceConfig(value: UnknownRecord, path: string): void {
+    this.json(value, path);
+    this.unknownFields(value, new Set(['force', 'space']), path);
+    this.required(value, ['force'], path);
+    this.numericValueInput(value.force, 'vec3', `${path}.force`);
+    this.moduleSpace(value.space, `${path}.space`);
+  }
+
+  moduleSpace(value: unknown, path: string): void {
+    if (value !== undefined && value !== 'emitter' && value !== 'world') {
+      this.error(
+        'NACHI_ASSET_VALUE_INVALID',
+        'Module space must be "emitter" or "world" when specified.',
+        path,
+      );
     }
   }
 
@@ -1530,7 +1562,7 @@ export function serializeEffect<
   const diagnostics = collectSerializableDiagnostics(definition, 'serialize');
   if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   const effect = jsonClone(definition);
-  materializeOmittedModuleSpaces(effect, 'emitter');
+  materializeOmittedModuleSpaces(effect, 'authoring');
   const document = {
     format: EFFECT_ASSET_FORMAT,
     version: EFFECT_ASSET_VERSION,
@@ -1558,7 +1590,7 @@ function migratedDocument(input: unknown, options: LoadEffectOptions): UnknownRe
   ];
   if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   const normalized = jsonClone(migrated) as UnknownRecord;
-  materializeOmittedModuleSpaces(normalized as JsonValue, 'world');
+  materializeOmittedModuleSpaces(normalized as JsonValue, 'legacy-v1');
   return normalized;
 }
 

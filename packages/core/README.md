@@ -24,6 +24,39 @@ quality and significance controls, simulation bake/replay, debug snapshots, Grid
 grids, boids, and PBD constraints. Backend capability failures are explicit diagnostics; core does
 not silently replace WebGPU behavior with CPU simulation.
 
+## Coordinate-space selectors
+
+Particle position and velocity are stored in world space. `velocityCone()` and `linearForce()`
+accept `space: 'world' | 'emitter'` and default to `world`, preserving their v1 behavior. Select
+`emitter` for a cone or thruster direction that rotates with the effect instance. `gravity()` is
+always world-space.
+
+```ts
+velocityCone({ angle: 12, direction: [0, 1, 0], space: 'emitter', speed: 4 });
+linearForce({ force: [0, 6, 0], space: 'emitter' });
+gravity([0, -9.8, 0]);
+```
+
+`vortex()`, `pointAttractor()`, and the analytic `collidePlane()`/`collideSphere()`/`collideBox()`
+selectors default to `emitter`; their explicit `world` option remains available. `killVolume()` is
+fixed emitter-local. Moving emitter-space Update consumers sample one transform at exact phase
+`0.5` between the preceding and current simulation endpoints (translation lerp plus shortest-path
+quaternion slerp). This midpoint is a one-sample temporal approximation, not CCD, so use fixed
+substeps when a thin volume must not be skipped.
+
+NeighborGrid is the intentional exception: its emitter-local `origin` and all bucket/visitor cell
+lookups use the current endpoint, while particle snapshots, velocities, and distances remain
+world-space. Grid2D/Grid3D injection coordinates are normalized grid coordinates and their velocity
+channels are measured in cells per second. The public emitter transform has no scale. See
+[RFC 004](../../docs/rfc/004-module-spaces.md) for the exhaustive built-in table, unit rules, and
+API-addition checklist.
+
+The eight H2-6 helpers (`velocityCone`, `linearForce`, `vortex`, `pointAttractor`, the three analytic
+colliders, and `killVolume`) emit module version 2. Module v1 remains executable with its old
+world/current-endpoint meaning, and format round trips never upgrade it implicitly. An older core
+without the v2 registrations rejects `type@2` with `NACHI_MODULE_UNKNOWN` instead of silently
+misreading a selector.
+
 ## Resource preparation
 
 `await system.prepare(effect, { signal, onProgress, preparer })` compiles the current quality

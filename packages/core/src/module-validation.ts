@@ -190,6 +190,8 @@ function collectBehaviorDiagnostics(
   if (
     (type === 'core/vortex' ||
       type === 'core/point-attractor' ||
+      type === 'core/velocity-cone' ||
+      type === 'core/linear-force' ||
       type === 'core/collide-plane' ||
       type === 'core/collide-sphere' ||
       type === 'core/collide-box') &&

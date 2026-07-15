@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Nachi Module Space + Update Sampling</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">H2-6 / coordinate-space contract</p>
+        <h1>Space selectors + midpoint update sample</h1>
+        <p>Real GPU readback for rotated vectors and moving emitter-local forces and volumes.</p>
+      </header>
+      <canvas id="space-visual" width="640" height="320"></canvas>
+      <dl class="status">
+        <div><dt>Backend</dt><dd id="backend-value">initializing</dd></div>
+        <div><dt>Contract</dt><dd id="status-value">running</dd></div>
+        <div><dt>Cases</dt><dd id="case-value">pending</dd></div>
+      </dl>
+    </main>
+    <script type="module" src="/src/m12-space.ts"></script>
+  </body>
+</html>

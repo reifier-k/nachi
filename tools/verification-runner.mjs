@@ -14,6 +14,7 @@ const suites = [
       'm8-vat',
       'm7-ribbons',
       'm12-neighbors',
+      'm12-space',
     ],
   },
   {

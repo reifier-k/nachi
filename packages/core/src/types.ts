@@ -365,7 +365,10 @@ export interface PositionSphereOptions {
 
 export interface VelocityConeOptions {
   readonly angle: ValueInput<number>;
+  /** Direction in the selected coordinate space. */
   readonly direction: Vec3;
+  /** Coordinate space for direction. Defaults to world for v1 compatibility. */
+  readonly space?: 'emitter' | 'world';
   readonly speed: ValueInput<number>;
 }
 
@@ -397,7 +400,10 @@ export interface PointAttractorOptions {
 }
 
 export interface LinearForceOptions {
+  /** Acceleration vector in the selected coordinate space. */
   readonly force: ValueInput<Vec3>;
+  /** Coordinate space for force. Defaults to world for v1 compatibility. */
+  readonly space?: 'emitter' | 'world';
 }
 
 export interface TurbulenceOptions {

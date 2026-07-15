@@ -3527,8 +3527,11 @@ describe('VFXSystem runtime scheduler', () => {
     const system = new VFXSystem(new FakeRuntimeRenderer());
     const instance = system.spawn(runtimeEffect({ duration: 1 }));
     instance.setTransform([3, 4, 5]);
-    const matrix = instance.getEmitter('particles')?.kernels.uniforms['Emitter.transform']?.value;
+    const uniforms = instance.getEmitter('particles')!.kernels.uniforms;
+    const matrix = uniforms['Emitter.transform']?.value;
     expect(matrix).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1]);
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(matrix);
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
   });
 
   it('snapshots the last simulated transform and disables interpolation on a stationary step', async () => {
@@ -3585,6 +3588,59 @@ describe('VFXSystem runtime scheduler', () => {
     ]);
   });
 
+  it('commits transform history across fixed substeps without leaving a stale endpoint', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      fixedTimeStep: { maxSubSteps: 4, stepSeconds: 0.1 },
+    });
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const uniforms = instance.getEmitter('particles')!.kernels.uniforms;
+    await system.update(0);
+    instance.setTransform([4, 0, 0]);
+    await system.update(0.2);
+    const moved = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 0, 0, 1];
+    expect(uniforms['Emitter.transform']?.value).toEqual(moved);
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(moved);
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
+  });
+
+  it('discards transform history consumed while hit stop suppresses simulation', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(runtimeEffect({ duration: 2 }));
+    const emitter = instance.getEmitter('particles')!;
+    const uniforms = emitter.kernels.uniforms;
+    renderer.trackUpdateRandomStep('particles', emitter);
+    await system.update(0);
+    instance.applyHitStop(100, 0);
+    instance.setTransform([6, 0, 0]);
+    await system.update(0.1);
+    expect(renderer.updateRandomStepSubmissions).toEqual([]);
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(1);
+
+    await system.update(0.1);
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(
+      uniforms['Emitter.transform']?.value,
+    );
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
+    expect(renderer.updateRandomStepSubmissions).toEqual([{ emitter: 'particles', step: 0 }]);
+  });
+
+  it('keeps prewarm on the direct-current transform branch', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      prewarmStepSeconds: 0.1,
+    });
+    const instance = system.spawn(runtimeEffect({ duration: 1, prewarm: 0.3 }), {
+      position: [5, -2, 1],
+      rotation: [0, 0, Math.PI / 4],
+    });
+    const uniforms = instance.getEmitter('particles')!.kernels.uniforms;
+    await system.update(0);
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(
+      uniforms['Emitter.transform']?.value,
+    );
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
+  });
+
   it('composes each emitter offset after the instance transform for scattered bursts', () => {
     const emitter = (offset: readonly [number, number, number]) =>
       defineEmitter({
@@ -3628,9 +3684,14 @@ describe('VFXSystem runtime scheduler', () => {
       getWorldTransform: () => ({ position: [2, 3, 4] as const }),
     };
     instance.attachTo(source);
-    expect(instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value).toEqual([
+    const uniforms = instance.getEmitter('particles')!.kernels.uniforms;
+    expect(uniforms['Emitter.transform']?.value).toEqual([
       1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1,
     ]);
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(
+      uniforms['Emitter.transform']?.value,
+    );
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
   });
 
   it('refreshes attached transforms before every system update', async () => {
@@ -3877,7 +3938,18 @@ describe('VFXSystem runtime scheduler', () => {
 
     await system.update(0);
     expect(renderer.updateRandomStepSubmissions).toEqual([]);
+    instance.setTransform([3, 0, 0]);
     await system.update(0.1);
+    expect(
+      (target.kernels.uniforms['Emitter.previousTransform']!.value as readonly number[]).slice(
+        12,
+        15,
+      ),
+    ).toEqual([0, 0, 0]);
+    expect(
+      (target.kernels.uniforms['Emitter.transform']!.value as readonly number[]).slice(12, 15),
+    ).toEqual([3, 0, 0]);
+    expect(target.kernels.uniforms['Emitter.interpolationActive']?.value).toBe(1);
     await system.update(0.1);
 
     expect(target.kernels.eventInputs).toHaveLength(1);
@@ -3886,6 +3958,13 @@ describe('VFXSystem runtime scheduler', () => {
       { emitter: 'event-target', step: 1 },
     ]);
     expect(target.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(1);
+    expect(
+      (target.kernels.uniforms['Emitter.previousTransform']!.value as readonly number[]).slice(
+        12,
+        15,
+      ),
+    ).toEqual([3, 0, 0]);
+    expect(target.kernels.uniforms['Emitter.interpolationActive']?.value).toBe(0);
   });
 
   it('notifies death callbacks with low-frequency aggregate readback counts', async () => {
@@ -4209,6 +4288,16 @@ describe('M11 VFXSystem scalability scheduling', () => {
     expect(emitter.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(0);
     expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0]);
     expect(renderer.submissions).toHaveLength(submissions);
+    expect(
+      (emitter.kernels.uniforms['Emitter.previousTransform']!.value as readonly number[]).slice(
+        12,
+        15,
+      ),
+    ).toEqual([0, 0, 5]);
+    expect(
+      (emitter.kernels.uniforms['Emitter.transform']!.value as readonly number[]).slice(12, 15),
+    ).toEqual([0, 0, 7]);
+    expect(emitter.kernels.uniforms['Emitter.interpolationActive']?.value).toBe(1);
     instance.setTransform([0, 0, 1]);
     await system.update(0.1);
     expect(instance.scalability.action).toBe('full');
@@ -4217,6 +4306,16 @@ describe('M11 VFXSystem scalability scheduling', () => {
     expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
     expect(instance.getEmitter('particles')?.lifecycleState).toBe('active');
     expect(instance.state).toBe('active');
+    expect(
+      (emitter.kernels.uniforms['Emitter.previousTransform']!.value as readonly number[]).slice(
+        12,
+        15,
+      ),
+    ).toEqual([0, 0, 7]);
+    expect(
+      (emitter.kernels.uniforms['Emitter.transform']!.value as readonly number[]).slice(12, 15),
+    ).toEqual([0, 0, 1]);
+    expect(emitter.kernels.uniforms['Emitter.interpolationActive']?.value).toBe(1);
   });
 
   it('admits a duration-omitted continuous emitter after the significance slot is freed', async () => {

@@ -73,6 +73,7 @@ import type {
   SdfRef,
   VelocityMeshNormalOptions,
   KillVolumeOptions,
+  LinearForceOptions,
   NeighborGridDefinition,
   BoidsOptions,
   PbdDistanceConstraintOptions,
@@ -937,6 +938,7 @@ const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.spawnGeneration',
   'Emitter.spawnInterpolatedTransform',
   'Emitter.transform',
+  'Emitter.updateInterpolatedTransform',
   'Emitter.updateRandomStep',
 ]);
 const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
@@ -1277,6 +1279,37 @@ function withNeighborGridTransformRead<Stage extends ModuleDefinition['stage']>(
   });
 }
 
+const UPDATE_INTERPOLATED_TRANSFORM_MODULES = new Set([
+  'core/collide-box',
+  'core/collide-plane',
+  'core/collide-sphere',
+  'core/kill-volume',
+  'core/linear-force',
+  'core/point-attractor',
+  'core/vortex',
+]);
+
+function withUpdateInterpolatedTransformRead<Stage extends ModuleDefinition['stage']>(
+  module: ModuleDefinition<Stage, object>,
+): ModuleDefinition<Stage, object> {
+  if (module.version < 2) return module;
+  const path =
+    module.type === 'core/velocity-cone'
+      ? ('Emitter.spawnInterpolatedTransform' as const)
+      : UPDATE_INTERPOLATED_TRANSFORM_MODULES.has(module.type)
+        ? ('Emitter.updateInterpolatedTransform' as const)
+        : undefined;
+  if (path === undefined) return module;
+  const access = module.access ?? { reads: [], writes: [] };
+  if (access.reads.includes(path)) return module;
+  // H2-6 v2 documents may retain a pre-normalized access manifest. The compiler supplements the
+  // relevant virtual interpolated-transform dependency without mutating the loaded round-trip.
+  return withAccess(module, {
+    ...access,
+    reads: [...access.reads, path],
+  });
+}
+
 function defaultsModule(schema: ResolvedAttributeSchema): InitModule {
   const config = {
     attributes: schema.attributes
@@ -1329,10 +1362,14 @@ function normalizeModules(
               `${path}.factory`,
             ),
           );
-        return withDerivedConfigReads(withNeighborGridTransformRead(module));
+        return withDerivedConfigReads(
+          withUpdateInterpolatedTransformRead(withNeighborGridTransformRead(module)),
+        );
       }
       if (module.type !== 'core/tsl-module') {
-        return withDerivedConfigReads(withNeighborGridTransformRead(module));
+        return withDerivedConfigReads(
+          withUpdateInterpolatedTransformRead(withNeighborGridTransformRead(module)),
+        );
       }
       const path = `${stage}[${index}]`;
       const trace = traceTslModule(module as TslModuleDefinition, path, options);
@@ -3188,18 +3225,14 @@ function createBuildKernels(
         adapter.vec4(position.x, position.y, position.z, 1),
       );
     };
-    const spawnInterpolatedTransform = (spawnIndex?: KernelNode): KernelUniformNode => {
-      const currentTransform = uniformNode('Emitter.transform');
-      // Event spawning and the all-slots compatibility Init kernel have no rate/distance phase.
-      // They intentionally retain the exact current-transform path.
-      if (spawnIndex === undefined) return currentTransform;
+    const interpolatedEmitterTransform = (
+      phase: KernelNode,
+      currentTransform = uniformNode('Emitter.transform'),
+    ): KernelUniformNode => {
       const transform = mutable(currentTransform);
       adapter.branch(
         adapter.uint(uniformNode('Emitter.interpolationActive')).equal(adapter.uint(1)),
         () => {
-          const phase = uniformNode('Emitter.spawnPhaseStart')
-            .add(spawnIndex.toFloat().mul(uniformNode('Emitter.spawnPhaseStep')))
-            .clamp(0, 1);
           const previousTransform = uniformNode('Emitter.previousTransform');
           const origin = adapter.vec4(0, 0, 0, 1);
           const previousPosition = previousTransform.mul(origin).xyz;
@@ -3216,6 +3249,21 @@ function createBuildKernels(
         },
       );
       return transform as KernelUniformNode;
+    };
+    const spawnInterpolatedTransform = (spawnIndex?: KernelNode): KernelUniformNode => {
+      const currentTransform = uniformNode('Emitter.transform');
+      // Event spawning and the all-slots compatibility Init kernel have no rate/distance phase.
+      // They intentionally retain the exact current-transform path.
+      if (spawnIndex === undefined) return currentTransform;
+      const phase = uniformNode('Emitter.spawnPhaseStart')
+        .add(spawnIndex.toFloat().mul(uniformNode('Emitter.spawnPhaseStep')))
+        .clamp(0, 1);
+      return interpolatedEmitterTransform(phase, currentTransform);
+    };
+    let updateInterpolatedTransformNode: KernelUniformNode | undefined;
+    const updateInterpolatedTransform = (): KernelUniformNode => {
+      updateInterpolatedTransformNode ??= interpolatedEmitterTransform(constant(0.5, 'f32'));
+      return updateInterpolatedTransformNode;
     };
     const randomNode = (
       module: CompiledKernelModule,
@@ -3355,7 +3403,9 @@ function createBuildKernels(
       uniform: (path) =>
         path === 'Emitter.spawnInterpolatedTransform'
           ? spawnInterpolatedTransform(spawnIndex)
-          : uniformNode(path),
+          : path === 'Emitter.updateInterpolatedTransform'
+            ? updateInterpolatedTransform()
+            : uniformNode(path),
       value: (input, type, sampleOffset = 0) =>
         buildValue(input, type, module, particleIndex, sampleOffset),
       write: (name, value) => {
@@ -4840,13 +4890,21 @@ function normalized3(
 function collisionFrame(
   context: KernelModuleBuildContext,
   space: 'emitter' | 'world' | undefined,
-): { readonly position: KernelNode; readonly velocity: KernelNode } {
+): {
+  readonly position: KernelNode;
+  readonly transform?: KernelNode;
+  readonly velocity: KernelNode;
+} {
   const position = context.attribute('position');
   const velocity = context.attribute('velocity');
   if ((space ?? 'emitter') === 'world') return { position, velocity };
-  const inverseTransform = context.adapter.inverse(context.uniform('Emitter.transform'));
+  const transform = context.uniform(
+    context.module.version >= 2 ? 'Emitter.updateInterpolatedTransform' : 'Emitter.transform',
+  );
+  const inverseTransform = context.adapter.inverse(transform);
   return {
     position: inverseTransform.mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz,
+    transform,
     velocity: inverseTransform.mul(context.adapter.vec4(velocity.x, velocity.y, velocity.z, 0)).xyz,
   };
 }
@@ -4858,10 +4916,14 @@ function writeCollisionResponse(
   correctedPosition: KernelNode,
   normal: KernelNode,
   velocity: KernelNode,
+  emitterTransform?: KernelNode,
 ): void {
   context.adapter.branch(collided, () => {
     const space = config.space ?? 'emitter';
-    const transform = space === 'emitter' ? context.uniform('Emitter.transform') : undefined;
+    const transform = space === 'emitter' ? emitterTransform : undefined;
+    if (space === 'emitter' && transform === undefined) {
+      throw new Error('Emitter-space collision response is missing its sampled update transform.');
+    }
     const worldPosition =
       space === 'emitter'
         ? transform!.mul(
@@ -5061,15 +5123,17 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.seed', 'Particles.spawnOrder'],
+      reads: ['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnOrder'],
       writes: ['Particles.velocity'],
     },
     build(context) {
       const config = context.module.config as {
         angle: ValueInput<number>;
         direction: Vec3;
+        space?: 'emitter' | 'world';
         speed: ValueInput<number>;
       };
+      const space = context.module.version >= 2 ? (config.space ?? 'world') : 'world';
       const basis = normalizedBasis(config.direction);
       const angle = context.value(config.angle, 'f32', 1).mul(Math.PI / 180);
       const cosLimit = context.adapter.cos(angle);
@@ -5090,14 +5154,20 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
           .add(cosTheta.mul(basis.up[axis]))
           .add(radialZ.mul(basis.forward[axis]));
       const speed = context.value(config.speed, 'f32', 4);
-      context.write(
-        'velocity',
-        context.adapter.vec3(component(0), component(1), component(2)).mul(speed),
-      );
+      const sampledDirection = context.adapter.vec3(component(0), component(1), component(2));
+      const direction =
+        space === 'emitter'
+          ? context
+              .uniform('Emitter.spawnInterpolatedTransform')
+              .mul(
+                context.adapter.vec4(sampledDirection.x, sampledDirection.y, sampledDirection.z, 0),
+              ).xyz
+          : sampledDirection;
+      context.write('velocity', direction.mul(speed));
     },
     stage: 'init',
     type: 'core/velocity-cone',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
@@ -5220,7 +5290,12 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      reads: [
+        'Emitter.deltaTime',
+        'Emitter.updateInterpolatedTransform',
+        'Particles.position',
+        'Particles.velocity',
+      ],
       writes: ['Particles.velocity'],
     },
     build(context) {
@@ -5229,11 +5304,18 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const basis = normalizedBasis(config.axis);
       const center = context.value(config.center ?? [0, 0, 0], 'vec3', 1);
       const position = context.attribute('position');
-      const transform = context.uniform('Emitter.transform');
+      const transform =
+        space === 'emitter'
+          ? context.uniform(
+              context.module.version >= 2
+                ? 'Emitter.updateInterpolatedTransform'
+                : 'Emitter.transform',
+            )
+          : undefined;
       const samplePosition =
         space === 'emitter'
           ? context.adapter
-              .inverse(transform)
+              .inverse(transform!)
               .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz
           : position;
       const offset = context.adapter.vec3(
@@ -5270,7 +5352,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const localAcceleration = tangential.sub(inward);
       const acceleration =
         space === 'emitter'
-          ? transform.mul(
+          ? transform!.mul(
               context.adapter.vec4(
                 localAcceleration.x,
                 localAcceleration.y,
@@ -5286,11 +5368,16 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/vortex',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
-      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      reads: [
+        'Emitter.deltaTime',
+        'Emitter.updateInterpolatedTransform',
+        'Particles.position',
+        'Particles.velocity',
+      ],
       writes: ['Particles.velocity'],
     },
     build(context) {
@@ -5298,11 +5385,18 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const space = config.space ?? 'emitter';
       const target = context.value(config.position, 'vec3', 1);
       const position = context.attribute('position');
-      const transform = context.uniform('Emitter.transform');
+      const transform =
+        space === 'emitter'
+          ? context.uniform(
+              context.module.version >= 2
+                ? 'Emitter.updateInterpolatedTransform'
+                : 'Emitter.transform',
+            )
+          : undefined;
       const samplePosition =
         space === 'emitter'
           ? context.adapter
-              .inverse(transform)
+              .inverse(transform!)
               .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz
           : position;
       const outward = context.adapter.vec3(
@@ -5322,7 +5416,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
       const localAcceleration = outward.div(distance).mul(magnitude).mul(-1);
       const acceleration =
         space === 'emitter'
-          ? transform.mul(
+          ? transform!.mul(
               context.adapter.vec4(
                 localAcceleration.x,
                 localAcceleration.y,
@@ -5342,19 +5436,23 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/point-attractor',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
-      reads: ['Emitter.deltaTime', 'Particles.velocity'],
+      reads: ['Emitter.deltaTime', 'Emitter.updateInterpolatedTransform', 'Particles.velocity'],
       writes: ['Particles.velocity'],
     },
     build(context) {
-      const force = context.value(
-        (context.module.config as { force: ValueInput<Vec3> }).force,
-        'vec3',
-        1,
-      );
+      const config = context.module.config as LinearForceOptions;
+      const space = context.module.version >= 2 ? (config.space ?? 'world') : 'world';
+      const sampledForce = context.value(config.force, 'vec3', 1);
+      const force =
+        space === 'emitter'
+          ? context
+              .uniform('Emitter.updateInterpolatedTransform')
+              .mul(context.adapter.vec4(sampledForce.x, sampledForce.y, sampledForce.z, 0)).xyz
+          : sampledForce;
       context.write(
         'velocity',
         context.attribute('velocity').add(force.mul(context.uniform('Emitter.deltaTime'))),
@@ -5362,7 +5460,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/linear-force',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
@@ -5451,7 +5549,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      reads: ['Emitter.updateInterpolatedTransform', 'Particles.position', 'Particles.velocity'],
       writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
     },
     build(context) {
@@ -5469,15 +5567,16 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         frame.position.sub(normal.mul(signedDistance)),
         normal,
         frame.velocity,
+        frame.transform,
       );
     },
     stage: 'update',
     type: 'core/collide-plane',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
-      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      reads: ['Emitter.updateInterpolatedTransform', 'Particles.position', 'Particles.velocity'],
       writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
     },
     build(context) {
@@ -5499,15 +5598,16 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         center.add(normal.mul(radius)),
         normal,
         frame.velocity,
+        frame.transform,
       );
     },
     stage: 'update',
     type: 'core/collide-sphere',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
-      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      reads: ['Emitter.updateInterpolatedTransform', 'Particles.position', 'Particles.velocity'],
       writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
     },
     build(context) {
@@ -5554,11 +5654,12 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         frame.position.add(normal.mul(penetration)),
         normal,
         frame.velocity,
+        frame.transform,
       );
     },
     stage: 'update',
     type: 'core/collide-box',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
@@ -5849,14 +5950,20 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.transform', 'Particles.position'],
+      reads: ['Emitter.updateInterpolatedTransform', 'Particles.position'],
       writes: ['Particles.alive'],
     },
     build(context) {
       const config = context.module.config as KillVolumeOptions;
       const position = context.attribute('position');
       const local = context.adapter
-        .inverse(context.uniform('Emitter.transform'))
+        .inverse(
+          context.uniform(
+            context.module.version >= 2
+              ? 'Emitter.updateInterpolatedTransform'
+              : 'Emitter.transform',
+          ),
+        )
         .mul(context.adapter.vec4(position.x, position.y, position.z, 1)).xyz;
       let inside: KernelNode;
       if (config.shape === 'sphere') {
@@ -5899,7 +6006,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'update',
     type: 'core/kill-volume',
-    version: 1,
+    version: 2,
   });
   registry.register({
     access: {
@@ -5968,6 +6075,48 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     type: 'core/integrate',
     version: 1,
   });
+
+  const legacyH26Access: Readonly<Record<string, ModuleAccess>> = {
+    'core/collide-box': {
+      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    'core/collide-plane': {
+      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    'core/collide-sphere': {
+      reads: ['Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.alive', 'Particles.position', 'Particles.velocity'],
+    },
+    'core/kill-volume': {
+      reads: ['Emitter.transform', 'Particles.position'],
+      writes: ['Particles.alive'],
+    },
+    'core/linear-force': {
+      reads: ['Emitter.deltaTime', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    'core/point-attractor': {
+      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+    'core/velocity-cone': {
+      reads: ['Emitter.seed', 'Particles.spawnOrder'],
+      writes: ['Particles.velocity'],
+    },
+    'core/vortex': {
+      reads: ['Emitter.deltaTime', 'Emitter.transform', 'Particles.position', 'Particles.velocity'],
+      writes: ['Particles.velocity'],
+    },
+  };
+  for (const [type, access] of Object.entries(legacyH26Access)) {
+    const current = registry.resolve(type, 2);
+    if (current === undefined || current.stage === 'spawn') {
+      throw new Error(`Missing H2-6 module implementation ${type}@2.`);
+    }
+    registry.register({ ...current, access, version: 1 });
+  }
   return registry;
 }
 
@@ -6010,6 +6159,12 @@ export function coreModuleImplementationAccess(): Readonly<Record<string, Module
       'core/pbd-distance-constraint',
       'core/neighbor-grid-tsl',
       'core/integrate',
-    ].map((type) => [type, registry.resolve(type, 1)?.access]),
+    ].map((type) => [
+      type,
+      registry.resolve(
+        type,
+        UPDATE_INTERPOLATED_TRANSFORM_MODULES.has(type) || type === 'core/velocity-cone' ? 2 : 1,
+      )?.access,
+    ]),
   ) as Readonly<Record<string, ModuleAccess>>;
 }

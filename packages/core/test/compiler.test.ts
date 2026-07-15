@@ -71,6 +71,21 @@ import {
 } from '../src/index.js';
 import { resolveTslBindingInputType } from '../src/attributes.js';
 
+const H2_6_VERSIONED_MODULE_TYPES = new Set([
+  'core/collide-box',
+  'core/collide-plane',
+  'core/collide-sphere',
+  'core/kill-volume',
+  'core/linear-force',
+  'core/point-attractor',
+  'core/velocity-cone',
+  'core/vortex',
+]);
+
+function currentCoreModuleVersion(type: string): number {
+  return H2_6_VERSIONED_MODULE_TYPES.has(type) ? 2 : 1;
+}
+
 function applyBitonicReference(
   values: readonly { depth: number; index: number }[],
 ): readonly { depth: number; index: number }[] {
@@ -709,8 +724,9 @@ function traceCoreImplementation(
   type: string,
   config: object,
   lutId?: string,
+  version = currentCoreModuleVersion(type),
 ): { reads: string[]; writes: string[] } {
-  const implementation = createCoreKernelModuleRegistry().resolve(type, 1);
+  const implementation = createCoreKernelModuleRegistry().resolve(type, version);
   if (!implementation || implementation.stage === 'spawn') {
     throw new Error(`Missing core implementation ${type}.`);
   }
@@ -725,7 +741,7 @@ function traceCoreImplementation(
     stage: implementation.stage,
     stageIndex: 0,
     type,
-    version: 1,
+    version,
   };
   const node = (path: string) => new AccessTraceNode(trace, path);
   const context: KernelModuleBuildContext = {
@@ -1109,7 +1125,7 @@ describe('emitter kernel compiler', () => {
     );
     expect(
       program.kernels.init.modules.find(({ type }) => type === 'core/velocity-cone')?.access.reads,
-    ).toEqual(['Emitter.seed', 'Particles.spawnOrder']);
+    ).toEqual(['Emitter.seed', 'Emitter.spawnInterpolatedTransform', 'Particles.spawnOrder']);
   });
 
   it('derives spawn-order and dispatch-step reads for Update range generators', () => {
@@ -3498,7 +3514,7 @@ describe('emitter kernel compiler', () => {
           mode: 'surface',
         },
       ],
-      ['core/velocity-cone', { angle: 30, direction: [0, 1, 0], speed: 2 }],
+      ['core/velocity-cone', { angle: 30, direction: [0, 1, 0], space: 'emitter', speed: 2 }],
       ['core/velocity-mesh-normal', { speed: 2 }],
       ['core/lifetime', { value: 2 }],
       ['core/gravity', { value: -9.8 }],
@@ -3506,7 +3522,7 @@ describe('emitter kernel compiler', () => {
       ['core/curl-noise', { frequency: 1, strength: 0.2 }],
       ['core/vortex', { axis: [0, 1, 0], center: [0, 0, 0], strength: 1 }],
       ['core/point-attractor', { falloff: 2, position: [0, 0, 0], strength: 1 }],
-      ['core/linear-force', { force: [1, 2, 3] }],
+      ['core/linear-force', { force: [1, 2, 3], space: 'emitter' }],
       ['core/turbulence', { frequency: 1, octaves: 3, strength: 0.2 }],
       [
         'core/vector-field',
@@ -3547,7 +3563,7 @@ describe('emitter kernel compiler', () => {
     const registry = createCoreKernelModuleRegistry();
 
     for (const [type, config, lutId] of cases) {
-      const access = registry.resolve(type, 1)?.access;
+      const access = registry.resolve(type, currentCoreModuleVersion(type))?.access;
       expect(traceCoreImplementation(type, config, lutId), type).toEqual({
         reads: [...(access?.reads ?? [])].sort(),
         writes: [...(access?.writes ?? [])].sort(),
@@ -3592,7 +3608,12 @@ describe('emitter kernel compiler', () => {
       'Particles.alive',
     ],
   ] as const)('declares the %s authoring manifest', (module, type, write) => {
-    expect(module).toMatchObject({ kind: 'module', stage: 'update', type, version: 1 });
+    expect(module).toMatchObject({
+      kind: 'module',
+      stage: 'update',
+      type,
+      version: currentCoreModuleVersion(type),
+    });
     expect(module.access?.writes).toContain(write);
   });
 
@@ -3827,6 +3848,157 @@ describe('emitter kernel compiler', () => {
     collideBox({ center: [0, 0, 0], mode: 'bounce', size: [1, 1, 1] }),
   ])('materializes the emitter-space authoring default in $type config', (module) => {
     expect(module.config).toMatchObject({ space: 'emitter' });
+  });
+
+  it.each([
+    velocityCone({ angle: 0, direction: [1, 0, 0], speed: 1 }),
+    linearForce({ force: [1, 0, 0] }),
+  ])('materializes the v1-compatible world-space default in $type config', (module) => {
+    expect(module.config).toMatchObject({ space: 'world' });
+  });
+
+  it('declares compiler-provided interpolated transform inputs for new selectors', () => {
+    expect(
+      velocityCone({ angle: 0, direction: [1, 0, 0], space: 'emitter', speed: 1 }).access?.reads,
+    ).toContain('Emitter.spawnInterpolatedTransform');
+    expect(linearForce({ force: [1, 0, 0], space: 'emitter' }).access?.reads).toContain(
+      'Emitter.updateInterpolatedTransform',
+    );
+  });
+
+  it('classifies update transform consumers as midpoint-sampled except NeighborGrid', () => {
+    const midpointConsumers = [
+      linearForce({ force: [1, 0, 0], space: 'emitter' }),
+      vortex({ axis: [0, 1, 0], space: 'emitter', strength: 1 }),
+      pointAttractor({ position: [0, 0, 0], space: 'emitter', strength: 1 }),
+      collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0, space: 'emitter' }),
+      collideSphere({ center: [0, 0, 0], mode: 'bounce', radius: 1, space: 'emitter' }),
+      collideBox({ center: [0, 0, 0], mode: 'bounce', size: [1, 1, 1], space: 'emitter' }),
+      killVolume({ mode: 'inside', radius: 1, shape: 'sphere' }),
+    ];
+    for (const module of midpointConsumers) {
+      expect(module.access?.reads).toContain('Emitter.updateInterpolatedTransform');
+    }
+
+    expect(boids({ grid: 'neighbors' }).access?.reads).toContain('Emitter.transform');
+    expect(boids({ grid: 'neighbors' }).access?.reads).not.toContain(
+      'Emitter.updateInterpolatedTransform',
+    );
+  });
+
+  it('separates legacy endpoint semantics from H2-6 module version 2', () => {
+    const registry = createCoreKernelModuleRegistry();
+    const cases = [
+      [
+        'core/vortex',
+        { axis: [0, 1, 0], space: 'emitter', strength: 1 },
+        'Emitter.updateInterpolatedTransform',
+      ],
+      [
+        'core/point-attractor',
+        { position: [0, 0, 0], space: 'emitter', strength: 1 },
+        'Emitter.updateInterpolatedTransform',
+      ],
+      [
+        'core/collide-plane',
+        { mode: 'bounce', normal: [0, 1, 0], offset: 0, space: 'emitter' },
+        'Emitter.updateInterpolatedTransform',
+      ],
+      [
+        'core/collide-sphere',
+        { center: [0, 0, 0], mode: 'bounce', radius: 1, space: 'emitter' },
+        'Emitter.updateInterpolatedTransform',
+      ],
+      [
+        'core/collide-box',
+        { center: [0, 0, 0], mode: 'bounce', size: [1, 1, 1], space: 'emitter' },
+        'Emitter.updateInterpolatedTransform',
+      ],
+      [
+        'core/kill-volume',
+        { mode: 'inside', radius: 1, shape: 'sphere' },
+        'Emitter.updateInterpolatedTransform',
+      ],
+    ] as const;
+
+    for (const [type, config, currentPath] of cases) {
+      expect(registry.resolve(type, 1)?.access.reads, `${type}@1`).toContain('Emitter.transform');
+      expect(registry.resolve(type, 1)?.access.reads, `${type}@1`).not.toContain(currentPath);
+      expect(registry.resolve(type, 2)?.access.reads, `${type}@2`).toContain(currentPath);
+      expect(
+        traceCoreImplementation(type, config, undefined, 1).reads,
+        `${type}@1 trace`,
+      ).toContain('Emitter.transform');
+      expect(
+        traceCoreImplementation(type, config, undefined, 2).reads,
+        `${type}@2 trace`,
+      ).toContain(currentPath);
+    }
+
+    expect(
+      traceCoreImplementation(
+        'core/velocity-cone',
+        { angle: 0, direction: [1, 0, 0], space: 'emitter', speed: 1 },
+        undefined,
+        1,
+      ).reads,
+    ).not.toContain('Emitter.spawnInterpolatedTransform');
+    expect(
+      traceCoreImplementation(
+        'core/velocity-cone',
+        { angle: 0, direction: [1, 0, 0], space: 'emitter', speed: 1 },
+        undefined,
+        2,
+      ).reads,
+    ).toContain('Emitter.spawnInterpolatedTransform');
+    expect(
+      traceCoreImplementation(
+        'core/linear-force',
+        { force: [1, 0, 0], space: 'emitter' },
+        undefined,
+        1,
+      ).reads,
+    ).not.toContain('Emitter.updateInterpolatedTransform');
+    expect(
+      traceCoreImplementation(
+        'core/linear-force',
+        { force: [1, 0, 0], space: 'emitter' },
+        undefined,
+        2,
+      ).reads,
+    ).toContain('Emitter.updateInterpolatedTransform');
+  });
+
+  it('makes an H2-6 module version 2 fail safely in a version-1-only registry', () => {
+    const current = createCoreKernelModuleRegistry();
+    const legacy = new KernelModuleRegistry();
+    for (const type of ['core/burst', 'core/defaults', 'core/age', 'core/velocity-cone']) {
+      const implementation = current.resolve(type, 1);
+      if (implementation === undefined) throw new Error(`Missing ${type}@1 test implementation.`);
+      legacy.register(implementation);
+    }
+    const program = compileEmitter(
+      baseEmitter({
+        init: [
+          velocityCone({
+            angle: 0,
+            direction: [1, 0, 0],
+            space: 'emitter',
+            speed: 1,
+          }),
+        ],
+        integration: 'none',
+      }),
+      { registry: legacy },
+    );
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_MODULE_UNKNOWN',
+        message: expect.stringContaining('core/velocity-cone@2'),
+        path: 'init[0]',
+      }),
+    );
   });
 
   it('preserves the explicit world-space collider selector', () => {
@@ -4067,6 +4239,23 @@ describe('emitter kernel compiler', () => {
       }),
     );
     expect(() => program.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
+
+    for (const factory of [
+      () =>
+        velocityCone({
+          angle: 0,
+          direction: [1, 0, 0],
+          space: 'camera' as never,
+          speed: 1,
+        }),
+      () => linearForce({ force: [1, 0, 0], space: 'camera' as never }),
+    ]) {
+      expect(factory).toThrowError(
+        expect.objectContaining({
+          diagnostics: [expect.objectContaining({ code: 'NACHI_MODULE_SPACE_INVALID' })],
+        }),
+      );
+    }
   });
 
   it('encodes positive attraction and negative repulsion without changing the manifest', () => {
@@ -4089,7 +4278,7 @@ describe('emitter kernel compiler', () => {
   it('serializes emitter-space point attractors and declares transform access', () => {
     const module = pointAttractor({ position: [0, 0, 0], space: 'emitter', strength: 1 });
     expect(module.config).toMatchObject({ space: 'emitter' });
-    expect(module.access?.reads).toContain('Emitter.transform');
+    expect(module.access?.reads).toContain('Emitter.updateInterpolatedTransform');
   });
 
   it('uses the measured simplex amplitude correction constant', () => {
