@@ -651,9 +651,11 @@ function traceCoreImplementation(
     emitEvent: () => undefined,
     random: () => {
       trace.reads.add('Emitter.seed');
-      trace.reads.add(
-        implementation.stage === 'init' ? 'Particles.spawnOrder' : 'Particles.spawnGeneration',
-      );
+      if (implementation.stage === 'init') trace.reads.add('Particles.spawnOrder');
+      else if (implementation.stage === 'update') {
+        trace.reads.add('Particles.spawnOrder');
+        trace.reads.add('Emitter.updateRandomStep');
+      } else trace.reads.add('Particles.spawnGeneration');
       return new FakeNode();
     },
     sampleLut: (_id, coordinate) => {
@@ -950,6 +952,42 @@ describe('emitter kernel compiler', () => {
     expect(new Set(numericBitXors).size).toBe(3);
   });
 
+  it('keeps all-slots, free-list, and event-spawn Init random streams bit-identical', () => {
+    const target = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        init: [lifetime(range(0.1, 0.2))],
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 0 }),
+      }),
+    );
+    const source = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        events: { onDeath: emitTo('target') },
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    const adapter = fakeAdapter();
+    const queue = source.events[0]!;
+    const resources = allocateEventQueueResources(adapter, queue, 'source');
+    const handler = queue.handlers[0]!;
+    const numericBitXors: number[] = [];
+    const capture = () => new CaptureBitXorNode(numericBitXors);
+
+    target.buildKernels(
+      { ...adapter, instanceIndex: capture(), uint: capture },
+      {
+        eventInputs: [{ handler, queue, resources, sourceKey: 'source' }],
+      },
+    );
+
+    expect(numericBitXors).toEqual([2_941_967_914, 2_941_967_914, 2_941_967_914]);
+  });
+
   it('assigns independent range sample offsets to every M4 force config field', () => {
     const program = compileEmitter(
       baseEmitter({
@@ -988,6 +1026,22 @@ describe('emitter kernel compiler', () => {
     expect(
       program.kernels.init.modules.find(({ type }) => type === 'core/velocity-cone')?.access.reads,
     ).toEqual(['Emitter.seed', 'Particles.spawnOrder']);
+  });
+
+  it('derives spawn-order and dispatch-step reads for Update range generators', () => {
+    const program = compileEmitter(
+      baseEmitter({ integration: 'none', update: [gravity(range(1, 2))] }),
+    );
+    expect(
+      program.kernels.update.modules.find(({ type }) => type === 'core/gravity')?.access.reads,
+    ).toEqual([
+      'Emitter.deltaTime',
+      'Particles.velocity',
+      'Emitter.seed',
+      'Particles.spawnOrder',
+      'Emitter.updateRandomStep',
+    ]);
+    expect(program.attributeSchema.byName.spawnOrder).toBeDefined();
   });
 
   it('resolves integration attributes and carries built-in defaults', () => {
@@ -2799,6 +2853,172 @@ describe('emitter kernel compiler', () => {
     );
   });
 
+  it('diagnoses external Update random implementations that omit stable-key access', () => {
+    const legacyAccess: ModuleAccess = {
+      reads: ['Emitter.seed', 'Particles.spawnGeneration'],
+      writes: ['Particles.intensity'],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access: legacyAccess,
+      build(context) {
+        context.write('intensity', context.random());
+      },
+      stage: 'update',
+      type: 'test/legacy-update-random',
+      version: 1,
+    });
+    const module: ModuleDefinition<'update', Record<string, never>> = {
+      access: legacyAccess,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/legacy-update-random',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      registry,
+    });
+
+    expect(() => program.buildKernels(fakeAdapter())).toThrowError(
+      expect.objectContaining({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({
+            code: 'NACHI_UPDATE_RANDOM_STABLE_KEY_ACCESS_REQUIRED',
+            path: 'update[0].access.reads',
+          }),
+        ]),
+      }),
+    );
+
+    const stableReads = [
+      'Emitter.seed',
+      'Particles.spawnOrder',
+      'Emitter.updateRandomStep',
+    ] as const;
+    const fixedRegistry = createCoreKernelModuleRegistry();
+    fixedRegistry.register({
+      access: { reads: [...stableReads], writes: ['Particles.intensity'] },
+      build(context) {
+        context.write('intensity', context.random());
+      },
+      stage: 'update',
+      type: 'test/stable-update-random',
+      version: 1,
+    });
+    const fixed: ModuleDefinition<'update', Record<string, never>> = {
+      ...module,
+      access: { reads: [...stableReads], writes: ['Particles.intensity'] },
+      type: 'test/stable-update-random',
+    };
+    expect(() =>
+      compileEmitter(baseEmitter({ integration: 'none', update: [fixed] }), {
+        registry: fixedRegistry,
+      }).buildKernels(fakeAdapter()),
+    ).not.toThrow();
+  });
+
+  it('checks registered Update implementation access even when the definition is stable', () => {
+    const implementationAccess: ModuleAccess = {
+      reads: ['Emitter.seed', 'Particles.spawnGeneration'],
+      writes: ['Particles.intensity'],
+    };
+    // Retaining the legacy read as an optional superset avoids the generic registry access
+    // mismatch, so this case exclusively exercises context.random()'s implementation-side gate.
+    const definitionAccess: ModuleAccess = {
+      reads: [
+        'Emitter.seed',
+        'Particles.spawnOrder',
+        'Emitter.updateRandomStep',
+        'Particles.spawnGeneration',
+      ],
+      writes: ['Particles.intensity'],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access: implementationAccess,
+      build(context) {
+        context.write('intensity', context.random());
+      },
+      stage: 'update',
+      type: 'test/implementation-legacy-update-random',
+      version: 1,
+    });
+    const module: ModuleDefinition<'update', Record<string, never>> = {
+      access: definitionAccess,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/implementation-legacy-update-random',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      registry,
+    });
+
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_MODULE_ACCESS_MISMATCH',
+    );
+    expect(() => program.buildKernels(fakeAdapter())).toThrowError(
+      expect.objectContaining({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'NACHI_UPDATE_RANDOM_STABLE_KEY_ACCESS_REQUIRED' }),
+        ]),
+      }),
+    );
+  });
+
+  it('reports registry access mismatch before Update random tracing for a legacy definition', () => {
+    const definitionAccess: ModuleAccess = {
+      reads: ['Emitter.seed', 'Particles.spawnGeneration'],
+      writes: ['Particles.intensity'],
+    };
+    const implementationAccess: ModuleAccess = {
+      reads: ['Emitter.seed', 'Particles.spawnOrder', 'Emitter.updateRandomStep'],
+      writes: ['Particles.intensity'],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access: implementationAccess,
+      build(context) {
+        context.write('intensity', context.random());
+      },
+      stage: 'update',
+      type: 'test/definition-legacy-update-random',
+      version: 1,
+    });
+    const module: ModuleDefinition<'update', Record<string, never>> = {
+      access: definitionAccess,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/definition-legacy-update-random',
+      version: 1,
+    };
+    const program = compileEmitter(baseEmitter({ integration: 'none', update: [module] }), {
+      registry,
+    });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_MODULE_ACCESS_MISMATCH',
+        path: 'update[0].access',
+      }),
+    );
+    let thrown: unknown;
+    try {
+      program.buildKernels(fakeAdapter());
+    } catch (error) {
+      thrown = error;
+    }
+    const codes =
+      thrown instanceof VfxDiagnosticError
+        ? thrown.diagnostics.map(({ code }) => code)
+        : [String(thrown)];
+    expect(codes).toContain('NACHI_MODULE_ACCESS_MISMATCH');
+    expect(codes).not.toContain('NACHI_UPDATE_RANDOM_STABLE_KEY_ACCESS_REQUIRED');
+  });
+
   it('diagnoses traced write keys that are absent from the attribute schema', () => {
     const factory = ((bindings: TslParticleBindings) => ({
       typo: bindings.position,
@@ -2836,6 +3056,7 @@ describe('emitter kernel compiler', () => {
         'Emitter.previousTransform',
         'Emitter.seed',
         'Emitter.spawnGeneration',
+        'Emitter.updateRandomStep',
         'Emitter.spawnCount',
         'Emitter.spawnInterpolatedTransform',
         'Emitter.allocation.freeCount',

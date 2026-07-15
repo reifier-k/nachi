@@ -37,6 +37,8 @@ import {
   velocityMeshNormal,
   vortex,
   createCoreKernelModuleRegistry,
+  type ModuleAccess,
+  type ModuleDefinition,
 } from '@nachi-vfx/core';
 import { applyEmitterQualityTier } from '../../core/src/scalability.js';
 import type { EffectInstanceState } from '@nachi-vfx/core';
@@ -180,6 +182,94 @@ describe('three kernel adapter', () => {
     expect(createHash('sha256').update(builder.computeShader).digest('hex')).toBe(
       '138c12265a60f2db722ec488ef11822c40f6d0f1763ddbc47c8f6ec5f93ade3d',
     );
+  });
+
+  it('pins spawn-order and dispatch-step keyed Update randomness in real WGSL', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 8,
+        init: [lifetime(0.2)],
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 8 }),
+        update: [
+          linearForce({
+            force: range([-2, -1, 0] as const, [2, 1, 0] as const),
+          }),
+        ],
+      }),
+    );
+    expect(program.attributeSchema.byName.spawnOrder).toBeDefined();
+    expect(
+      program.kernels.update.modules.find(({ type }) => type === 'core/linear-force')?.access.reads,
+    ).toEqual([
+      'Emitter.deltaTime',
+      'Particles.velocity',
+      'Emitter.seed',
+      'Particles.spawnOrder',
+      'Emitter.updateRandomStep',
+    ]);
+    const kernels = program.buildKernels(createThreeKernelAdapter({ backend: 'webgpu' }));
+    const renderer = {
+      backend: {
+        capabilities: { getUniformBufferLimit: () => 64 },
+        compatibilityMode: false,
+      },
+      contextNode: context({}),
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      hasFeature: () => false,
+    };
+    const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+      object: unknown,
+      renderer: unknown,
+    ) => { build(): void; computeShader: string };
+    const builder = new NodeBuilder(kernels.update, renderer);
+    builder.build();
+    expect(createHash('sha256').update(builder.computeShader).digest('hex')).toBe(
+      '05c9a7baec6516f8714e2cc63e65f27b50f57d9e060b4b5cdb639d6da65e70f0',
+    );
+
+    const stableAccess: ModuleAccess = {
+      reads: ['Emitter.seed', 'Particles.spawnOrder', 'Emitter.updateRandomStep'],
+      writes: ['Particles.intensity'],
+    };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access: stableAccess,
+      build(context) {
+        context.write('intensity', context.random());
+      },
+      stage: 'update',
+      type: 'test/webgl2-update-random',
+      version: 1,
+    });
+    const reducedModule: ModuleDefinition<'update', Record<string, never>> = {
+      access: stableAccess,
+      config: {},
+      kind: 'module',
+      stage: 'update',
+      type: 'test/webgl2-update-random',
+      version: 1,
+    };
+    const reducedProgram = compileEmitter(
+      defineEmitter({
+        capacity: 8,
+        integration: 'none',
+        render: billboard({}),
+        spawn: burst({ count: 8 }),
+        update: [reducedModule],
+      }),
+      { registry },
+    );
+    expect(() =>
+      reducedProgram.buildKernels(
+        createThreeKernelAdapter({
+          backend: 'webgl2',
+          maxTransformFeedbackSeparateAttribs: 8,
+        }),
+      ),
+    ).not.toThrow();
   });
 
   it('builds real WGSL for all emitter-default modules and preserves legacy explicit-world graphs', () => {

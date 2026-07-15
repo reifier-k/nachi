@@ -937,6 +937,7 @@ const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.spawnGeneration',
   'Emitter.spawnInterpolatedTransform',
   'Emitter.transform',
+  'Emitter.updateRandomStep',
 ]);
 const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
   'System.deltaTime',
@@ -953,6 +954,7 @@ const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
   'Emitter.seed',
   'Emitter.spawnGeneration',
   'Emitter.transform',
+  'Emitter.updateRandomStep',
 ]);
 
 type WriteOwnershipModule = {
@@ -1229,8 +1231,11 @@ function deriveConfigReads(config: object, stage: ModuleDefinition['stage']): Da
           ? 'Emitter.spawnGeneration'
           : stage === 'init'
             ? 'Particles.spawnOrder'
-            : 'Particles.spawnGeneration',
+            : stage === 'update'
+              ? 'Particles.spawnOrder'
+              : 'Particles.spawnGeneration',
       );
+      if (stage === 'update') reads.add('Emitter.updateRandomStep');
     } else if (kind === 'parameter' && 'path' in value && typeof value.path === 'string') {
       reads.add(value.path as DataReference);
     }
@@ -1717,6 +1722,7 @@ function uniformDescriptions(
     describe('Emitter.spawnPhaseStart', 1, 'f32'),
     describe('Emitter.spawnPhaseStep', 0, 'f32'),
     describe('Emitter.transform', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
+    describe('Emitter.updateRandomStep', 0, 'u32'),
   ];
   for (const [path, definition] of Object.entries(parameters ?? {})) {
     if (path.startsWith('User.')) {
@@ -3195,9 +3201,11 @@ function createBuildKernels(
       sampleOffset: number,
       requireImplementationAccess = false,
     ): KernelNode => {
-      // Init randomness follows deterministic birth identity, never the physical free-list slot
-      // or its allocation generation. Other stages retain the M1 physical-slot contract.
+      // Init and Update randomness follow deterministic birth identity, never the physical
+      // free-list slot or its allocation generation. Update additionally mixes the actual update
+      // dispatch ordinal so range values evolve without leaking physical allocation order.
       const initRandom = module.stage === 'init';
+      const updateRandom = module.stage === 'update';
       const implementation = requireImplementationAccess
         ? registry.resolve(module.type, module.version)
         : undefined;
@@ -3215,13 +3223,38 @@ function createBuildKernels(
           ),
         ]);
       }
+      const updateRandomReads = [
+        'Emitter.seed',
+        'Particles.spawnOrder',
+        'Emitter.updateRandomStep',
+      ] as const;
+      if (
+        updateRandom &&
+        updateRandomReads.some(
+          (read) =>
+            !module.access.reads.includes(read) ||
+            (requireImplementationAccess && !implementation?.access.reads.includes(read)),
+        )
+      ) {
+        throw new VfxDiagnosticError([
+          diagnostic(
+            'NACHI_UPDATE_RANDOM_STABLE_KEY_ACCESS_REQUIRED',
+            `Update module ${module.type} called context.random() without declaring Emitter.seed, Particles.spawnOrder, and Emitter.updateRandomStep. Add all stable Update random-key inputs to access.reads on the module definition and its registered implementation.`,
+            `${module.path}.access.reads`,
+          ),
+        ]);
+      }
       return pcgRandomFloatNode<KernelNode, KernelNode>(
-        adapter.uint(initRandom ? attributeNode('spawnOrder', particleIndex) : particleIndex),
+        adapter.uint(
+          initRandom || updateRandom ? attributeNode('spawnOrder', particleIndex) : particleIndex,
+        ),
         adapter.uint(uniformNode('Emitter.seed')),
         resolveRandomSampleSlot(module.slot, sampleOffset),
         initRandom
           ? adapter.uint(adapter.constant(0, 'u32'))
-          : adapter.uint(attributeNode('spawnGeneration', particleIndex)),
+          : updateRandom
+            ? adapter.uint(uniformNode('Emitter.updateRandomStep'))
+            : adapter.uint(attributeNode('spawnGeneration', particleIndex)),
       );
     };
 

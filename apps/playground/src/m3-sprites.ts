@@ -7,6 +7,7 @@ import {
   defineEmitter,
   flipbook,
   gradient,
+  gravity,
   lifetime,
   positionSphere,
   rate,
@@ -567,7 +568,7 @@ async function run(): Promise<void> {
   const burstCycleIndirectAlive = await indirectCount(renderer, burstCycleView);
   const burstCyclePixels = comparePixels(await render(burstCycleMesh), baseline);
 
-  const rateReuseEffect = (capacity: number) =>
+  const updateRandomRangeEffect = (capacity: number) =>
     defineEffect({
       elements: {
         particles: defineEmitter({
@@ -577,10 +578,10 @@ async function run(): Promise<void> {
             velocityCone({ angle: 55, direction: [0, 1, 0], speed: range(0.4, 1.8) }),
             lifetime(range(0.12, 0.18)),
           ],
-          integration: 'none',
           lifecycle: { duration: 0.8 },
-          render: billboard({}),
+          render: billboard({ blending: 'additive' }),
           spawn: rate(80),
+          update: [gravity(range(-3, -0.5))],
         }),
       },
     });
@@ -589,12 +590,14 @@ async function run(): Promise<void> {
       aliveCountReadbackInterval: 1,
       fixedTimeStep: { stepSeconds: STEP },
     });
-    const instance = system.spawn(rateReuseEffect(capacity), {
+    const instance = system.spawn(updateRandomRangeEffect(capacity), {
       seed: 0x51a7_0e11,
     }) as RuntimeInstance;
     const view = emitter(instance);
+    const mesh = materializeThreeSpriteDraw(view.program, view.kernels);
     await system.update(0);
     for (let frame = 0; frame < 40; frame += 1) await system.update(STEP);
+    const pixels = await render(mesh);
     const [alive, spawnGeneration, spawnOrder, position, velocity, lifetimeValues, age] =
       await Promise.all([
         readLogicalAttribute(renderer, view.program, view.kernels, 'alive') as Promise<Uint32Array>,
@@ -657,6 +660,7 @@ async function run(): Promise<void> {
     return {
       alive: records.length,
       hash: hash.toString(16).padStart(8, '0'),
+      pixels,
       records,
       successfulBirths: [...spawnGeneration].reduce((total, generation) => total + generation, 0),
     };
@@ -671,14 +675,29 @@ async function run(): Promise<void> {
     );
   const rateReuseFirst = await captureRateReuse(32);
   const rateReuseSecond = await captureRateReuse(32);
+  const rateReuseThird = await captureRateReuse(32);
   // A one-slot capacity perturbation changes every initial physical allocation while preserving
   // birth order and spawn schedule. This catches a regression that keeps spawnOrder allocated but
-  // accidentally feeds physical slot identity back into Init randomness.
+  // accidentally feeds physical slot identity back into Init or Update randomness.
   const rateReusePerturbed = await captureRateReuse(33);
   const rateReuseRecordsEqual = equalRateReuseRecords(rateReuseFirst, rateReuseSecond);
+  const rateReuseThreeRunsEqual =
+    rateReuseRecordsEqual && equalRateReuseRecords(rateReuseSecond, rateReuseThird);
   const rateReusePhysicalLayoutInvariant = equalRateReuseRecords(
     rateReuseFirst,
     rateReusePerturbed,
+  );
+  const rateReuseScreenshotDeltas = [
+    compareReadbacks(rateReuseFirst.pixels, rateReuseSecond.pixels),
+    compareReadbacks(rateReuseSecond.pixels, rateReuseThird.pixels),
+    compareReadbacks(rateReuseFirst.pixels, rateReuseThird.pixels),
+  ];
+  const rateReuseMaximumScreenshotDelta = Math.max(
+    ...rateReuseScreenshotDeltas.map(({ changedPixelRatio }) => changedPixelRatio),
+  );
+  const rateReusePhysicalLayoutScreenshotDelta = compareReadbacks(
+    rateReuseFirst.pixels,
+    rateReusePerturbed.pixels,
   );
   const blendBrightness = Object.fromEntries(
     Object.entries(blendMetrics).map(([mode, metrics]) => [mode, metrics.meanForegroundBrightness]),
@@ -724,15 +743,17 @@ async function run(): Promise<void> {
     m2NumericRegression:
       regressionView.program.meta.storageBufferCount <= 8 &&
       Math.abs(movementDelta - STEP) < 0.0002,
-    rateReuseInitDeterminism:
+    rateReuseRandomDeterminism:
       rateReuseFirst.successfulBirths > 32 &&
       rateReuseFirst.successfulBirths === rateReuseSecond.successfulBirths &&
       rateReuseFirst.alive > 0 &&
       rateReuseFirst.hash === rateReuseSecond.hash &&
-      rateReuseRecordsEqual &&
+      rateReuseThreeRunsEqual &&
+      rateReuseMaximumScreenshotDelta <= 0.0002 &&
       rateReuseFirst.successfulBirths === rateReusePerturbed.successfulBirths &&
       rateReuseFirst.hash === rateReusePerturbed.hash &&
-      rateReusePhysicalLayoutInvariant,
+      rateReusePhysicalLayoutInvariant &&
+      rateReusePhysicalLayoutScreenshotDelta.changedPixelRatio <= 0.0002,
     respawnReflected: respawned,
     premultipliedTranslucentTexture:
       translucentPremultiplied.mesh.material.premultipliedAlpha &&
@@ -788,11 +809,16 @@ async function run(): Promise<void> {
   const performanceSystem = new VFXSystem(performanceRuntimeRenderer, undefined, {
     fixedTimeStep: { stepSeconds: STEP },
   });
-  const performanceInstance = performanceSystem.spawn(
-    spriteEffect({ count: 5, duration: 10, spread: 1.1 }),
-    { seed: 41 },
-  ) as RuntimeInstance;
+  const performanceInstance = performanceSystem.spawn(updateRandomRangeEffect(32), {
+    seed: 0x51a7_0e11,
+  }) as RuntimeInstance;
   const performanceView = emitter(performanceInstance);
+  const performanceUpdateRandomReads =
+    performanceView.program.kernels.update.modules.find(({ type }) => type === 'core/gravity')
+      ?.access.reads ?? [];
+  const performanceUpdateRandomAccessOk = (
+    ['Emitter.seed', 'Particles.spawnOrder', 'Emitter.updateRandomStep'] as const
+  ).every((key) => performanceUpdateRandomReads.includes(key));
   const performanceMesh = materializeThreeSpriteDraw(
     performanceView.program,
     performanceView.kernels,
@@ -815,6 +841,10 @@ async function run(): Promise<void> {
     await performanceRenderer.readRenderTargetPixelsAsync(performanceTarget, 0, 0, 1, 1);
   });
   performanceRenderer.setRenderTarget(null);
+  const completeValidation = {
+    ...validation,
+    performanceUpdateRandomAccess: performanceUpdateRandomAccessOk,
+  };
   const result = {
     aliveHistory,
     blendMetrics,
@@ -847,14 +877,22 @@ async function run(): Promise<void> {
       movementDelta,
       storageBufferCount: regressionView.program.meta.storageBufferCount,
     },
-    rateReuseInitDeterminism: {
+    performanceUpdateRandomAccess: {
+      ok: performanceUpdateRandomAccessOk,
+      reads: performanceUpdateRandomReads,
+    },
+    rateReuseRandomDeterminism: {
       first: {
         alive: rateReuseFirst.alive,
         hash: rateReuseFirst.hash,
         successfulBirths: rateReuseFirst.successfulBirths,
       },
       recordsEqual: rateReuseRecordsEqual,
+      threeRunsEqual: rateReuseThreeRunsEqual,
       physicalLayoutInvariant: rateReusePhysicalLayoutInvariant,
+      screenshotDeltas: rateReuseScreenshotDeltas,
+      maximumScreenshotDelta: rateReuseMaximumScreenshotDelta,
+      physicalLayoutScreenshotDelta: rateReusePhysicalLayoutScreenshotDelta,
       perturbedCapacity: {
         alive: rateReusePerturbed.alive,
         capacity: 33,
@@ -866,9 +904,14 @@ async function run(): Promise<void> {
         hash: rateReuseSecond.hash,
         successfulBirths: rateReuseSecond.successfulBirths,
       },
+      third: {
+        alive: rateReuseThird.alive,
+        hash: rateReuseThird.hash,
+        successfulBirths: rateReuseThird.successfulBirths,
+      },
     },
     mode: headless ? 'headless' : 'visual',
-    ok: Object.values(validation).every(Boolean),
+    ok: Object.values(completeValidation).every(Boolean),
     pixelHistory,
     shapes: { facing: facingShape.bounds, stretched: stretchedShape.bounds },
     softParticles: {
@@ -878,7 +921,7 @@ async function run(): Promise<void> {
       soft: softIntersection,
       softContribution: softIntersectionContribution,
     },
-    validation,
+    validation: completeValidation,
   };
   performanceMonitor.publish();
   root.dataset.spikeResult = JSON.stringify(result);

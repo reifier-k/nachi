@@ -809,6 +809,7 @@ import type {
   ModuleDefinition,
   ResolvedAttributeSchema,
   VfxDeviceLossInfo,
+  VfxEmitterRuntimeView,
   VfxRuntimeRenderer,
 } from '../src/index.js';
 
@@ -984,8 +985,17 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
   readonly kernelAdapter = fakeAdapter();
   readonly submittedKernels: KernelComputeNode[] = [];
   readonly submissions: string[] = [];
+  readonly updateRandomStepSubmissions: Array<{ emitter: string; step: number }> = [];
+  readonly #updateRandomStepSources = new Map<
+    KernelComputeNode,
+    { emitter: string; view: VfxEmitterRuntimeView }
+  >();
   failNextSubmission = false;
   releaseCount = 0;
+
+  trackUpdateRandomStep(emitter: string, view: VfxEmitterRuntimeView): void {
+    this.#updateRandomStepSources.set(view.kernels.update, { emitter, view });
+  }
 
   releaseKernels(_kernels: BuiltEmitterKernels): void {
     void _kernels;
@@ -996,6 +1006,14 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
     if (this.failNextSubmission) {
       this.failNextSubmission = false;
       throw new Error('synthetic submit failure');
+    }
+    const tracked = this.#updateRandomStepSources.get(kernel);
+    if (tracked) {
+      const value = tracked.view.kernels.uniforms['Emitter.updateRandomStep']?.value;
+      if (typeof value !== 'number') {
+        throw new Error(`Missing numeric Update random step for ${tracked.emitter}.`);
+      }
+      this.updateRandomStepSubmissions.push({ emitter: tracked.emitter, step: value });
     }
     this.submittedKernels.push(kernel);
     this.submissions.push((kernel as FakeCompute).name);
@@ -1291,6 +1309,30 @@ function eventEffect(target = 'smokePuffs') {
     spawn: burst({ count: 0 }),
   });
   return defineEffect({ elements: { smokePuffs, sparks } });
+}
+
+function eventFallbackEffect() {
+  return defineEffect({
+    elements: {
+      source: defineEmitter({
+        capacity: 1,
+        events: { onDeath: emitTo('target') },
+        init: [lifetime(1)],
+        integration: 'none',
+        lifecycle: { duration: 1 },
+        render: computeRender,
+        spawn: burst({ count: 0 }),
+      }),
+      target: defineEmitter({
+        capacity: 1,
+        init: [lifetime(0)],
+        integration: 'none',
+        lifecycle: { duration: 0 },
+        render: computeRender,
+        spawn: burst({ count: 0 }),
+      }),
+    },
+  });
 }
 
 function collisionEventEffect() {
@@ -1830,6 +1872,35 @@ describe('VFXSystem runtime scheduler', () => {
     expect(live.getEmitter('particles')?.kernels).toBe(preparedKernels);
   });
 
+  it('keeps compile-purpose Update preparation outside the simulation random ordinal', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const effect = runtimeEffect({ duration: 1 });
+    let preparedEmitter: VfxEmitterRuntimeView | undefined;
+
+    await system.prepare(effect, {
+      preparer: {
+        prepareEmitter: ({ emitter }) => {
+          preparedEmitter = emitter;
+        },
+      },
+    });
+
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterUpdate')).toHaveLength(1);
+    expect(preparedEmitter?.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(0);
+    const live = system.spawn(effect);
+    const emitter = live.getEmitter('particles')!;
+    expect(emitter.kernels).toBe(preparedEmitter?.kernels);
+    renderer.trackUpdateRandomStep('prepared-pool-checkout', emitter);
+
+    await system.update(0.1);
+
+    expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'prepared-pool-checkout', step: 0 },
+    ]);
+    expect(emitter.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(0);
+  });
+
   it('rejects preparation when pooling is disabled instead of retaining dead draw anchors', async () => {
     const renderer = new FakeRuntimeRenderer();
     const system = new VFXSystem(renderer, undefined, { maxPoolSize: 0 });
@@ -1948,6 +2019,72 @@ describe('VFXSystem runtime scheduler', () => {
     expect(system.time).toBe(0.25);
   });
 
+  it('advances Update randomness only for actual update dispatches', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { stepSeconds: 0.1 },
+    });
+    const instance = system.spawn(runtimeEffect({ duration: 2 }));
+    const emitter = instance.getEmitter('particles')!;
+    renderer.trackUpdateRandomStep('particles', emitter);
+    const lastConsumedStep = () => emitter.kernels.uniforms['Emitter.updateRandomStep']?.value;
+
+    await system.update(0);
+    expect(lastConsumedStep()).toBe(0);
+    expect(renderer.updateRandomStepSubmissions).toEqual([]);
+
+    await system.update(0.25);
+    expect(lastConsumedStep()).toBe(1);
+    expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'particles', step: 0 },
+      { emitter: 'particles', step: 1 },
+    ]);
+
+    instance.setTimeScale(0);
+    await system.update(0.5);
+    expect(lastConsumedStep()).toBe(1);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
+
+    instance.setTimeScale(1);
+    instance.applyHitStop(100);
+    await system.update(0.1);
+    expect(lastConsumedStep()).toBe(1);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
+
+    await system.update(0.1);
+    expect(lastConsumedStep()).toBe(2);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1, 2]);
+  });
+
+  it('does not advance the next Update random ordinal when submission rejects', async () => {
+    const renderer = new FailFirstEmitterUpdateRenderer();
+    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 1 });
+    const definition = runtimeEffect({ duration: 1 });
+    const failed = system.spawn(definition);
+    const failedEmitter = failed.getEmitter('particles')!;
+    renderer.trackUpdateRandomStep('failed', failedEmitter);
+
+    await system.update(0.1);
+
+    expect(failed.state).toBe('error');
+    expect(renderer.updateRandomStepSubmissions).toEqual([{ emitter: 'failed', step: 0 }]);
+    // A rejected runtime is terminal, so the attempted current value is the observable boundary:
+    // the uniform remains 0 because the successful-await continuation did not run.
+    expect(failedEmitter.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(0);
+    await system.update(0.1);
+    expect(renderer.updateRandomStepSubmissions).toEqual([{ emitter: 'failed', step: 0 }]);
+
+    failed.release();
+    const recreated = system.spawn(definition);
+    const recreatedEmitter = recreated.getEmitter('particles')!;
+    renderer.trackUpdateRandomStep('recreated', recreatedEmitter);
+    await system.update(0.1);
+    expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'failed', step: 0 },
+      { emitter: 'recreated', step: 0 },
+    ]);
+  });
+
   it('derives optional update delta from the injected monotonic clock', async () => {
     let now = 1000;
     const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, { now: () => now });
@@ -1960,41 +2097,72 @@ describe('VFXSystem runtime scheduler', () => {
   });
 
   it('keeps fixed-step results deterministic across input partitions', async () => {
-    const first = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+    const firstRenderer = new FakeRuntimeRenderer();
+    const secondRenderer = new FakeRuntimeRenderer();
+    const first = new VFXSystem(firstRenderer, undefined, {
       fixedTimeStep: { stepSeconds: 0.02 },
     });
-    const second = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+    const second = new VFXSystem(secondRenderer, undefined, {
       fixedTimeStep: { stepSeconds: 0.02 },
     });
     const firstInstance = first.spawn(runtimeEffect({ duration: 1 }));
     const secondInstance = second.spawn(runtimeEffect({ duration: 1 }));
+    firstRenderer.trackUpdateRandomStep('particles', firstInstance.getEmitter('particles')!);
+    secondRenderer.trackUpdateRandomStep('particles', secondInstance.getEmitter('particles')!);
     await first.update(0.1);
     await second.update(0.03);
     await second.update(0.07);
     expect(first.time).toBeCloseTo(second.time);
     expect(firstInstance.localTime).toBeCloseTo(secondInstance.localTime);
+    expect(
+      firstInstance.getEmitter('particles')?.kernels.uniforms['Emitter.updateRandomStep']?.value,
+    ).toBe(4);
+    expect(
+      secondInstance.getEmitter('particles')?.kernels.uniforms['Emitter.updateRandomStep']?.value,
+    ).toBe(4);
+    expect(firstRenderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([
+      0, 1, 2, 3, 4,
+    ]);
+    expect(secondRenderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([
+      0, 1, 2, 3, 4,
+    ]);
   });
 
   it('splits prewarm into deterministic fixed-size submissions', async () => {
     const renderer = new FakeRuntimeRenderer();
     const system = new VFXSystem(renderer, undefined, { prewarmStepSeconds: 0.1 });
     const instance = system.spawn(runtimeEffect({ duration: 1, prewarm: 0.3 }));
+    renderer.trackUpdateRandomStep('particles', instance.getEmitter('particles')!);
     await system.update(0);
     expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
     expect(renderer.submissions.filter((name) => name === 'NachiEmitterUpdate')).toHaveLength(3);
     expect(
       instance.getEmitter('particles')?.kernels.uniforms['Emitter.localTime']?.value,
     ).toBeCloseTo(0.3);
+    expect(
+      instance.getEmitter('particles')?.kernels.uniforms['Emitter.updateRandomStep']?.value,
+    ).toBe(2);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1, 2]);
   });
 
   it('advances spawnGeneration when a loop re-fires', async () => {
     const renderer = new FakeRuntimeRenderer();
     const system = new VFXSystem(renderer);
     const instance = system.spawn(runtimeEffect({ duration: 0.1, loopCount: 2 }));
+    renderer.trackUpdateRandomStep('particles', instance.getEmitter('particles')!);
     await system.update(0);
     expect(instance.getEmitter('particles')?.spawnGeneration).toBe(0);
     await system.update(0.1);
     expect(instance.getEmitter('particles')?.spawnGeneration).toBe(1);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0]);
+    expect(
+      instance.getEmitter('particles')?.kernels.uniforms['Emitter.updateRandomStep']?.value,
+    ).toBe(0);
+    await system.update(0.1);
+    expect(
+      instance.getEmitter('particles')?.kernels.uniforms['Emitter.updateRandomStep']?.value,
+    ).toBe(1);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
     expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(2);
   });
 
@@ -3141,10 +3309,13 @@ describe('VFXSystem runtime scheduler', () => {
     const definition = runtimeEffect({ duration: 1 });
     const first = system.spawn(definition, { position: [7, 0, 0] });
     const pooledKernels = first.getEmitter('particles')!.kernels;
+    renderer.trackUpdateRandomStep('first', first.getEmitter('particles')!);
     await system.update(0);
     first.setTransform([9, 0, 0]);
     await system.update(0.1);
     expect(pooledKernels.uniforms['Emitter.interpolationActive']?.value).toBe(1);
+    await system.update(0.1);
+    expect(pooledKernels.uniforms['Emitter.updateRandomStep']?.value).toBe(1);
     first.release();
 
     const respawned = system.spawn(definition, { position: [-3, 2, 1] });
@@ -3154,6 +3325,14 @@ describe('VFXSystem runtime scheduler', () => {
     expect(respawnedKernels.uniforms['Emitter.transform']?.value).toEqual(respawnTransform);
     expect(respawnedKernels.uniforms['Emitter.previousTransform']?.value).toEqual(respawnTransform);
     expect(respawnedKernels.uniforms['Emitter.interpolationActive']?.value).toBe(0);
+    expect(respawnedKernels.uniforms['Emitter.updateRandomStep']?.value).toBe(0);
+    renderer.trackUpdateRandomStep('respawned', respawned.getEmitter('particles')!);
+    await system.update(0.1);
+    expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'first', step: 0 },
+      { emitter: 'first', step: 1 },
+      { emitter: 'respawned', step: 0 },
+    ]);
   });
 
   it('composes each emitter offset after the instance transform for scattered bursts', () => {
@@ -3359,6 +3538,26 @@ describe('VFXSystem runtime scheduler', () => {
     expect(renderer.submissions).toContain('NachiEventPrepare_sparks_onDeath_0');
     expect(renderer.submissions).toContain('NachiEventSpawn_sparks_onDeath_0');
     expect(renderer.submissions).toContain('NachiEventFinalize_sparks_onDeath_0');
+  });
+
+  it('advances the Update random ordinal for event-input fallback simulation', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const instance = system.spawn(eventFallbackEffect());
+    const target = instance.getEmitter('target')!;
+    renderer.trackUpdateRandomStep('event-target', target);
+
+    await system.update(0);
+    expect(renderer.updateRandomStepSubmissions).toEqual([]);
+    await system.update(0.1);
+    await system.update(0.1);
+
+    expect(target.kernels.eventInputs).toHaveLength(1);
+    expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'event-target', step: 0 },
+      { emitter: 'event-target', step: 1 },
+    ]);
+    expect(target.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(1);
   });
 
   it('notifies death callbacks with low-frequency aggregate readback counts', async () => {
@@ -3664,22 +3863,30 @@ describe('M11 VFXSystem scalability scheduling', () => {
       },
     });
     const instance = system.spawn(definition, { position: [0, 0, 5] });
+    const emitter = instance.getEmitter('particles')!;
+    renderer.trackUpdateRandomStep('particles', emitter);
     expect(instance.scalability.action).toBe('full');
     expect(instance.scalability.fade).toBeGreaterThan(0.35);
     expect(instance.scalability.fade).toBeLessThan(0.65);
     await system.update(0.1);
     const visibleTime = instance.localTime;
+    expect(emitter.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(0);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0]);
     const submissions = renderer.submissions.length;
     instance.setTransform([0, 0, 7]);
     await system.update(0.5);
     expect(instance.scalability).toMatchObject({ action: 'culled', fade: 0 });
     expect(instance.scalability.reasons).toContain('distance');
     expect(instance.localTime).toBe(visibleTime);
+    expect(emitter.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(0);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0]);
     expect(renderer.submissions).toHaveLength(submissions);
     instance.setTransform([0, 0, 1]);
     await system.update(0.1);
     expect(instance.scalability.action).toBe('full');
     expect(instance.localTime).toBeCloseTo(visibleTime + 0.1);
+    expect(emitter.kernels.uniforms['Emitter.updateRandomStep']?.value).toBe(1);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
     expect(instance.getEmitter('particles')?.lifecycleState).toBe('active');
     expect(instance.state).toBe('active');
   });

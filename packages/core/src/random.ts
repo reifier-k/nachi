@@ -77,13 +77,13 @@ export function pcgRandomFloat(
   randomKey: number,
   emitterSeed: number,
   moduleSlot: number,
-  spawnGeneration: number,
+  progressionKey: number,
 ): number {
   const mixedInput =
     (Math.imul(randomKey >>> 0, PCG_RANDOM_CONSTANTS.particleIndexMix) ^
       Math.imul(emitterSeed >>> 0, PCG_RANDOM_CONSTANTS.emitterSeedMix) ^
       moduleSlotSalt(moduleSlot) ^
-      Math.imul(spawnGeneration >>> 0, PCG_RANDOM_CONSTANTS.spawnGenerationMix)) >>>
+      Math.imul(progressionKey >>> 0, PCG_RANDOM_CONSTANTS.spawnGenerationMix)) >>>
     0;
   // JavaScript stores this mirror in f64; GPU TSL materializes f32. Callers may compare after
   // f32 rounding, but the uint hash and operation order remain bit-identical.
@@ -102,13 +102,13 @@ export function pcgRandomFloatNode<
   randomKey: UintNode,
   emitterSeed: UintNode,
   moduleSlot: number,
-  spawnGeneration: UintNode,
+  progressionKey: UintNode,
 ): FloatNode {
   const mixedInput = randomKey
     .mul(PCG_RANDOM_CONSTANTS.particleIndexMix)
     .bitXor(emitterSeed.mul(PCG_RANDOM_CONSTANTS.emitterSeedMix))
     .bitXor(moduleSlotSalt(moduleSlot))
-    .bitXor(spawnGeneration.mul(PCG_RANDOM_CONSTANTS.spawnGenerationMix));
+    .bitXor(progressionKey.mul(PCG_RANDOM_CONSTANTS.spawnGenerationMix));
   const state = mixedInput
     .mul(PCG_RANDOM_CONSTANTS.stateMultiplier)
     .add(PCG_RANDOM_CONSTANTS.stateIncrement);

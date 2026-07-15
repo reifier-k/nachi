@@ -239,8 +239,8 @@ function addEventQueueWrite(module: EventModule, eventName: string): EventModule
 }
 
 export function range<T extends number | Vec2 | Vec3 | Vec4>(min: T, max: T): RangeGenerator<T> {
-  // Init resolves its stable key from Particles.spawnOrder. Update retains the physical particle
-  // key plus Particles.spawnGeneration, while pre-allocation Spawn ranges use their emission-batch
+  // Init resolves its stable key from Particles.spawnOrder. Update combines spawnOrder with the
+  // actual update-dispatch ordinal, while pre-allocation Spawn ranges use their emission-batch
   // generation on CPU because no particle birth has been allocated at that stage yet.
   return { distribution: 'uniform', kind: 'range', max, min };
 }

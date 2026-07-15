@@ -65,6 +65,42 @@ function readUint(value: number | TraceUint): number {
   return typeof value === 'number' ? value >>> 0 : value.value;
 }
 
+function correlation(left: readonly number[], right: readonly number[]): number {
+  const count = Math.min(left.length, right.length);
+  const leftMean = left.slice(0, count).reduce((sum, value) => sum + value, 0) / count;
+  const rightMean = right.slice(0, count).reduce((sum, value) => sum + value, 0) / count;
+  let covariance = 0;
+  let leftVariance = 0;
+  let rightVariance = 0;
+  for (let index = 0; index < count; index += 1) {
+    const leftDelta = left[index]! - leftMean;
+    const rightDelta = right[index]! - rightMean;
+    covariance += leftDelta * rightDelta;
+    leftVariance += leftDelta * leftDelta;
+    rightVariance += rightDelta * rightDelta;
+  }
+  return covariance / Math.sqrt(leftVariance * rightVariance);
+}
+
+function maximumShiftCorrelation(left: readonly number[], right: readonly number[]): number {
+  let maximum = 0;
+  for (let shift = -8; shift <= 8; shift += 1) {
+    const leftStart = Math.max(0, -shift);
+    const rightStart = Math.max(0, shift);
+    const count = Math.min(left.length - leftStart, right.length - rightStart);
+    maximum = Math.max(
+      maximum,
+      Math.abs(
+        correlation(
+          left.slice(leftStart, leftStart + count),
+          right.slice(rightStart, rightStart + count),
+        ),
+      ),
+    );
+  }
+  return maximum;
+}
+
 describe('deterministic PCG random', () => {
   it('uses the same constants and operation order in the JS mirror and TSL node builder', () => {
     expect(PCG_RANDOM_CONSTANTS).toEqual({
@@ -194,6 +230,72 @@ describe('deterministic PCG random', () => {
     ).flat();
 
     expect(new Set(samples).size).toBe(samples.length);
+  });
+
+  it('passes Update-key distribution and axis-separation probes', () => {
+    const sampleCount = 32_768;
+    const binCount = 32;
+    const seed = 0x51a7_0e11;
+    const moduleSlot = resolveModuleSlot({ label: 'update-statistics', stage: 'update' }, 0);
+    const stream = resolveRandomSampleSlot(moduleSlot, 2);
+    const samples = Array.from({ length: sampleCount }, (_, spawnOrder) =>
+      pcgRandomFloat(spawnOrder, seed, stream, 37),
+    );
+    const bins = Array.from({ length: binCount }, () => 0);
+    for (const value of samples) bins[Math.min(binCount - 1, Math.floor(value * binCount))]! += 1;
+    const expected = sampleCount / binCount;
+    const chiSquare = bins.reduce(
+      (sum, observed) => sum + (observed - expected) ** 2 / expected,
+      0,
+    );
+    const sorted = [...samples].sort((left, right) => left - right);
+    const ks = sorted.reduce(
+      (maximum, value, index) =>
+        Math.max(
+          maximum,
+          Math.abs(value - index / sampleCount),
+          Math.abs((index + 1) / sampleCount - value),
+        ),
+      0,
+    );
+    const serial = correlation(samples.slice(0, -1), samples.slice(1));
+
+    expect(chiSquare).toBeLessThan(60);
+    expect(ks).toBeLessThan(0.01);
+    expect(Math.abs(serial)).toBeLessThan(0.02);
+
+    const axisCount = 16_384;
+    const orders = Array.from({ length: axisCount }, (_, index) => index * 3);
+    const base = orders.map((order) => pcgRandomFloat(order, seed, stream, 37));
+    const adjacentOrder = orders.map((order) => pcgRandomFloat(order + 1, seed, stream, 37));
+    const adjacentTime = orders.map((order) => pcgRandomFloat(order, seed, stream, 38));
+    const adjacentModule = orders.map((order) =>
+      pcgRandomFloat(
+        order,
+        seed,
+        resolveRandomSampleSlot(
+          resolveModuleSlot({ label: 'update-statistics-next', stage: 'update' }, 0),
+          2,
+        ),
+        37,
+      ),
+    );
+    const adjacentSample = orders.map((order) =>
+      pcgRandomFloat(order, seed, resolveRandomSampleSlot(moduleSlot, 3), 37),
+    );
+    for (const candidate of [adjacentOrder, adjacentTime, adjacentModule, adjacentSample]) {
+      expect(candidate).not.toEqual(base);
+      expect(maximumShiftCorrelation(base, candidate)).toBeLessThan(0.04);
+    }
+
+    const grid = Array.from({ length: 256 }, (_, order) =>
+      Array.from({ length: 16 }, (_unused, time) =>
+        Array.from({ length: 4 }, (_ignored, sample) =>
+          pcgRandomFloat(order, seed, resolveRandomSampleSlot(moduleSlot, sample), time),
+        ),
+      ),
+    ).flat(2);
+    expect(new Set(grid).size).toBe(grid.length);
   });
 
   it('changes streams when the spawn generation changes', () => {

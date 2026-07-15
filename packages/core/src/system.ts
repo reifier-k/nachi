@@ -74,6 +74,7 @@ import type {
   NeighborGridSnapshot,
   SimStageDefinition,
 } from './types.js';
+import { nextUpdateRandomStep } from './update-random-step.js';
 
 const DEFAULT_MAX_SUB_STEPS = 8;
 const DEFAULT_MAX_POOL_SIZE = 16;
@@ -1100,6 +1101,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #spawnOrderRequestTotal = 0;
   #spawnOrderWrapWarned = false;
   #spawnGeneration = 0;
+  #updateRandomStep = 0;
   #capacityScale = 1;
   #profileComputeDispatches = 0;
   #profileCpuUpdateMs = 0;
@@ -1162,6 +1164,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     renderer.clearStorageReplayReady?.(this.kernels);
     this.setQualityTier(qualityTier);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.seed', this.#seed);
+    setUniform(renderer, this.kernels.uniforms, 'Emitter.updateRandomStep', 0);
     setUniform(renderer, this.kernels.uniforms, 'Emitter.interpolationActive', 0);
     setUniform(
       renderer,
@@ -1640,7 +1643,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
             this.#pendingDistance = 0;
           }
           await this.#rebuildNeighborGrids();
-          await this.#submitCompute(this.kernels.update, 'update');
+          await this.#submitSimulationUpdate();
           updated = true;
           this.#emitterAge += step;
           this.#simulationTime += step;
@@ -1657,7 +1660,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     // entered drain/completed state. Event consumption above compacts births even for dt=0.
     if (!updated && this.kernels.eventInputs.length > 0 && deltaSeconds > TIME_EPSILON) {
       this.#setFrameUniforms(deltaSeconds, context, this.controller.loopIndex);
-      await this.#submitCompute(this.kernels.update, 'update');
+      await this.#submitSimulationUpdate();
       this.#emitterAge += deltaSeconds;
       this.#simulationTime += deltaSeconds;
       this.#drainRemaining = Math.max(0, this.#drainRemaining - deltaSeconds);
@@ -1974,6 +1977,17 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.deltaTime', deltaSeconds);
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.localTime', this.#emitterAge);
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.loopIndex', loopIndex);
+  }
+
+  async #submitSimulationUpdate(): Promise<void> {
+    setUniform(
+      this.#renderer,
+      this.kernels.uniforms,
+      'Emitter.updateRandomStep',
+      this.#updateRandomStep,
+    );
+    await this.#submitCompute(this.kernels.update, 'update');
+    this.#updateRandomStep = nextUpdateRandomStep(this.#updateRandomStep);
   }
 
   #trackSpawnOrderRequests(requested: number): void {
