@@ -275,6 +275,51 @@ describe('@nachi-vfx/timeline VAT lifecycle binding', () => {
     expect(fresh.getElementState('vat')?.localTime).toBe(0);
   });
 
+  it('clamps an omitted-update wall gap before advancing an owned VAT clock', async () => {
+    let now = 1_000;
+    const source = vatRing(fxMaterial());
+    source.mesh.name = 'vat-measured-delta-clamp';
+    const effect = defineEffect({
+      elements: { vat: meshFxElement(source.mesh, { duration: 2 }) },
+      timeline: timeline([at(0, play('vat'))], { duration: 2 }),
+    });
+    const scene = new Scene();
+    const system = new VFXSystem({}, scene, { now: () => now });
+    system.spawn(effect);
+    const controls = onlyVatControl(namedClones(scene, 'vat-measured-delta-clamp')[0]!);
+
+    await system.update();
+    now += 1_000;
+    await system.update();
+
+    expect(controls.time?.value).toBeCloseTo(0.25, 10);
+    expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(0.75, 10);
+  });
+
+  it('keeps the uncapped measured VAT clock available through Infinity', async () => {
+    let now = 1_000;
+    const source = vatRing(fxMaterial());
+    source.mesh.name = 'vat-measured-delta-infinity';
+    const effect = defineEffect({
+      elements: { vat: meshFxElement(source.mesh, { duration: 2 }) },
+      timeline: timeline([at(0, play('vat'))], { duration: 2 }),
+    });
+    const scene = new Scene();
+    const system = new VFXSystem({}, scene, {
+      maxMeasuredDeltaSeconds: Number.POSITIVE_INFINITY,
+      now: () => now,
+    });
+    system.spawn(effect);
+    const controls = onlyVatControl(namedClones(scene, 'vat-measured-delta-infinity')[0]!);
+
+    await system.update();
+    now += 1_000;
+    await system.update();
+
+    expect(controls.time?.value).toBeCloseTo(1, 10);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
   it('preserves external node and numeric VAT clocks without timeline writes or diagnostics', async () => {
     const externalTime = uniform(0.625);
     const external = vatRing(fxMaterial(), { time: externalTime });

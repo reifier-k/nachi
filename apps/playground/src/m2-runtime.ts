@@ -56,8 +56,12 @@ const query = new URLSearchParams(window.location.search);
 const headless = query.get('headless') === '1';
 const requestedBackend = query.get('backend') === 'webgl' ? 'webgl' : 'webgpu';
 const requestedScenario = query.get('scenario') ?? 'all';
+const forceFailure = query.get('forceFailure');
 if (!['all', 'lifecycle', 'time'].includes(requestedScenario)) {
   throw new Error('scenario must be one of: all, lifecycle, time.');
+}
+if (forceFailure !== null && forceFailure !== 'measured-delta-clamp') {
+  throw new Error(`Unknown M2 runtime fault: ${forceFailure}`);
 }
 const scenario = requestedScenario as 'all' | 'lifecycle' | 'time';
 const backendValue = requireElement<HTMLElement>('#backend-value');
@@ -657,11 +661,102 @@ async function runTimeScenario(
   const coldPosition = await floatStorage(renderer, cold, 'position');
   const packedStorageBufferCount = emitter(normal).program.meta.storageBufferCount;
 
+  let defaultNow = 1_000;
+  const measuredDefaultSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    now: () => defaultNow,
+  });
+  const measuredDefault = measuredDefaultSystem.spawn(movingEffect({ duration: 2 }), { seed: 41 });
+  await measuredDefaultSystem.update();
+  const measuredDefaultInitial = await floatStorage(renderer, measuredDefault, 'position');
+  defaultNow += 1_000;
+  await measuredDefaultSystem.update();
+  const measuredDefaultFinal = await floatStorage(renderer, measuredDefault, 'position');
+  const measuredDefaultAdvance =
+    (measuredDefaultFinal[0] ?? Number.NaN) - (measuredDefaultInitial[0] ?? Number.NaN);
+
+  let configuredNow = 1_000;
+  const measuredConfiguredSystem = new VFXSystem(runtimeRenderer, undefined, {
+    maxMeasuredDeltaSeconds: 0.1,
+    now: () => configuredNow,
+  });
+  measuredConfiguredSystem.spawn(movingEffect({ duration: 2 }), { seed: 42 });
+  await measuredConfiguredSystem.update();
+  configuredNow += 1_000;
+  await measuredConfiguredSystem.update();
+
+  let infinityNow = 1_000;
+  const measuredInfinitySystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    maxMeasuredDeltaSeconds: Number.POSITIVE_INFINITY,
+    now: () => infinityNow,
+  });
+  const measuredInfinity = measuredInfinitySystem.spawn(movingEffect({ duration: 2 }), {
+    seed: 43,
+  });
+  await measuredInfinitySystem.update();
+  const measuredInfinityInitial = await floatStorage(renderer, measuredInfinity, 'position');
+  infinityNow += 1_000;
+  await measuredInfinitySystem.update();
+  const measuredInfinityFinal = await floatStorage(renderer, measuredInfinity, 'position');
+  const measuredInfinityAdvance =
+    (measuredInfinityFinal[0] ?? Number.NaN) - (measuredInfinityInitial[0] ?? Number.NaN);
+
+  let explicitNow = 1_000;
+  const explicitBypassSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    maxMeasuredDeltaSeconds: 0.1,
+    now: () => explicitNow,
+  });
+  const explicitBypass = explicitBypassSystem.spawn(movingEffect({ duration: 2 }), { seed: 44 });
+  await explicitBypassSystem.update();
+  const explicitInitial = await floatStorage(renderer, explicitBypass, 'position');
+  explicitNow += 1_000;
+  await explicitBypassSystem.update(1);
+  const explicitFinal = await floatStorage(renderer, explicitBypass, 'position');
+  const explicitAdvance = (explicitFinal[0] ?? Number.NaN) - (explicitInitial[0] ?? Number.NaN);
+
+  let fixedNow = 1_000;
+  const measuredFixedSystem = new VFXSystem(runtimeRenderer, undefined, {
+    aliveCountReadbackInterval: 1,
+    fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+    now: () => fixedNow,
+  });
+  const measuredFixed = measuredFixedSystem.spawn(movingEffect({ duration: 2 }), { seed: 45 });
+  await measuredFixedSystem.update();
+  const measuredFixedInitial = await floatStorage(renderer, measuredFixed, 'position');
+  fixedNow += 1_000;
+  await measuredFixedSystem.update();
+  const measuredFixedFinal = await floatStorage(renderer, measuredFixed, 'position');
+  const measuredFixedAdvance =
+    (measuredFixedFinal[0] ?? Number.NaN) - (measuredFixedInitial[0] ?? Number.NaN);
+
+  const measuredDeltaClampActual =
+    close(measuredDefaultSystem.time, 0.25) &&
+    close(measuredDefault.localTime, 0.25) &&
+    close(measuredDefaultAdvance, 0.25) &&
+    close(measuredDefaultSystem.measuredDeltaDroppedSeconds, 0.75) &&
+    measuredDefaultSystem.fixedStepDroppedSeconds === 0 &&
+    close(measuredConfiguredSystem.time, 0.1) &&
+    close(measuredConfiguredSystem.measuredDeltaDroppedSeconds, 0.9) &&
+    close(measuredInfinitySystem.time, 1) &&
+    close(measuredInfinityAdvance, 1) &&
+    measuredInfinitySystem.droppedSeconds === 0 &&
+    close(explicitBypassSystem.time, 1) &&
+    close(explicitAdvance, 1) &&
+    explicitBypassSystem.droppedSeconds === 0 &&
+    close(measuredFixedSystem.time, 0.2) &&
+    close(measuredFixedAdvance, 0.2) &&
+    close(measuredFixedSystem.measuredDeltaDroppedSeconds, 0.75) &&
+    close(measuredFixedSystem.fixedStepDroppedSeconds, 0.05) &&
+    close(measuredFixedSystem.droppedSeconds, 0.8);
+
   const validation = {
     compileCacheOk: movementSystem.compilationCount === 1,
     durationLoopGenerationOk:
       looped.getEmitter('particles')?.spawnGeneration === 1 &&
       !equalArrays(firstGenerationVelocity, secondGenerationVelocity),
+    measuredDeltaClamp: forceFailure === 'measured-delta-clamp' ? false : measuredDeltaClampActual,
     prewarmDeterministic: equalArrays(warmedPosition, coldPosition),
     packedStorageBufferBudget: packedStorageBufferCount <= 8,
     timeAdvanced: normalAdvance > 0,
@@ -685,6 +780,37 @@ async function runTimeScenario(
       normalAdvance,
       packedStorageBufferCount,
       pausedUnchanged: equalArrays(pausedInitial, pausedFinal),
+    },
+    measuredDelta: {
+      configured: {
+        droppedSeconds: measuredConfiguredSystem.droppedSeconds,
+        maxMeasuredDeltaSeconds: 0.1,
+        time: measuredConfiguredSystem.time,
+      },
+      default: {
+        fixedStepDroppedSeconds: measuredDefaultSystem.fixedStepDroppedSeconds,
+        measuredDeltaDroppedSeconds: measuredDefaultSystem.measuredDeltaDroppedSeconds,
+        particleAdvance: measuredDefaultAdvance,
+        time: measuredDefaultSystem.time,
+      },
+      explicitBypass: {
+        droppedSeconds: explicitBypassSystem.droppedSeconds,
+        particleAdvance: explicitAdvance,
+        time: explicitBypassSystem.time,
+      },
+      fixed: {
+        droppedSeconds: measuredFixedSystem.droppedSeconds,
+        fixedStepDroppedSeconds: measuredFixedSystem.fixedStepDroppedSeconds,
+        measuredDeltaDroppedSeconds: measuredFixedSystem.measuredDeltaDroppedSeconds,
+        particleAdvance: measuredFixedAdvance,
+        time: measuredFixedSystem.time,
+      },
+      infinity: {
+        droppedSeconds: measuredInfinitySystem.droppedSeconds,
+        particleAdvance: measuredInfinityAdvance,
+        time: measuredInfinitySystem.time,
+      },
+      rawGapSeconds: 1,
     },
     prewarm: {
       cold: [...coldPosition.slice(0, 3)],
@@ -787,6 +913,7 @@ async function runSmoke(): Promise<void> {
   const result = {
     activeBackend,
     consoleMessages,
+    fault: forceFailure,
     lifecycle,
     ok,
     requestedBackend,

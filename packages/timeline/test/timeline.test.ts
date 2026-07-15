@@ -431,6 +431,7 @@ describe('@nachi-vfx/timeline runtime', () => {
   it('keeps timeline children outside the core significance budget', () => {
     expect(
       timelineCoreOptions({
+        maxMeasuredDeltaSeconds: 0.1,
         qualityTier: 'high',
         significanceBudget: { maxActiveInstances: 0, maxParticles: 0 },
       }),
@@ -856,6 +857,199 @@ describe('@nachi-vfx/timeline runtime', () => {
     await system.update(0.03);
     expect(instance.localTime).toBeCloseTo(0.08, 10);
     expect(instance.getElementState('arc')).toMatchObject({ playing: false, visible: false });
+  });
+
+  it('clamps a one-second measured gap before mesh and action clocks', async () => {
+    let now = 1_000;
+    const scene = new THREE.Scene();
+    const effect = defineEffect({
+      elements: { arc: mesh(2) },
+      timeline: timeline([at(0, play('arc')), at(0.75, marker('crossed'))], { duration: 2 }),
+    });
+    const system = new VFXSystem({}, scene, { now: () => now });
+    const instance = system.spawn(effect);
+    const events: string[] = [];
+    instance.onAction(({ action }) => {
+      if (action.kind === 'marker') events.push(action.name);
+    });
+
+    await system.update();
+    expect(system.time).toBe(0);
+    expect(system.droppedSeconds).toBe(0);
+    now += 1_000;
+    await system.update();
+
+    expect(system.time).toBe(0.25);
+    expect(instance.localTime).toBe(0.25);
+    expect(instance.getElementState('arc')?.localTime).toBe(0.25);
+    expect(events).toEqual([]);
+    expect(system.measuredDeltaDroppedSeconds).toBe(0.75);
+    expect(system.fixedStepDroppedSeconds).toBe(0);
+    expect(system.droppedSeconds).toBe(0.75);
+  });
+
+  it('configures, disables, and explicitly bypasses the timeline-owned measured ceiling', async () => {
+    const effect = defineEffect({ elements: { arc: mesh(2) } });
+    const cases = [
+      { expectedDrop: 0.9, expectedTime: 0.1, maxMeasuredDeltaSeconds: 0.1 },
+      { expectedDrop: 0, expectedTime: 1, maxMeasuredDeltaSeconds: Number.POSITIVE_INFINITY },
+    ] as const;
+    for (const testCase of cases) {
+      let now = 1_000;
+      const system = new VFXSystem({}, undefined, {
+        maxMeasuredDeltaSeconds: testCase.maxMeasuredDeltaSeconds,
+        now: () => now,
+      });
+      system.spawn(effect);
+      await system.update();
+      now += 1_000;
+      await system.update();
+      expect(system.time).toBeCloseTo(testCase.expectedTime);
+      expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(testCase.expectedDrop);
+    }
+
+    let now = 1_000;
+    const explicit = new VFXSystem({}, undefined, {
+      maxMeasuredDeltaSeconds: 0.1,
+      now: () => now,
+    });
+    const instance = explicit.spawn(effect);
+    await explicit.update();
+    now += 1_000;
+    await explicit.update(1);
+    expect(explicit.time).toBe(1);
+    expect(instance.localTime).toBe(1);
+    expect(explicit.measuredDeltaDroppedSeconds).toBe(0);
+  });
+
+  it('reports timeline measured and fixed-step drops separately without double counting', async () => {
+    let now = 1_000;
+    const system = new VFXSystem({}, undefined, {
+      fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+      now: () => now,
+    });
+    system.spawn(defineEffect({ elements: { arc: mesh(3) } }));
+    await system.update();
+    now += 1_000;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.2);
+    expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(0.75);
+    expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.05);
+    expect(system.droppedSeconds).toBeCloseTo(0.8);
+
+    await system.update(1);
+    expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(0.75);
+    expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.85);
+    expect(system.droppedSeconds).toBeCloseTo(1.6);
+  });
+
+  it('measures concurrent omitted calls at invocation time and leaves explicit calls clock-neutral', async () => {
+    const timestamps = [1_000, 2_000, 3_000, 4_000];
+    const system = new VFXSystem({}, undefined, { now: () => timestamps.shift()! });
+    system.spawn(defineEffect({ elements: { arc: mesh(4) } }));
+
+    const first = system.update();
+    const second = system.update();
+    const explicit = system.update(0.5);
+    const third = system.update();
+    expect(system.measuredDeltaDroppedSeconds).toBe(1.5);
+    await Promise.all([first, second, explicit, third]);
+    expect(system.time).toBe(1);
+
+    await system.update(0.5);
+    await system.update();
+    expect(system.time).toBe(1.75);
+    expect(system.measuredDeltaDroppedSeconds).toBe(2.25);
+  });
+
+  it('uses zero for equal or reversed timeline timestamps', async () => {
+    let now = 1_000;
+    const system = new VFXSystem({}, undefined, { now: () => now });
+    system.spawn(defineEffect({ elements: { arc: mesh(2) } }));
+    await system.update();
+    await system.update();
+    now = 900;
+    await system.update();
+    expect(system.time).toBe(0);
+  });
+
+  it('stores a NaN timeline clock and recovers after one rejected finite bridge sample', async () => {
+    let now = 1_000;
+    const system = new VFXSystem({}, undefined, { now: () => now });
+    system.spawn(defineEffect({ elements: { arc: mesh(2) } }));
+
+    await system.update();
+    now = Number.NaN;
+    await expect(system.update()).rejects.toThrow(RangeError);
+    now = 2_000;
+    await expect(system.update()).rejects.toThrow(RangeError);
+    now = 2_100;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.1);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
+  it.each([
+    ['positive Infinity', Number.POSITIVE_INFINITY, true],
+    ['negative Infinity', Number.NEGATIVE_INFINITY, false],
+  ] as const)('stores %s after a valid timeline clock sample and follows its signed recovery boundary', async (_label, nonFinite, immediateRecovery) => {
+    let now = 1_000;
+    const system = new VFXSystem({}, undefined, { now: () => now });
+    system.spawn(defineEffect({ elements: { arc: mesh(2) } }));
+    await system.update();
+
+    now = nonFinite;
+    await expect(system.update()).rejects.toThrow(RangeError);
+    now = 2_000;
+    if (immediateRecovery) await expect(system.update()).resolves.toBeUndefined();
+    else await expect(system.update()).rejects.toThrow(RangeError);
+    expect(system.time).toBe(0);
+    now = 2_100;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.1);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
+  it.each([
+    ['NaN', Number.NaN, false],
+    ['positive Infinity', Number.POSITIVE_INFINITY, true],
+    ['negative Infinity', Number.NEGATIVE_INFINITY, false],
+  ] as const)('rejects an initial %s timeline clock and preserves its signed recovery boundary', async (_label, nonFinite, immediateRecovery) => {
+    let now = nonFinite;
+    const system = new VFXSystem({}, undefined, { now: () => now });
+    system.spawn(defineEffect({ elements: { arc: mesh(2) } }));
+
+    await expect(system.update()).rejects.toThrow(RangeError);
+    now = 2_000;
+    if (immediateRecovery) await expect(system.update()).resolves.toBeUndefined();
+    else await expect(system.update()).rejects.toThrow(RangeError);
+    expect(system.time).toBe(0);
+    now = 2_100;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.1);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
+  it.each([
+    0,
+    -1,
+    Number.NaN,
+    Number.NEGATIVE_INFINITY,
+  ])('rejects invalid timeline maxMeasuredDeltaSeconds %s synchronously', (maxMeasuredDeltaSeconds) => {
+    expect(() => new VFXSystem({}, undefined, { maxMeasuredDeltaSeconds })).toThrow(RangeError);
+  });
+
+  it.each([null, '0.25'])('rejects timeline runtime type violation %s synchronously', (invalid) => {
+    expect(
+      () =>
+        new VFXSystem({}, undefined, {
+          maxMeasuredDeltaSeconds: invalid as unknown as number,
+        }),
+    ).toThrow(RangeError);
   });
 
   it('retains the final localTime for both emitter and mesh elements after completion', async () => {

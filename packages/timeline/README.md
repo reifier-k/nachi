@@ -7,6 +7,14 @@ for `@nachi-vfx/mesh-fx` meshes.
 Three.js is an exact `three@0.185.1` peer because timeline mesh-fx lifecycle integration shares
 live Three resources with the application.
 
+`timelineSystem.update()` uses the same optional wall-clock contract as core: the first omitted call
+advances zero, later measured deltas default to a 0.25-second cap, a positive
+`maxMeasuredDeltaSeconds` changes it, and `Infinity` disables it. Explicit deltas bypass the cap.
+Timeline owns this measurement and its optional fixed-step accumulator, then sends explicit action/
+loop/mesh/VAT boundary segments to core. Its cumulative `measuredDeltaDroppedSeconds`,
+`fixedStepDroppedSeconds`, and `droppedSeconds` getters therefore report each discard once. See
+[RFC 001](../../docs/rfc/001-api.md) for clock mixing and FIFO invocation semantics.
+
 ```ts
 import { curve, defineEmitter } from '@nachi-vfx/core';
 import { slashArc } from '@nachi-vfx/mesh-fx';

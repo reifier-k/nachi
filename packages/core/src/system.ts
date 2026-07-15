@@ -82,6 +82,8 @@ import { nextUpdateRandomStep } from './update-random-step.js';
 const DEFAULT_MAX_SUB_STEPS = 8;
 const DEFAULT_MAX_POOL_SIZE = 16;
 const DEFAULT_PREWARM_STEP_SECONDS = 1 / 60;
+/** Default wall-clock delta ceiling used only when update() omits deltaSeconds. */
+export const DEFAULT_MAX_MEASURED_DELTA_SECONDS = 0.25;
 const BUDGET_HYSTERESIS_SCORE = 0.05;
 const TIME_EPSILON = 1e-10;
 export const SPAWN_ORDER_WRAP_WARNING_THRESHOLD = 0x8000_0000;
@@ -206,10 +208,16 @@ export interface VfxSystemOptions {
    */
   readonly onRuntimeDiagnostic?: ((diagnostic: VfxDiagnostic) => void) | null;
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
+  /**
+   * Ceiling for wall-clock deltas measured by update() when deltaSeconds is omitted. Defaults to
+   * 0.25 seconds. Infinity disables the ceiling; explicit deltas are never clamped.
+   */
+  readonly maxMeasuredDeltaSeconds?: number;
   /** Maximum released resource bundles retained per effect definition. Defaults to 16. */
   readonly maxPoolSize?: number;
   /** Maximum active automatically ranked transparent draws. Defaults to 2^20 - 1. */
   readonly maxTransparentDrawOrderEntries?: number;
+  /** Millisecond wall clock sampled only by update() calls that omit deltaSeconds. */
   readonly now?: () => number;
   readonly prewarmStepSeconds?: number;
   /** Defaults to epic for backward compatibility; pass auto to use device heuristics. */
@@ -2788,6 +2796,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #onBuildDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
   readonly #onRuntimeDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
   readonly #maxPoolSize: number;
+  readonly #maxMeasuredDeltaSeconds: number;
   readonly #maxTransparentDrawOrderEntries: number;
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
@@ -2804,6 +2813,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   #deviceLossDiagnostic?: VfxDiagnostic;
   #instanceSequence = 0;
   #lastTimestamp?: number;
+  #measuredDeltaDroppedSeconds = 0;
   #qualitySelection: QualityTierSelection;
   #profileFrame = 0;
   #preparationSpawn = false;
@@ -2858,6 +2868,16 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     this.#maxPoolSize = options.maxPoolSize ?? DEFAULT_MAX_POOL_SIZE;
     if (!Number.isSafeInteger(this.#maxPoolSize) || this.#maxPoolSize < 0) {
       throw new RangeError('maxPoolSize must be a non-negative safe integer.');
+    }
+    this.#maxMeasuredDeltaSeconds =
+      options.maxMeasuredDeltaSeconds === undefined
+        ? DEFAULT_MAX_MEASURED_DELTA_SECONDS
+        : options.maxMeasuredDeltaSeconds;
+    if (
+      this.#maxMeasuredDeltaSeconds !== Number.POSITIVE_INFINITY &&
+      (!Number.isFinite(this.#maxMeasuredDeltaSeconds) || this.#maxMeasuredDeltaSeconds <= 0)
+    ) {
+      throw new RangeError('maxMeasuredDeltaSeconds must be a positive finite number or Infinity.');
     }
     this.#maxTransparentDrawOrderEntries =
       options.maxTransparentDrawOrderEntries ?? MAX_TRANSPARENT_DRAW_ORDER_ENTRIES;
@@ -2968,6 +2988,21 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   get time(): number {
     return this.#systemTime;
+  }
+
+  /** Cumulative wall-clock seconds discarded by the measured-delta ceiling. */
+  get measuredDeltaDroppedSeconds(): number {
+    return this.#measuredDeltaDroppedSeconds;
+  }
+
+  /** Cumulative seconds discarded by the fixed-step maxSubSteps backlog ceiling. */
+  get fixedStepDroppedSeconds(): number {
+    return this.#fixedStep?.droppedSeconds ?? 0;
+  }
+
+  /** Cumulative measured-delta plus fixed-step backlog seconds discarded by this system. */
+  get droppedSeconds(): number {
+    return this.measuredDeltaDroppedSeconds + this.fixedStepDroppedSeconds;
   }
 
   setCamera(camera: VfxCameraState): void {
@@ -3318,8 +3353,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   }
 
   update(deltaSeconds?: number): Promise<void> {
-    const delta = deltaSeconds ?? this.#measuredDelta();
-    requireNonNegativeFinite(delta, 'deltaSeconds');
+    const measured = deltaSeconds === undefined;
+    const rawDelta = measured ? this.#measuredDelta() : deltaSeconds;
+    requireNonNegativeFinite(rawDelta, 'deltaSeconds');
+    const delta = measured ? this.#clampMeasuredDelta(rawDelta) : rawDelta;
     const run = async () => {
       this.#updateInFlight = true;
       this.#profileFrame += 1;
@@ -3883,12 +3920,22 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   #measuredDelta(): number {
     const timestamp = this.#now();
+    if (!Number.isFinite(timestamp)) {
+      this.#lastTimestamp = timestamp;
+      return Number.NaN;
+    }
     if (this.#lastTimestamp === undefined) {
       this.#lastTimestamp = timestamp;
       return 0;
     }
     const delta = Math.max(0, (timestamp - this.#lastTimestamp) / 1000);
     this.#lastTimestamp = timestamp;
+    return delta;
+  }
+
+  #clampMeasuredDelta(rawDeltaSeconds: number): number {
+    const delta = Math.min(rawDeltaSeconds, this.#maxMeasuredDeltaSeconds);
+    this.#measuredDeltaDroppedSeconds += rawDeltaSeconds - delta;
     return delta;
   }
 

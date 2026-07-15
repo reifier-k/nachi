@@ -59,6 +59,12 @@ particle/coarse ordering, mesh depth, decal spawn orientation, quality/pool boun
 existing `/m10-sort/` page, all six showcase pages, and the WebGPU/WebGL M11 cache entries described
 below.
 
+The `/m2-runtime/?scenario=time` WebGPU result also injects a one-second `now()` gap into real
+systems. It records the default 0.25-second particle advance and 0.75-second measured discard, a
+configured 0.1-second cap, `Infinity`, explicit-delta bypass, and the separate 0.75 measured plus
+0.05 fixed-step drops. `?forceFailure=measured-delta-clamp` preserves that evidence but makes exactly
+`measuredDeltaClamp=false`; a direct `spike-runner.mjs` run must fail.
+
 The permanent `/m9-timeline/` entry renders a back-facing DoubleSide mesh, compares current opacity
 0.2 against an otherwise identical authoring-opacity 0.8 control, and mutates the source after the
 clone to prove causally that spawn-time state reaches the GPU and remains independent. It also checks

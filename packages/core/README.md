@@ -24,6 +24,20 @@ quality and significance controls, simulation bake/replay, debug snapshots, Grid
 grids, boids, and PBD constraints. Backend capability failures are explicit diagnostics; core does
 not silently replace WebGPU behavior with CPU simulation.
 
+## Measured update deltas
+
+`system.update()` without an argument measures elapsed wall time. The first omitted call advances
+zero; later calls are capped at 0.25 seconds by default so a suspended tab or RAF does not send one
+unbounded variable step into lifetime, spawning, or integration. Configure a positive
+`maxMeasuredDeltaSeconds`, or pass `Infinity` to restore uncapped measurement. An explicit
+`system.update(deltaSeconds)` is never capped and does not reset the measured clock.
+
+The cumulative `measuredDeltaDroppedSeconds`, `fixedStepDroppedSeconds`, and `droppedSeconds`
+getters expose the measured discard, the existing fixed-step backlog discard, and their sum. The
+measured cap runs before fixed partitioning, so the components do not double-count. See
+[RFC 001](../../docs/rfc/001-api.md) for queue ordering, mixed explicit/measured calls, and clock
+validation.
+
 ## Coordinate-space selectors
 
 Particle position and velocity are stored in world space. `velocityCone()` and `linearForce()`

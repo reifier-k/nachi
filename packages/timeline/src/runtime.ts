@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MAX_MEASURED_DELTA_SECONDS,
   VFXSystem as CoreVFXSystem,
   VfxDiagnosticError,
   hashModuleLabel,
@@ -94,7 +95,10 @@ export function timelineCoreOptions(options: TimelineSystemOptions): VfxSystemOp
   return Object.fromEntries(
     Object.entries(options).filter(
       ([key]) =>
-        key !== 'cameraShakeTarget' && key !== 'fixedTimeStep' && key !== 'significanceBudget',
+        key !== 'cameraShakeTarget' &&
+        key !== 'fixedTimeStep' &&
+        key !== 'maxMeasuredDeltaSeconds' &&
+        key !== 'significanceBudget',
     ),
   ) as VfxSystemOptions;
 }
@@ -1078,6 +1082,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #core: CoreVFXSystem<Renderer, Scene>;
   readonly #fixedStep: FixedStepAccumulator | undefined;
   readonly #instances = new Map<string, TimelineEffectInstance>();
+  readonly #maxMeasuredDeltaSeconds: number;
   readonly #now: () => number;
   readonly #subDefinitions = new WeakMap<
     object,
@@ -1085,12 +1090,23 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   >();
   #instanceSequence = 0;
   #lastTimestamp: number | undefined;
+  #measuredDeltaDroppedSeconds = 0;
   #updateQueue: Promise<void> = Promise.resolve();
 
   constructor(renderer: Renderer, scene?: Scene, options: TimelineSystemOptions = {}) {
     this.renderer = renderer;
     this.scene = scene;
     this.#cameraShakeTarget = options.cameraShakeTarget;
+    this.#maxMeasuredDeltaSeconds =
+      options.maxMeasuredDeltaSeconds === undefined
+        ? DEFAULT_MAX_MEASURED_DELTA_SECONDS
+        : options.maxMeasuredDeltaSeconds;
+    if (
+      this.#maxMeasuredDeltaSeconds !== Number.POSITIVE_INFINITY &&
+      (!Number.isFinite(this.#maxMeasuredDeltaSeconds) || this.#maxMeasuredDeltaSeconds <= 0)
+    ) {
+      throw new RangeError('maxMeasuredDeltaSeconds must be a positive finite number or Infinity.');
+    }
     this.#now = options.now ?? (() => globalThis.performance?.now() ?? Date.now());
     this.#fixedStep = options.fixedTimeStep
       ? new FixedStepAccumulator(options.fixedTimeStep)
@@ -1104,6 +1120,21 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   get time(): number {
     return this.#core.time;
+  }
+
+  /** Cumulative wall-clock seconds discarded by the measured-delta ceiling. */
+  get measuredDeltaDroppedSeconds(): number {
+    return this.#measuredDeltaDroppedSeconds;
+  }
+
+  /** Cumulative seconds discarded by the timeline-owned fixed-step backlog ceiling. */
+  get fixedStepDroppedSeconds(): number {
+    return this.#fixedStep?.droppedSeconds ?? 0;
+  }
+
+  /** Cumulative measured-delta plus fixed-step backlog seconds discarded by this system. */
+  get droppedSeconds(): number {
+    return this.measuredDeltaDroppedSeconds + this.fixedStepDroppedSeconds;
   }
 
   setCamera(camera: VfxCameraState): void {
@@ -1181,10 +1212,12 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   }
 
   update(deltaSeconds?: number): Promise<void> {
-    const delta = deltaSeconds ?? this.#measuredDelta();
-    if (!Number.isFinite(delta) || delta < 0) {
+    const measured = deltaSeconds === undefined;
+    const rawDelta = measured ? this.#measuredDelta() : deltaSeconds;
+    if (!Number.isFinite(rawDelta) || rawDelta < 0) {
       return Promise.reject(new RangeError('deltaSeconds must be a non-negative finite number.'));
     }
+    const delta = measured ? this.#clampMeasuredDelta(rawDelta) : rawDelta;
     const run = async () => {
       this.#deleteReleasedInstances();
       for (const instance of this.#instances.values()) {
@@ -1202,12 +1235,22 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   #measuredDelta(): number {
     const timestamp = this.#now();
+    if (!Number.isFinite(timestamp)) {
+      this.#lastTimestamp = timestamp;
+      return Number.NaN;
+    }
     if (this.#lastTimestamp === undefined) {
       this.#lastTimestamp = timestamp;
       return 0;
     }
     const delta = Math.max(0, (timestamp - this.#lastTimestamp) / 1000);
     this.#lastTimestamp = timestamp;
+    return delta;
+  }
+
+  #clampMeasuredDelta(rawDeltaSeconds: number): number {
+    const delta = Math.min(rawDeltaSeconds, this.#maxMeasuredDeltaSeconds);
+    this.#measuredDeltaDroppedSeconds += rawDeltaSeconds - delta;
     return delta;
   }
 

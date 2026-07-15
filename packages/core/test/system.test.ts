@@ -1294,6 +1294,12 @@ class ReleaseOrderingRenderer extends FakeRuntimeRenderer {
   }
 }
 
+class ThrowingReleaseRenderer extends FakeRuntimeRenderer {
+  override releaseKernels(): void {
+    throw new Error('synthetic release failure');
+  }
+}
+
 class FailFirstEmitterUpdateRenderer extends FakeRuntimeRenderer {
   failed = false;
 
@@ -2404,6 +2410,228 @@ describe('VFXSystem runtime scheduler', () => {
     await system.update();
     expect(system.time).toBeCloseTo(0.1);
     expect(instance.localTime).toBeCloseTo(0.1);
+  });
+
+  it('clamps a one-second measured gap by default before lifetime, spawn, and integration', async () => {
+    let now = 1_000;
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, { now: () => now });
+    const emitter = defineEmitter({
+      capacity: 16,
+      init: [lifetime(2)],
+      render: computeRender,
+      spawn: rate({ rate: 4 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await system.update();
+    expect(system.time).toBe(0);
+    expect(system.droppedSeconds).toBe(0);
+    now += 1_000;
+    await system.update();
+
+    const uniforms = instance.getEmitter('particles')?.kernels.uniforms;
+    expect(system.time).toBe(0.25);
+    expect(instance.localTime).toBe(0.25);
+    expect(uniforms?.['System.deltaTime']?.value).toBe(0.25);
+    expect(uniforms?.['Emitter.deltaTime']?.value).toBe(0.25);
+    expect(uniforms?.['Emitter.spawnCount']?.value).toBe(1);
+    expect(system.measuredDeltaDroppedSeconds).toBe(0.75);
+    expect(system.fixedStepDroppedSeconds).toBe(0);
+    expect(system.droppedSeconds).toBe(0.75);
+  });
+
+  it('configures, disables, and explicitly bypasses the measured-delta ceiling', async () => {
+    const cases = [
+      { expectedDrop: 0.9, expectedTime: 0.1, maxMeasuredDeltaSeconds: 0.1 },
+      { expectedDrop: 0, expectedTime: 1, maxMeasuredDeltaSeconds: Number.POSITIVE_INFINITY },
+    ] as const;
+    for (const testCase of cases) {
+      let now = 1_000;
+      const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+        maxMeasuredDeltaSeconds: testCase.maxMeasuredDeltaSeconds,
+        now: () => now,
+      });
+      system.spawn(runtimeEffect({ duration: 2 }));
+      await system.update();
+      now += 1_000;
+      await system.update();
+      expect(system.time).toBeCloseTo(testCase.expectedTime);
+      expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(testCase.expectedDrop);
+    }
+
+    let now = 1_000;
+    const explicit = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      maxMeasuredDeltaSeconds: 0.1,
+      now: () => now,
+    });
+    const instance = explicit.spawn(runtimeEffect({ duration: 2 }));
+    await explicit.update();
+    now += 1_000;
+    await explicit.update(1);
+    expect(explicit.time).toBe(1);
+    expect(instance.localTime).toBe(1);
+    expect(explicit.measuredDeltaDroppedSeconds).toBe(0);
+  });
+
+  it('reports measured and fixed-step drops separately without double counting', async () => {
+    let now = 1_000;
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+      now: () => now,
+    });
+    system.spawn(runtimeEffect({ duration: 2 }));
+    await system.update();
+    now += 1_000;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.2);
+    expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(0.75);
+    expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.05);
+    expect(system.droppedSeconds).toBeCloseTo(0.8);
+
+    await system.update(1);
+    expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(0.75);
+    expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.85);
+    expect(system.droppedSeconds).toBeCloseTo(1.6);
+  });
+
+  it('measures omitted calls at invocation time in FIFO order and keeps explicit calls clock-neutral', async () => {
+    const timestamps = [1_000, 2_000, 3_000, 4_000];
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      now: () => timestamps.shift()!,
+    });
+    system.spawn(runtimeEffect({ duration: 3 }));
+
+    const first = system.update();
+    const second = system.update();
+    const explicit = system.update(0.5);
+    const third = system.update();
+    expect(system.measuredDeltaDroppedSeconds).toBe(1.5);
+    await Promise.all([first, second, explicit, third]);
+    expect(system.time).toBe(1);
+
+    await system.update(0.5);
+    const fourth = system.update();
+    expect(system.measuredDeltaDroppedSeconds).toBe(2.25);
+    await fourth;
+    expect(system.time).toBe(1.75);
+  });
+
+  it('consumes a measured timestamp even when its queued update later rejects', async () => {
+    let now = 1_000;
+    const system = new VFXSystem(new ThrowingReleaseRenderer(), undefined, {
+      maxPoolSize: 0,
+      now: () => now,
+    });
+    const instance = system.spawn(runtimeEffect({ duration: 2 }));
+    let releaseOnRead = false;
+    instance.attachTo({
+      getWorldTransform: () => {
+        if (releaseOnRead) instance.release();
+        return { position: [0, 0, 0] };
+      },
+    });
+    releaseOnRead = true;
+
+    await expect(system.update()).rejects.toThrow('synthetic release failure');
+    now += 1_000;
+    await expect(system.update()).resolves.toBeUndefined();
+
+    expect(system.time).toBe(0.25);
+    expect(system.measuredDeltaDroppedSeconds).toBe(0.75);
+  });
+
+  it('treats equal and reversed timestamps as zero', async () => {
+    let now = 1_000;
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, { now: () => now });
+    system.spawn(runtimeEffect({ duration: 2 }));
+    await system.update();
+    await system.update();
+    now = 900;
+    await system.update();
+    expect(system.time).toBe(0);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
+  it('stores a NaN clock sample and recovers after one rejected finite bridge sample', async () => {
+    let now = 1_000;
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, { now: () => now });
+    system.spawn(runtimeEffect({ duration: 2 }));
+
+    await system.update();
+    now = Number.NaN;
+    expect(() => system.update()).toThrow(RangeError);
+    now = 2_000;
+    expect(() => system.update()).toThrow(RangeError);
+    now = 2_100;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.1);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
+  it.each([
+    ['positive Infinity', Number.POSITIVE_INFINITY, true],
+    ['negative Infinity', Number.NEGATIVE_INFINITY, false],
+  ] as const)('stores %s after a valid clock sample and follows its signed recovery boundary', async (_label, nonFinite, immediateRecovery) => {
+    let now = 1_000;
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, { now: () => now });
+    system.spawn(runtimeEffect({ duration: 2 }));
+    await system.update();
+
+    now = nonFinite;
+    expect(() => system.update()).toThrow(RangeError);
+    now = 2_000;
+    if (immediateRecovery) await expect(system.update()).resolves.toBeUndefined();
+    else expect(() => system.update()).toThrow(RangeError);
+    expect(system.time).toBe(0);
+    now = 2_100;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.1);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
+  it.each([
+    ['NaN', Number.NaN, false],
+    ['positive Infinity', Number.POSITIVE_INFINITY, true],
+    ['negative Infinity', Number.NEGATIVE_INFINITY, false],
+  ] as const)('rejects an initial %s clock sample and preserves its signed recovery boundary', async (_label, nonFinite, immediateRecovery) => {
+    let now = nonFinite;
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, { now: () => now });
+    system.spawn(runtimeEffect({ duration: 2 }));
+
+    expect(() => system.update()).toThrow(RangeError);
+    now = 2_000;
+    if (immediateRecovery) await expect(system.update()).resolves.toBeUndefined();
+    else expect(() => system.update()).toThrow(RangeError);
+    expect(system.time).toBe(0);
+    now = 2_100;
+    await system.update();
+
+    expect(system.time).toBeCloseTo(0.1);
+    expect(system.droppedSeconds).toBe(0);
+  });
+
+  it.each([
+    0,
+    -1,
+    Number.NaN,
+    Number.NEGATIVE_INFINITY,
+  ])('rejects invalid maxMeasuredDeltaSeconds %s synchronously', (maxMeasuredDeltaSeconds) => {
+    expect(
+      () => new VFXSystem(new FakeRuntimeRenderer(), undefined, { maxMeasuredDeltaSeconds }),
+    ).toThrow(RangeError);
+  });
+
+  it.each([null, '0.25'])('rejects runtime type violation %s synchronously', (invalid) => {
+    expect(
+      () =>
+        new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+          maxMeasuredDeltaSeconds: invalid as unknown as number,
+        }),
+    ).toThrow(RangeError);
   });
 
   it('keeps fixed-step results deterministic across input partitions', async () => {
