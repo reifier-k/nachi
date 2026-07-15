@@ -952,15 +952,87 @@ function lifecycleWithDerivedDuration(
   } as InternallyDerivedEmitterLifecycle;
 }
 
-function vector3(input: PositionInput | undefined): readonly [number, number, number] {
-  if (input === undefined) return [0, 0, 0];
-  return 'x' in input ? [input.x, input.y, input.z] : input;
+type EffectPositionSnapshot = readonly [number, number, number];
+type EffectRotationSnapshot =
+  | readonly [number, number, number]
+  | readonly [number, number, number, number];
+type EffectTransformSnapshot = Readonly<{
+  position: EffectPositionSnapshot | undefined;
+  rotation: EffectRotationSnapshot | undefined;
+}>;
+
+function snapshotFiniteVector(
+  value: unknown,
+  lengths: readonly number[],
+  message: string,
+): readonly number[] {
+  let components: readonly unknown[];
+  if (Array.isArray(value)) {
+    const length = value.length;
+    if (!lengths.includes(length)) throw new RangeError(message);
+    const owned: unknown[] = [];
+    for (let index = 0; index < length; index += 1) owned.push(value[index]);
+    components = owned;
+  } else if (typeof value === 'object' && value !== null) {
+    const object = value as { readonly x?: unknown; readonly y?: unknown; readonly z?: unknown };
+    const x = object.x;
+    const y = object.y;
+    const z = object.z;
+    components = [x, y, z];
+  } else {
+    throw new RangeError(message);
+  }
+  if (
+    components.some((component) => typeof component !== 'number' || !Number.isFinite(component))
+  ) {
+    throw new RangeError(message);
+  }
+  return Object.freeze([...components]) as readonly number[];
 }
 
-function quaternion(input: RotationInput | undefined): readonly [number, number, number, number] {
+function snapshotEffectTransform(
+  positionInput: unknown,
+  rotationInput: unknown,
+  positionRequired = false,
+): EffectTransformSnapshot {
+  if (positionRequired && positionInput === undefined) {
+    throw new RangeError('Effect transform position must be a finite vec3.');
+  }
+  const position =
+    positionInput === undefined
+      ? undefined
+      : (snapshotFiniteVector(
+          positionInput,
+          [3],
+          'Effect transform position must be a finite vec3.',
+        ) as EffectPositionSnapshot);
+  const rotation =
+    rotationInput === undefined
+      ? undefined
+      : (snapshotFiniteVector(
+          rotationInput,
+          [3, 4],
+          'Effect transform rotation must be a finite Euler vec3 or quaternion vec4.',
+        ) as EffectRotationSnapshot);
+  return Object.freeze({ position, rotation });
+}
+
+function snapshotAttachmentTransform(transform: unknown): EffectTransformSnapshot {
+  if (typeof transform !== 'object' || transform === null || Array.isArray(transform)) {
+    throw new RangeError('Effect attachment must return a world transform with a finite position.');
+  }
+  const input = transform as { readonly position?: unknown; readonly rotation?: unknown };
+  const position = input.position;
+  const rotation = input.rotation;
+  return snapshotEffectTransform(position, rotation, true);
+}
+
+function quaternion(
+  input: EffectRotationSnapshot | undefined,
+): readonly [number, number, number, number] {
   if (input === undefined) return [0, 0, 0, 1];
-  if (!('x' in input) && input.length === 4) return input;
-  const euler = 'x' in input ? [input.x, input.y, input.z] : input;
+  if (input.length === 4) return input;
+  const euler = input;
   const [x, y, z] = euler.map((value) => value / 2);
   const sx = Math.sin(x!);
   const cx = Math.cos(x!);
@@ -976,12 +1048,9 @@ function quaternion(input: RotationInput | undefined): readonly [number, number,
   ];
 }
 
-function transformMatrix(
-  position: PositionInput | undefined,
-  rotation: RotationInput | undefined,
-): readonly number[] {
-  const [x, y, z, w] = quaternion(rotation);
-  const [tx, ty, tz] = vector3(position);
+function transformMatrix(snapshot: EffectTransformSnapshot): readonly number[] {
+  const [x, y, z, w] = quaternion(snapshot.rotation);
+  const [tx, ty, tz] = snapshot.position ?? [0, 0, 0];
   const x2 = x + x;
   const y2 = y + y;
   const z2 = z + z;
@@ -2178,6 +2247,7 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
   #eventDrainExtended = false;
   #initialized = false;
   #attachment: EffectTransformSource | undefined;
+  #attachmentRevision = 0;
 
   constructor(
     readonly definition: Definition,
@@ -2496,22 +2566,42 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
 
   attachTo(source: EffectTransformSource): void {
     this.#assertNotReleased();
+    const revision = ++this.#attachmentRevision;
+    const transform = source.getWorldTransform();
+    if (!this.#attachmentRevisionIsCurrent(revision)) return;
+    const snapshot = snapshotAttachmentTransform(transform);
+    if (!this.#attachmentRevisionIsCurrent(revision)) return;
+    this.#setTransformSnapshot(snapshot);
+    if (this.#attachmentRevision !== revision) return;
     this.#attachment = source;
-    this.syncAttachment();
   }
 
   detach(): void {
     this.#assertNotReleased();
+    this.#attachmentRevision += 1;
     this.#attachment = undefined;
   }
 
   syncAttachment(): void {
-    const transform = this.#attachment?.getWorldTransform();
+    const source = this.#attachment;
+    if (source === undefined) return;
+    const revision = ++this.#attachmentRevision;
+    const transform = source.getWorldTransform();
     // A transform source is user code and may release its own instance. In that case the returned
-    // transform no longer has an owner to update, so quietly discard it.
-    if (transform && this.#state !== 'released') {
-      this.setTransform(transform.position, transform.rotation);
-    }
+    // transform no longer has an owner to update, so quietly discard it. Any nested attachment
+    // operation, including same-source reentry or a caught invalid attach, owns the newer revision.
+    if (!this.#attachmentSampleIsCurrent(source, revision)) return;
+    const snapshot = snapshotAttachmentTransform(transform);
+    if (!this.#attachmentSampleIsCurrent(source, revision)) return;
+    this.#setTransformSnapshot(snapshot);
+  }
+
+  #attachmentRevisionIsCurrent(revision: number): boolean {
+    return this.#state !== 'released' && this.#attachmentRevision === revision;
+  }
+
+  #attachmentSampleIsCurrent(source: EffectTransformSource, revision: number): boolean {
+    return this.#attachmentRevisionIsCurrent(revision) && this.#attachment === source;
   }
 
   beginTransformStep(): void {
@@ -2565,6 +2655,7 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
 
   #release(poolable: boolean): void {
     if (this.#state === 'released') return;
+    this.#attachmentRevision += 1;
     // Commit the terminal transition before invoking renderer-owned cleanup. Cleanup may throw,
     // but a failed release must never make the instance releasable a second time.
     this.#state = 'released';
@@ -2647,7 +2738,12 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
 
   setTransform(position: PositionInput, rotation?: RotationInput): void {
     this.#assertNotReleased();
-    const transform = transformMatrix(position, rotation);
+    const snapshot = snapshotEffectTransform(position, rotation, true);
+    this.#setTransformSnapshot(snapshot);
+  }
+
+  #setTransformSnapshot(snapshot: EffectTransformSnapshot): void {
+    const transform = transformMatrix(snapshot);
     for (const emitter of this.#emitters.values()) emitter.setTransform(transform);
   }
 
@@ -3084,15 +3180,20 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     definition: EffectDefinition<Elements, Parameters>,
     options: EffectSpawnOptions<EffectDefinition<Elements, Parameters>> = {},
   ): VfxEffectInstance<EffectDefinition<Elements, Parameters>> {
+    const position = options.position;
+    const rotation = options.rotation;
+    const effectTransform = snapshotEffectTransform(position, rotation);
+    const priority = options.priority;
+    if (priority !== undefined && !Number.isFinite(priority)) {
+      throw new RangeError('EffectSpawnOptions.priority must be finite.');
+    }
+    const timeScale = EffectClock.validateTimeScale(options.timeScale ?? 1);
     const preparationSpawn = this.#preparationSpawn;
     const identity = nextEffectInstanceIdentity(this.#instanceSequence);
     this.#instanceSequence = identity.sequence;
     const creationSequence = identity.sequence;
     const id = identity.id;
     const parameterDefinitions = (definition.parameters ?? {}) as ParameterSchema;
-    if (options.priority !== undefined && !Number.isFinite(options.priority)) {
-      throw new RangeError('EffectSpawnOptions.priority must be finite.');
-    }
     const poolKey = this.#qualityPoolKey(
       definition as RuntimeEffectDefinition,
       this.#qualitySelection.tier,
@@ -3101,11 +3202,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       definition,
       id,
       poolKey,
-      options.timeScale ?? 1,
+      timeScale,
       parameterDefinitions,
       (releasedInstance, poolable) =>
         this.#releaseInstance(releasedInstance, poolable, preparationSpawn),
-      options.priority ?? 0,
+      priority ?? 0,
       undefined,
       (capture) => this.#scheduleCapture(capture),
       (owner, diagnostic) => this.#reportRuntimeDiagnostic(owner, diagnostic),
@@ -3212,7 +3313,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         parameterDefinitions,
         options.parameters as Readonly<Record<string, unknown>> | undefined,
       );
-      const transform = transformMatrix(options.position, options.rotation);
+      const transform = transformMatrix(effectTransform);
       const eventResources = new Map<string, Readonly<Record<string, EventQueueResources>>>();
       if (!pooled) {
         for (const entry of compiled.emitters) {

@@ -12,6 +12,7 @@ import type {
   ScreenDistortionConfig,
   ScreenDistortionPass,
   ShockwaveSource,
+  PostPipelineConfig,
   Vec2Input,
 } from './types.js';
 
@@ -25,12 +26,9 @@ export const BLOOM_PRESETS: Readonly<Record<BloomPresetName, Readonly<BloomConfi
   });
 
 export function screenDistortion(config: ScreenDistortionConfig): ScreenDistortionPass {
+  validateScreenDistortionConfig(config);
   const shockwaves = config.shockwaves ?? [];
   const heatHaze = config.heatHaze ?? [];
-  if (shockwaves.length + heatHaze.length === 0) {
-    invalid('screenDistortion', 'requires at least one shockwave or heat-haze region');
-  }
-  if (typeof config.time === 'number') finite(config.time, 'screenDistortion.time');
   const immutableShockwaves = Object.freeze(
     shockwaves.map((source, index) => freezeShockwave(source, index)),
   );
@@ -48,9 +46,7 @@ export function screenDistortion(config: ScreenDistortionConfig): ScreenDistorti
 }
 
 export function radialBlur(config: RadialBlurConfig = {}): RadialBlurPass {
-  if (config.center !== undefined) validateVec2(config.center, 'radialBlur.center');
-  if (typeof config.strength === 'number') unit(config.strength, 'radialBlur.strength');
-  integer(config.samples ?? 8, 'radialBlur.samples', 1, 64);
+  validateRadialBlurConfig(config);
   return Object.freeze({
     kind: 'radialBlur' as const,
     config: Object.freeze({
@@ -75,16 +71,79 @@ export function bloomPreset(
       ? {}
       : { resolutionScale: overrides.resolutionScale }),
   };
-  if (typeof config.strength === 'number') nonNegative(config.strength, 'bloom.strength');
-  if (typeof config.radius === 'number') unit(config.radius, 'bloom.radius');
-  if (typeof config.threshold === 'number') nonNegative(config.threshold, 'bloom.threshold');
+  validateBloomConfig(config);
+  return Object.freeze({ kind: 'bloom' as const, preset, config: Object.freeze(config) });
+}
+
+function validateScreenDistortionConfig(config: ScreenDistortionConfig): void {
+  requireRecord(config, 'screenDistortion', 'must be a configuration object');
+  const shockwaves = config.shockwaves ?? [];
+  const heatHaze = config.heatHaze ?? [];
+  if (!Array.isArray(shockwaves)) invalid('screenDistortion.shockwaves', 'must be an array');
+  if (!Array.isArray(heatHaze)) invalid('screenDistortion.heatHaze', 'must be an array');
+  if (shockwaves.length + heatHaze.length === 0) {
+    invalid('screenDistortion', 'requires at least one shockwave or heat-haze region');
+  }
+  if (typeof config.time === 'number') finite(config.time, 'screenDistortion.time');
+  else if (config.time !== undefined && !isNode(config.time)) {
+    invalid('screenDistortion.time', 'must be a finite number or TSL node');
+  }
+  shockwaves.forEach(validateShockwaveSource);
+  heatHaze.forEach(validateHeatHazeRegion);
+}
+
+function validateRadialBlurConfig(config: RadialBlurConfig): void {
+  requireRecord(config, 'radialBlur', 'must be a configuration object');
+  if (config.center !== undefined) validateVec2(config.center, 'radialBlur.center');
+  if (config.strength !== undefined) validateScalar(config.strength, 'radialBlur.strength', unit);
+  integer(config.samples ?? 8, 'radialBlur.samples', 1, 64);
+}
+
+function validateBloomConfig(config: BloomConfig): void {
+  requireRecord(config, 'bloom', 'must be a configuration object');
+  validateScalar(config.strength, 'bloom.strength', nonNegative);
+  validateScalar(config.radius, 'bloom.radius', unit);
+  validateScalar(config.threshold, 'bloom.threshold', nonNegative);
   if (config.resolutionScale !== undefined)
     unitPositive(config.resolutionScale, 'bloom.resolutionScale');
-  return Object.freeze({ kind: 'bloom' as const, preset, config: Object.freeze(config) });
+}
+
+/** Shared validation for factory-authored and directly constructed public pipeline configs. */
+export function validatePostPipelineConfig(config: PostPipelineConfig): void {
+  requireRecord(config, 'post', 'must be a pipeline configuration object');
+  if (
+    config.outputColorTransform !== undefined &&
+    typeof config.outputColorTransform !== 'boolean'
+  ) {
+    invalid('post.outputColorTransform', 'must be a boolean');
+  }
+  if (config.order !== undefined && !Array.isArray(config.order)) {
+    invalid('post.order', 'must be an array');
+  }
+  if (config.distortion !== undefined) {
+    requireRecord(config.distortion, 'post.distortion', 'must be a pass configuration object');
+    if (config.distortion.kind !== 'distortion')
+      invalid('post.distortion.kind', 'must be distortion');
+    validateScreenDistortionConfig(config.distortion.config);
+  }
+  if (config.radialBlur !== undefined) {
+    requireRecord(config.radialBlur, 'post.radialBlur', 'must be a pass configuration object');
+    if (config.radialBlur.kind !== 'radialBlur')
+      invalid('post.radialBlur.kind', 'must be radialBlur');
+    validateRadialBlurConfig(config.radialBlur.config);
+  }
+  if (config.bloom !== undefined) {
+    requireRecord(config.bloom, 'post.bloom', 'must be a pass configuration object');
+    if (config.bloom.kind !== 'bloom') invalid('post.bloom.kind', 'must be bloom');
+    if (!['soft', 'intense', 'cinematic'].includes(config.bloom.preset))
+      invalid('post.bloom.preset', 'must be soft, intense, or cinematic');
+    validateBloomConfig(config.bloom.config);
+  }
 }
 
 export function validateShockwaveSource(source: ShockwaveSource, index: number): void {
   const path = `screenDistortion.shockwaves[${index}]`;
+  requireRecord(source, path, 'must be a shockwave configuration object');
   validateVec2(source.center, `${path}.center`);
   validateScalar(source.radius, `${path}.radius`, nonNegative);
   validateScalar(source.ringWidth, `${path}.ringWidth`, positive);
@@ -111,6 +170,7 @@ function freezeShockwave(source: ShockwaveSource, index: number): Readonly<Shock
 
 export function validateHeatHazeRegion(region: HeatHazeRegion, index: number): void {
   const path = `screenDistortion.heatHaze[${index}]`;
+  requireRecord(region, path, 'must be a heat-haze configuration object');
   validateVec2(region.center, `${path}.center`);
   validatePositiveVec2(region.size, `${path}.size`);
   validateScalar(region.strength, `${path}.strength`, nonNegative);
@@ -166,6 +226,10 @@ function isNode(value: unknown): value is Node {
   return (
     typeof value === 'object' && value !== null && (value as { isNode?: unknown }).isNode === true
   );
+}
+
+function requireRecord(value: unknown, path: string, message: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(path, message);
 }
 
 function unitPositive(value: number, path: string): number {

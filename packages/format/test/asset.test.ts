@@ -323,6 +323,30 @@ describe('effect asset v2 and v1 compatibility', () => {
     );
   });
 
+  it.each([
+    [{ durationMs: -1, kind: 'hit-stop' }, 'NACHI_ASSET_TIMELINE_HIT_STOP_INVALID'],
+    [{ durationMs: 1, kind: 'hit-stop', timeScale: -0.1 }, 'NACHI_ASSET_TIMELINE_HIT_STOP_INVALID'],
+    [{ kind: 'camera-shake', strength: -1 }, 'NACHI_ASSET_TIMELINE_CAMERA_SHAKE_INVALID'],
+    [
+      { frequency: 0, kind: 'camera-shake', strength: 1 },
+      'NACHI_ASSET_TIMELINE_CAMERA_SHAKE_INVALID',
+    ],
+    [{ kind: 'marker', name: '' }, 'NACHI_ASSET_TIMELINE_MARKER_INVALID'],
+  ])('matches authoring validation for timeline action %j', (action, code) => {
+    const document = {
+      effect: {
+        elements: {},
+        kind: 'effect',
+        timeline: [{ actions: [action], at: 0 }],
+      },
+      format: 'nachi-effect',
+      version: 1,
+    };
+
+    expect(validateEffectAsset(document)).toContainEqual(expect.objectContaining({ code }));
+    expect(() => loadEffect(document)).toThrow(VfxDiagnosticError);
+  });
+
   it('publishes historical v1 and current v2 schemas and loads the current envelope', () => {
     const document = serializeEffect(representativeEffect());
     expect(effectAssetSchemaV1.properties.format.const).toBe('nachi-effect');

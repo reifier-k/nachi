@@ -121,6 +121,10 @@ PNG position textures; convert them to a non-color float texture or export OpenE
 is not representable. Dynamic VAT bounds disable frustum culling by default; applications may opt out
 after supplying conservative mesh bounds.
 
+An external numeric `VatConfig.time` must be finite. `loop` and `disableFrustumCulling` are strict
+booleans for untyped JavaScript input; strings are never interpreted by truthiness. Validation runs
+before VAT nodes or mesh culling state are mutated.
+
 `applyVat()` also retains internal, cloneable binding metadata for the timeline adapter. A timeline
 clone rebuilds graph-reachable VAT layers in order instead of trusting Three's generic NodeMaterial
 clone, which can alias the source VAT graph. Position reachability starts at the latest `absolute`

@@ -106,6 +106,43 @@ describe('@nachi-vfx/post authoring', () => {
     expect(() => bloomPreset('soft', { radius: 1.1 })).toThrow(/within \[0, 1\]/);
   });
 
+  it('revalidates direct PostPipelineConfig construction before graph lowering', () => {
+    const renderer = {
+      getOutputBufferType: () => THREE.HalfFloatType,
+      outputColorSpace: THREE.NoColorSpace,
+      samples: 4,
+      toneMapping: THREE.NoToneMapping,
+    } as unknown as THREE.WebGPURenderer;
+    const scene = new THREE.Scene();
+    const camera = new THREE.Camera();
+
+    expect(() =>
+      createPostPipeline(renderer, scene, camera, {
+        radialBlur: { config: { samples: 0 }, kind: 'radialBlur' },
+      }),
+    ).toThrow(/NACHI_POST_INVALID_PARAMETER/);
+    expect(() =>
+      createPostPipeline(renderer, scene, camera, {
+        bloom: {
+          config: { radius: Number.NaN, strength: 1, threshold: 0.5 },
+          kind: 'bloom',
+          preset: 'soft',
+        },
+      }),
+    ).toThrow(/NACHI_POST_INVALID_PARAMETER/);
+    expect(() =>
+      createPostPipeline(renderer, scene, camera, {
+        distortion: { config: { shockwaves: [] }, kind: 'distortion' },
+      }),
+    ).toThrow(/NACHI_POST_INVALID_PARAMETER/);
+    expect(() =>
+      createPostPipeline(renderer, scene, camera, {
+        outputColorTransform: 'yes' as never,
+        radialBlur: radialBlur(),
+      }),
+    ).toThrow(/NACHI_POST_INVALID_PARAMETER/);
+  });
+
   it('enforces a real pass permutation and the standalone/external time split', () => {
     const renderer = {
       getOutputBufferType: () => THREE.HalfFloatType,

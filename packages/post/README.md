@@ -58,6 +58,11 @@ The default order is `distortion -> radialBlur -> bloom`. Supply `order`, for ex
 `['bloom', 'distortion', 'radialBlur']`, to choose another permutation. Every configured pass must
 appear exactly once.
 
+`PostPipelineConfig` is revalidated by the public constructor even when direct JavaScript data
+bypasses `screenDistortion()`, `radialBlur()`, or `bloomPreset()`. Pass tags/configs, numeric ranges,
+source shapes, samples, presets, order arrays, and `outputColorTransform` fail synchronously before
+Three creates a render graph or target.
+
 `soft`, `intense`, and `cinematic` bloom presets wrap Three r185's `BloomNode`. Overrides can tune
 `strength`, `radius`, `threshold`, and internal `resolutionScale`.
 

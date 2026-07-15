@@ -7,6 +7,26 @@ for `@nachi-vfx/mesh-fx` meshes.
 Three.js is an exact `three@0.185.1` peer because timeline mesh-fx lifecycle integration shares
 live Three resources with the application.
 
+Timeline spawn `timeScale` follows the live `setTimeScale()` non-negative finite invariant and is
+rejected synchronously before retaining an instance. Optional spawn transforms, required live
+`setTransform()` positions, and required attachment positions use the same finite vec3/Euler/quat
+contract as core. Invalid input is rejected before ID allocation, internal pose changes, child GPU
+updates, attachment replacement, or mesh mutation. Position/rotation properties and every tuple or
+object component are read once into an owned frozen snapshot; stored pose, child options, and mesh
+updates never reread caller-owned transform data. On an instance's first update, attachment
+synchronization precedes time-zero actions, including `update(0)`, so an `at(0, play(...))` child is
+created from the latest socket pose rather than the pose observed when attachment was registered.
+Direct and scheduled attachment samples carry an operation revision: any nested attach, detach,
+release, or caught invalid attach invalidates the outer sample, including same-source reentry. The
+revision is checked immediately after the source getter and again after all transform accessors are
+snapshotted, so the newer operation remains authoritative for the immediate mesh pose and time-zero
+children while a source-getter release stays quiet.
+
+Timeline-system spawn reads `timeScale`, position, rotation, seed, camera-shake target, and parameters
+once before ID allocation, then constructs a plain frozen own-data options record. The public
+`TimelineEffectInstance` constructor revalidates that record and continues to reject invalid direct
+construction, without rereading the caller's accessors or exposing an internal validation bypass.
+
 `timelineSystem.update()` uses the same optional wall-clock contract as core: the first omitted call
 advances zero, later measured deltas default to a 0.25-second cap, a positive
 `maxMeasuredDeltaSeconds` changes it, and `Infinity` disables it. Explicit deltas bypass the cap.

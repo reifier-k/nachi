@@ -448,6 +448,7 @@ async function run(): Promise<void> {
     const program = compileEmitter(
       defineEmitter({
         capacity: 4,
+        init: [lifetime(1)],
         integration: 'none',
         render,
         spawn: burst({ count: 1 }),
@@ -1145,6 +1146,7 @@ async function run(): Promise<void> {
       elements: {
         particles: defineEmitter({
           capacity: 4,
+          init: [lifetime(1)],
           integration: 'none',
           render: decalRenderer({}),
           spawn: burst({ count: 1 }),

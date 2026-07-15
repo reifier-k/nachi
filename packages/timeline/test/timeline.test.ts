@@ -71,6 +71,7 @@ function fakeChildInstance(
     clock.applyHitStop(durationMs, timeScale),
   );
   const setTimeScale = vi.fn((value: number) => clock.setTimeScale(value));
+  const setTransform = vi.fn();
   const child = {
     applyHitStop,
     definition: { elements: {}, kind: 'effect' },
@@ -92,7 +93,7 @@ function fakeChildInstance(
     },
     setParameter: () => undefined,
     setTimeScale,
-    setTransform: () => undefined,
+    setTransform,
     stop: () => {
       state = 'stopped';
     },
@@ -101,6 +102,7 @@ function fakeChildInstance(
     advance: (delta: number) => clock.advance(delta),
     applyHitStop,
     child,
+    setTransform,
     setTimeScale,
     setState: (value: EffectInstanceState) => {
       state = value;
@@ -1515,6 +1517,666 @@ describe('@nachi-vfx/timeline runtime', () => {
     } finally {
       spawnSpy.mockRestore();
     }
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    -1,
+    '1',
+  ])('rejects invalid timeline spawn timeScale %s synchronously', (timeScale) => {
+    const system = new VFXSystem({});
+    expect(() =>
+      system.spawn(defineEffect({ elements: {} }), { timeScale: timeScale as never }),
+    ).toThrowError('timeScale must be a non-negative finite number.');
+  });
+
+  it('snapshots accessor-backed spawn timeScale once before ID allocation', () => {
+    const system = new VFXSystem({});
+    let reads = 0;
+    const instance = system.spawn(defineEffect({ elements: {} }), {
+      get timeScale() {
+        reads += 1;
+        return reads === 1 ? 1 : Number.NaN;
+      },
+    });
+
+    expect(instance.id).toBe('nachi-timeline-1');
+    expect(instance.timeScale).toBe(1);
+    expect(reads).toBe(1);
+  });
+
+  it('rejects the first invalid spawn timeScale read without consuming an ID', () => {
+    const definition = defineEffect({ elements: {} });
+    const system = new VFXSystem({});
+    let reads = 0;
+    expect(() =>
+      system.spawn(definition, {
+        get timeScale() {
+          reads += 1;
+          return reads === 1 ? Number.NaN : 1;
+        },
+      }),
+    ).toThrowError('timeScale must be a non-negative finite number.');
+    expect(reads).toBe(1);
+    expect(system.instanceCount).toBe(0);
+    expect(system.spawn(definition).id).toBe('nachi-timeline-1');
+
+    expect(
+      () =>
+        new TimelineEffectInstance(
+          definition,
+          'direct',
+          undefined,
+          { timeScale: Number.NaN },
+          undefined,
+          () => {
+            throw new Error('empty effect cannot spawn a child');
+          },
+          () => undefined,
+        ),
+    ).toThrowError('timeScale must be a non-negative finite number.');
+  });
+
+  it('rejects malformed spawn transforms before ID allocation or mesh construction', () => {
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-spawn-transform';
+    const effect = defineEffect({ elements: { ring: meshFxElement(authored) } });
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+
+    for (const options of [
+      { position: [0, Number.NaN, 0] },
+      { position: 'origin' },
+      { rotation: [0, Number.POSITIVE_INFINITY, 0] },
+    ]) {
+      expect(() => system.spawn(effect, options as never)).toThrow();
+      expect(system.instanceCount).toBe(0);
+      expect(scene.getObjectByName('h2-13-spawn-transform')).toBeUndefined();
+    }
+
+    const instance = system.spawn(effect);
+    expect(instance.id).toBe('nachi-timeline-1');
+    expect(scene.getObjectByName('h2-13-spawn-transform')).toBeInstanceOf(THREE.Mesh);
+    instance.release();
+    authored.material.dispose();
+    authored.geometry.dispose();
+  });
+
+  it('snapshots accessor-backed spawn transforms once before ID and mesh construction', () => {
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-spawn-transform-snapshot';
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const componentReads = [0, 0, 0];
+    const position = new Proxy([4, 5, 6], {
+      get(target, property, receiver) {
+        if (property === '0' || property === '1' || property === '2') {
+          const index = Number(property);
+          componentReads[index] = componentReads[index]! + 1;
+          return componentReads[index] === 1 ? target[index] : Number.NaN;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    let positionReads = 0;
+
+    const instance = system.spawn(defineEffect({ elements: { ring: meshFxElement(authored) } }), {
+      get position() {
+        positionReads += 1;
+        return position as never;
+      },
+    });
+
+    expect(instance.id).toBe('nachi-timeline-1');
+    expect(positionReads).toBe(1);
+    expect(componentReads).toEqual([1, 1, 1]);
+    expect(scene.getObjectByName('h2-13-spawn-transform-snapshot')?.position.toArray()).toEqual([
+      4, 5, 6,
+    ]);
+    instance.release();
+    authored.material.dispose();
+    authored.geometry.dispose();
+  });
+
+  it('rejects malformed live and attachment transforms without changing pose or source', async () => {
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-live-transform';
+    const child = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({
+      elements: { child, ring: meshFxElement(authored) },
+      timeline: [at(0, play('child'))],
+    });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const scene = new THREE.Scene();
+      const system = new VFXSystem({}, scene);
+      const instance = system.spawn(effect, { position: [1, 2, 3] });
+      const clone = scene.getObjectByName('h2-13-live-transform') as THREE.Mesh;
+      expect(clone.position.toArray()).toEqual([1, 2, 3]);
+
+      for (const [position, rotation] of [
+        [undefined, undefined],
+        ['origin', undefined],
+        [[0, Number.NaN, 0], undefined],
+        [
+          [1, 2, 3],
+          [0, Number.POSITIVE_INFINITY, 0],
+        ],
+      ] as const) {
+        expect(() => instance.setTransform(position as never, rotation as never)).toThrow();
+        expect(clone.position.toArray()).toEqual([1, 2, 3]);
+      }
+
+      let attachedPosition: readonly [number, number, number] = [4, 5, 6];
+      let attachedRotation: readonly [number, number, number] = [0, 0, 0.25];
+      instance.attachTo({
+        getWorldTransform: () => ({ position: attachedPosition, rotation: attachedRotation }),
+      });
+      expect(clone.position.toArray()).toEqual([4, 5, 6]);
+      expect(() =>
+        instance.attachTo({ getWorldTransform: () => ({ rotation: [0, 0, 0] }) as never }),
+      ).toThrow();
+      expect(() => instance.attachTo({ getWorldTransform: () => undefined as never })).toThrow();
+      expect(clone.position.toArray()).toEqual([4, 5, 6]);
+
+      attachedPosition = [7, 8, 9];
+      attachedRotation = [0, 0, 0.5];
+      await system.update(0);
+      expect(clone.position.toArray()).toEqual([7, 8, 9]);
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(spawnSpy.mock.calls[0]?.[1]).toMatchObject({
+        position: [7, 8, 9],
+        rotation: [0, 0, 0.5],
+      });
+      const childTransformCalls = fake.setTransform.mock.calls.length;
+      expect(() => instance.setTransform([0, Number.NaN, 0])).toThrow();
+      expect(fake.setTransform).toHaveBeenCalledTimes(childTransformCalls);
+      expect(clone.position.toArray()).toEqual([7, 8, 9]);
+
+      instance.release();
+      authored.material.dispose();
+      authored.geometry.dispose();
+    } finally {
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it('synchronizes attachment before an initial update(0) time-zero play', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const effect = defineEffect({ elements: { child: emitter }, timeline: [at(0, play('child'))] });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const system = new VFXSystem({});
+      const instance = system.spawn(effect, { position: [1, 2, 3] });
+      let position: readonly [number, number, number] = [4, 5, 6];
+      instance.attachTo({ getWorldTransform: () => ({ position }) });
+      position = [7, 8, 9];
+
+      await system.update(0);
+
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(spawnSpy.mock.calls[0]?.[1]).toMatchObject({ position: [7, 8, 9] });
+    } finally {
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it('snapshots accessor-backed live transform components exactly once', () => {
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-transform-snapshot';
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const instance = system.spawn(defineEffect({ elements: { ring: meshFxElement(authored) } }), {
+      position: [1, 2, 3],
+    });
+    const tupleReads = { components: [0, 0, 0], length: 0 };
+    const position = new Proxy([4, 5, 6], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          tupleReads.length += 1;
+          return Reflect.get(target, property, receiver);
+        }
+        if (property === '0' || property === '1' || property === '2') {
+          const index = Number(property);
+          tupleReads.components[index] = tupleReads.components[index]! + 1;
+          return tupleReads.components[index] === 1 ? target[index] : Number.NaN;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() => instance.setTransform(position as never)).not.toThrow();
+    expect(scene.getObjectByName('h2-13-transform-snapshot')?.position.toArray()).toEqual([
+      4, 5, 6,
+    ]);
+    expect(tupleReads).toEqual({ components: [1, 1, 1], length: 1 });
+
+    const objectReads = [0, 0, 0];
+    const objectPosition = {
+      get x() {
+        objectReads[0] = objectReads[0]! + 1;
+        return objectReads[0] === 1 ? 7 : Number.NaN;
+      },
+      get y() {
+        objectReads[1] = objectReads[1]! + 1;
+        return objectReads[1] === 1 ? 8 : Number.NaN;
+      },
+      get z() {
+        objectReads[2] = objectReads[2]! + 1;
+        return objectReads[2] === 1 ? 9 : Number.NaN;
+      },
+    };
+    expect(() => instance.setTransform(objectPosition)).not.toThrow();
+    expect(scene.getObjectByName('h2-13-transform-snapshot')?.position.toArray()).toEqual([
+      7, 8, 9,
+    ]);
+    expect(objectReads).toEqual([1, 1, 1]);
+
+    const rotationReads = { components: [0, 0, 0, 0], length: 0 };
+    const rotation = new Proxy([0, 0, 0, 1], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          rotationReads.length += 1;
+          return Reflect.get(target, property, receiver);
+        }
+        if (property === '0' || property === '1' || property === '2' || property === '3') {
+          const index = Number(property);
+          rotationReads.components[index] = rotationReads.components[index]! + 1;
+          return rotationReads.components[index] === 1 ? target[index] : Number.NaN;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => instance.setTransform([10, 11, 12], rotation as never)).not.toThrow();
+    expect(scene.getObjectByName('h2-13-transform-snapshot')?.quaternion.toArray()).toEqual([
+      0, 0, 0, 1,
+    ]);
+    expect(rotationReads).toEqual({ components: [1, 1, 1, 1], length: 1 });
+
+    instance.release();
+    authored.material.dispose();
+    authored.geometry.dispose();
+  });
+
+  it('keeps a property-getter attachment replacement authoritative for time-zero play', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-property-reentrant-attachment';
+    const effect = defineEffect({
+      elements: { child: emitter, ring: meshFxElement(authored) },
+      timeline: [at(0, play('child'), play('ring'))],
+    });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const scene = new THREE.Scene();
+      const system = new VFXSystem({}, scene);
+      const instance = system.spawn(effect);
+      const replacement = {
+        getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+      };
+      let positionReads = 0;
+      let rotationReads = 0;
+      const staleTransform = {
+        get position() {
+          positionReads += 1;
+          instance.attachTo(replacement);
+          return [40, 50, 60] as const;
+        },
+        get rotation() {
+          rotationReads += 1;
+          return undefined;
+        },
+      };
+
+      instance.attachTo({ getWorldTransform: () => staleTransform as never });
+      expect(
+        scene.getObjectByName('h2-13-property-reentrant-attachment')?.position.toArray(),
+      ).toEqual([7, 8, 9]);
+      expect({ positionReads, rotationReads }).toEqual({ positionReads: 1, rotationReads: 1 });
+      await system.update(0);
+
+      expect(spawnSpy.mock.calls[0]?.[1]).toMatchObject({ position: [7, 8, 9] });
+      expect(
+        scene.getObjectByName('h2-13-property-reentrant-attachment')?.position.toArray(),
+      ).toEqual([7, 8, 9]);
+
+      instance.attachTo({
+        getWorldTransform: () =>
+          ({
+            get position() {
+              instance.detach();
+              return [40, 50, 60] as const;
+            },
+          }) as never,
+      });
+      expect(
+        scene.getObjectByName('h2-13-property-reentrant-attachment')?.position.toArray(),
+      ).toEqual([7, 8, 9]);
+      instance.release();
+    } finally {
+      spawnSpy.mockRestore();
+      authored.material.dispose();
+      authored.geometry.dispose();
+    }
+  });
+
+  it('keeps an update-time component replacement authoritative for time-zero child and mesh', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-component-reentrant-attachment';
+    const effect = defineEffect({
+      elements: { child: emitter, ring: meshFxElement(authored) },
+      timeline: [at(0, play('child'), play('ring'))],
+    });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const scene = new THREE.Scene();
+      const system = new VFXSystem({}, scene);
+      const instance = system.spawn(effect);
+      const replacement = {
+        getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+      };
+      let replaceDuringSnapshot = false;
+      const componentReads = [0, 0, 0];
+      const source = {
+        getWorldTransform: () => {
+          if (!replaceDuringSnapshot) return { position: [1, 2, 3] as const };
+          const position = new Proxy([40, 50, 60], {
+            get(target, property, receiver) {
+              if (property === '0' || property === '1' || property === '2') {
+                const index = Number(property);
+                componentReads[index] = componentReads[index]! + 1;
+                if (index === 0) instance.attachTo(replacement);
+              }
+              return Reflect.get(target, property, receiver);
+            },
+          });
+          return { position };
+        },
+      };
+      instance.attachTo(source as never);
+      replaceDuringSnapshot = true;
+
+      await system.update(0);
+
+      expect(spawnSpy.mock.calls[0]?.[1]).toMatchObject({ position: [7, 8, 9] });
+      expect(
+        scene.getObjectByName('h2-13-component-reentrant-attachment')?.position.toArray(),
+      ).toEqual([7, 8, 9]);
+      expect(componentReads).toEqual([1, 1, 1]);
+      instance.release();
+    } finally {
+      spawnSpy.mockRestore();
+      authored.material.dispose();
+      authored.geometry.dispose();
+    }
+  });
+
+  it('keeps direct nested attachment operations authoritative through time-zero play', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-direct-reentrant-attachment';
+    const effect = defineEffect({
+      elements: { child: emitter, ring: meshFxElement(authored) },
+      timeline: [at(0, play('child'), play('ring'))],
+    });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const scene = new THREE.Scene();
+      const system = new VFXSystem({}, scene);
+      const instance = system.spawn(effect);
+      const mesh = scene.getObjectByName('h2-13-direct-reentrant-attachment');
+      const replacement = {
+        getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+      };
+
+      instance.attachTo({
+        getWorldTransform: () => {
+          instance.attachTo(replacement);
+          return { position: [40, 50, 60] as const };
+        },
+      });
+      expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+
+      await system.update(0);
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(spawnSpy.mock.calls[0]?.[1]).toMatchObject({ position: [7, 8, 9] });
+      expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+
+      instance.attachTo({
+        getWorldTransform: () => {
+          try {
+            instance.attachTo({
+              getWorldTransform: () => ({ position: [Number.NaN, 0, 0] }),
+            });
+          } catch (error) {
+            expect(error).toBeInstanceOf(RangeError);
+          }
+          return { position: [70, 80, 90] as const };
+        },
+      });
+      expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+      await system.update(0.01);
+      expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+
+      instance.attachTo({
+        getWorldTransform: () => {
+          instance.detach();
+          return { position: [100, 110, 120] as const };
+        },
+      });
+      expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+      await system.update(0.01);
+      expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+
+      expect(() =>
+        instance.attachTo({
+          getWorldTransform: () => {
+            instance.release();
+            return { position: [130, 140, 150] as const };
+          },
+        }),
+      ).not.toThrow();
+      expect(instance.state).toBe('released');
+    } finally {
+      spawnSpy.mockRestore();
+      authored.material.dispose();
+      authored.geometry.dispose();
+    }
+  });
+
+  it('invalidates outer samples for same-source direct and update-time reentry', async () => {
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-same-source-reentry';
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const instance = system.spawn(defineEffect({ elements: { ring: meshFxElement(authored) } }));
+    const mesh = scene.getObjectByName('h2-13-same-source-reentry');
+    let phase: 'direct-outer' | 'direct-nested' | 'sync-outer' | 'sync-nested' | 'steady' =
+      'direct-outer';
+    const source = {
+      getWorldTransform: () => {
+        if (phase === 'direct-outer') {
+          phase = 'direct-nested';
+          instance.attachTo(source);
+          phase = 'steady';
+          return { position: [40, 50, 60] as const };
+        }
+        if (phase === 'sync-outer') {
+          phase = 'sync-nested';
+          instance.attachTo(source);
+          phase = 'steady';
+          return { position: [70, 80, 90] as const };
+        }
+        return { position: [7, 8, 9] as const };
+      },
+    };
+
+    instance.attachTo(source);
+    expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+    phase = 'sync-outer';
+    await system.update(0.01);
+    expect(mesh?.position.toArray()).toEqual([7, 8, 9]);
+
+    instance.release();
+    authored.material.dispose();
+    authored.geometry.dispose();
+  });
+
+  it('keeps a reentrant attachment replacement authoritative for initial time-zero play', async () => {
+    const emitter = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 1 }),
+    });
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-reentrant-attachment';
+    const effect = defineEffect({
+      elements: { child: emitter, ring: meshFxElement(authored) },
+      timeline: [at(0, play('child'), play('ring'))],
+    });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    try {
+      const scene = new THREE.Scene();
+      const system = new VFXSystem({}, scene);
+      const instance = system.spawn(effect);
+      const replacement = {
+        getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+      };
+      let replaceDuringRead = false;
+      const original = {
+        getWorldTransform: () => {
+          if (replaceDuringRead) {
+            instance.attachTo(replacement);
+            return { position: [40, 50, 60] as const };
+          }
+          return { position: [1, 2, 3] as const };
+        },
+      };
+      instance.attachTo(original);
+      replaceDuringRead = true;
+
+      await system.update(0);
+
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(spawnSpy.mock.calls[0]?.[1]).toMatchObject({ position: [7, 8, 9] });
+      expect(scene.getObjectByName('h2-13-reentrant-attachment')?.position.toArray()).toEqual([
+        7, 8, 9,
+      ]);
+      instance.release();
+    } finally {
+      spawnSpy.mockRestore();
+      authored.material.dispose();
+      authored.geometry.dispose();
+    }
+  });
+
+  it('discards an attachment sample when its source detaches itself', async () => {
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'h2-13-reentrant-detach';
+    const effect = defineEffect({
+      elements: { ring: meshFxElement(authored) },
+      timeline: [at(0, play('ring'))],
+    });
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const instance = system.spawn(effect);
+    let detachDuringRead = false;
+    let reads = 0;
+    const source = {
+      getWorldTransform: () => {
+        reads += 1;
+        if (detachDuringRead) {
+          instance.detach();
+          return { position: [40, 50, 60] as const };
+        }
+        return { position: [1, 2, 3] as const };
+      },
+    };
+    instance.attachTo(source);
+    detachDuringRead = true;
+
+    await system.update(0);
+    await system.update(0);
+
+    expect(scene.getObjectByName('h2-13-reentrant-detach')?.position.toArray()).toEqual([1, 2, 3]);
+    expect(reads).toBe(2);
+    instance.release();
+    authored.material.dispose();
+    authored.geometry.dispose();
+  });
+
+  it('quietly discards an attachment sample after a reentrant release', async () => {
+    const authored = ring({ material: fxMaterial() });
+    const effect = defineEffect({
+      elements: { ring: meshFxElement(authored) },
+      timeline: [at(0, play('ring'))],
+    });
+    const system = new VFXSystem({}, new THREE.Scene());
+    const instance = system.spawn(effect);
+    let releaseDuringRead = false;
+    let stalePropertyReads = 0;
+    instance.attachTo({
+      getWorldTransform: () => {
+        if (releaseDuringRead) {
+          instance.release();
+          return {
+            get position(): never {
+              stalePropertyReads += 1;
+              throw new Error('released sample must not be read');
+            },
+          } as never;
+        }
+        return { position: [40, 50, 60] };
+      },
+    });
+    releaseDuringRead = true;
+
+    await expect(system.update(0)).resolves.toBeUndefined();
+
+    expect(instance.state).toBe('released');
+    expect(stalePropertyReads).toBe(0);
+    authored.material.dispose();
+    authored.geometry.dispose();
   });
 
   it('passes the effect frame through timeline play while preserving emitter offset data', async () => {

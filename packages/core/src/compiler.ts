@@ -14,6 +14,10 @@ import {
 } from './module-validation.js';
 import { pcgRandomFloatNode, resolveModuleSlot, resolveRandomSampleSlot } from './random.js';
 import {
+  BUILT_IN_UNIFORM_DEFINITIONS,
+  MATERIALIZED_PARAMETER_PATHS,
+} from './uniform-definitions.js';
+import {
   collectEmitterBehaviorConfigDiagnostics,
   collectEmitterLifecycleDiagnostics,
   collectEmitterModuleLabelDiagnostics,
@@ -674,6 +678,8 @@ export interface KernelModuleValidationContext {
 
 export interface RenderModuleCompileContext {
   readonly capacity: number;
+  /** Full emitter definition for package-owned cross-module consistency validation. */
+  readonly definition: EmitterDefinition<AttributeSchema, ParameterSchema>;
   readonly indirect: CompiledDrawIndirectDescription;
   readonly module: RenderModule;
   readonly path: string;
@@ -965,24 +971,6 @@ const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.updateInterpolatedTransform',
   'Emitter.updateRandomStep',
 ]);
-const MATERIALIZED_PARAMETER_PATHS = new Set<ParameterPath>([
-  'System.deltaTime',
-  'System.projectionMatrix',
-  'System.time',
-  'System.viewMatrix',
-  'System.viewportSize',
-  'Emitter.age',
-  'Emitter.deltaTime',
-  'Emitter.eventReadBank',
-  'Emitter.eventWriteBank',
-  'Emitter.localTime',
-  'Emitter.loopIndex',
-  'Emitter.seed',
-  'Emitter.spawnGeneration',
-  'Emitter.transform',
-  'Emitter.updateRandomStep',
-]);
-
 type WriteOwnershipModule = {
   readonly source?: 'author' | 'compiler';
   readonly stage: CompiledModuleStage | 'event' | 'render';
@@ -1781,32 +1769,16 @@ function uniformDescriptions(
     tslType: resolveTslStorageType(type),
     type,
   });
-  const uniforms: CompiledUniformDescription[] = [
-    describe('System.time', 0, 'f32'),
-    describe('System.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
-    describe('System.projectionMatrix', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
-    describe('System.viewMatrix', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
-    describe('System.viewportSize', [1, 1], 'vec2'),
-    describe('System.visibility', 1, 'f32'),
-    describe('Emitter.age', 0, 'f32'),
-    describe('Emitter.deltaTime', options.deltaTime ?? 1 / 60, 'f32'),
-    describe('Emitter.eventReadBank', 1, 'u32'),
-    describe('Emitter.eventWriteBank', 0, 'u32'),
-    describe('Emitter.localTime', 0, 'f32'),
-    describe('Emitter.logicalCapacity', 0, 'u32'),
-    describe('Emitter.loopIndex', 0, 'u32'),
-    describe('Emitter.interpolationActive', 0, 'u32'),
-    describe('Emitter.previousRotation', [0, 0, 0, 1], 'quat'),
-    describe('Emitter.previousTransform', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
-    describe('Emitter.rotation', [0, 0, 0, 1], 'quat'),
-    describe('Emitter.seed', options.emitterSeed ?? 0, 'u32'),
-    describe('Emitter.spawnCount', 0, 'u32'),
-    describe('Emitter.spawnGeneration', options.spawnGeneration ?? 0, 'u32'),
-    describe('Emitter.spawnPhaseStart', 1, 'f32'),
-    describe('Emitter.spawnPhaseStep', 0, 'f32'),
-    describe('Emitter.transform', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'mat4'),
-    describe('Emitter.updateRandomStep', 0, 'u32'),
-  ];
+  const defaultOverrides = new Map<ParameterPath, unknown>([
+    ['System.deltaTime', options.deltaTime ?? 1 / 60],
+    ['Emitter.deltaTime', options.deltaTime ?? 1 / 60],
+    ['Emitter.seed', options.emitterSeed ?? 0],
+    ['Emitter.spawnGeneration', options.spawnGeneration ?? 0],
+  ]);
+  const uniforms: CompiledUniformDescription[] = BUILT_IN_UNIFORM_DEFINITIONS.map(
+    ({ default: defaultValue, path, type }) =>
+      describe(path, defaultOverrides.get(path) ?? defaultValue, type),
+  );
   for (const [path, definition] of Object.entries(parameters ?? {})) {
     if (path.startsWith('User.')) {
       uniforms.push(describe(path as ParameterPath, definition.default, definition.type));
@@ -2474,6 +2446,7 @@ function compileRegisteredDraws(
     };
     const context: RenderModuleCompileContext = {
       capacity: definition.capacity,
+      definition,
       diagnostic: (code, message, diagnosticPath = path, severity = 'error') => {
         diagnostics.push(diagnostic(code, message, diagnosticPath, severity));
       },
@@ -4681,6 +4654,27 @@ export function compileEmitter<
       message:
         'Particles.lifetime is allocated without Particles.age, so particle aging and death are disabled. Add a lifecycle declaration or an age write.',
       path: 'attributeSchema.byName.lifetime',
+      phase: 'compile',
+      severity: 'warning',
+    });
+  }
+  const authorModules = collectEmitterModules(authorDefinition);
+  const readsNormalizedAge = authorModules.some(({ module }) =>
+    module.access?.reads.includes('Particles.normalizedAge'),
+  );
+  const authoredWrites = new Set(
+    authorModules.flatMap(({ module }) => [...(module.access?.writes ?? [])]),
+  );
+  const ownsNormalizedAge = authoredWrites.has('Particles.normalizedAge');
+  const ownsAgeDrivenNormalizedAge =
+    authoredWrites.has('Particles.age') && authoredWrites.has('Particles.lifetime');
+  if (readsNormalizedAge && !ownsNormalizedAge && !ownsAgeDrivenNormalizedAge) {
+    diagnostics.push({
+      code: 'NACHI_NORMALIZED_AGE_WITHOUT_LIFETIME',
+      hint: 'Add a lifetime() initializer, declare both Particles.age and Particles.lifetime writes, or write Particles.normalizedAge explicitly.',
+      message:
+        'Particles.normalizedAge is read without age/lifetime write ownership or an explicit normalizedAge writer.',
+      path: 'attributeSchema.byName.normalizedAge',
       phase: 'compile',
       severity: 'warning',
     });

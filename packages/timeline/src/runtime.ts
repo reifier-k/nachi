@@ -104,6 +104,88 @@ export function timelineCoreOptions(options: TimelineSystemOptions): VfxSystemOp
   ) as VfxSystemOptions;
 }
 
+function validateTimelineTimeScale(timeScale: unknown): number {
+  if (typeof timeScale !== 'number' || !Number.isFinite(timeScale) || timeScale < 0) {
+    throw new RangeError('timeScale must be a non-negative finite number.');
+  }
+  return timeScale;
+}
+
+type TimelinePositionSnapshot = readonly [number, number, number];
+type TimelineRotationSnapshot =
+  | readonly [number, number, number]
+  | readonly [number, number, number, number];
+type TimelineTransformSnapshot = Readonly<{
+  position: TimelinePositionSnapshot | undefined;
+  rotation: TimelineRotationSnapshot | undefined;
+}>;
+
+function snapshotFiniteVector(
+  value: unknown,
+  lengths: readonly number[],
+  message: string,
+): readonly number[] {
+  let components: readonly unknown[];
+  if (Array.isArray(value)) {
+    const length = value.length;
+    if (!lengths.includes(length)) throw new RangeError(message);
+    const owned: unknown[] = [];
+    for (let index = 0; index < length; index += 1) owned.push(value[index]);
+    components = owned;
+  } else if (typeof value === 'object' && value !== null) {
+    const object = value as { readonly x?: unknown; readonly y?: unknown; readonly z?: unknown };
+    const x = object.x;
+    const y = object.y;
+    const z = object.z;
+    components = [x, y, z];
+  } else {
+    throw new RangeError(message);
+  }
+  if (
+    components.some((component) => typeof component !== 'number' || !Number.isFinite(component))
+  ) {
+    throw new RangeError(message);
+  }
+  return Object.freeze([...components]) as readonly number[];
+}
+
+function snapshotTimelineTransform(
+  positionInput: unknown,
+  rotationInput: unknown,
+  positionRequired = false,
+): TimelineTransformSnapshot {
+  if (positionRequired && positionInput === undefined) {
+    throw new RangeError('Effect transform position must be a finite vec3.');
+  }
+  const position =
+    positionInput === undefined
+      ? undefined
+      : (snapshotFiniteVector(
+          positionInput,
+          [3],
+          'Effect transform position must be a finite vec3.',
+        ) as TimelinePositionSnapshot);
+  const rotation =
+    rotationInput === undefined
+      ? undefined
+      : (snapshotFiniteVector(
+          rotationInput,
+          [3, 4],
+          'Effect transform rotation must be a finite Euler vec3 or quaternion vec4.',
+        ) as TimelineRotationSnapshot);
+  return Object.freeze({ position, rotation });
+}
+
+function snapshotAttachmentTransform(transform: unknown): TimelineTransformSnapshot {
+  if (typeof transform !== 'object' || transform === null || Array.isArray(transform)) {
+    throw new RangeError('Effect attachment must return a world transform with a finite position.');
+  }
+  const input = transform as { readonly position?: unknown; readonly rotation?: unknown };
+  const position = input.position;
+  const rotation = input.rotation;
+  return snapshotTimelineTransform(position, rotation, true);
+}
+
 type RuntimeDefinition = {
   readonly elements: Readonly<Record<string, EffectElementDefinition>>;
   readonly kind: 'effect';
@@ -253,15 +335,12 @@ function runtimeDiagnostic(
   };
 }
 
-function vector3(input: PositionInput | undefined): readonly [number, number, number] {
-  if (input === undefined) return [0, 0, 0];
-  return 'x' in input ? [input.x, input.y, input.z] : input;
-}
-
-function quaternion(input: RotationInput | undefined): readonly [number, number, number, number] {
+function quaternion(
+  input: TimelineRotationSnapshot | undefined,
+): readonly [number, number, number, number] {
   if (input === undefined) return [0, 0, 0, 1];
-  if (!('x' in input) && input.length === 4) return input;
-  const euler = 'x' in input ? [input.x, input.y, input.z] : input;
+  if (input.length === 4) return input;
+  const euler = input;
   const [x, y, z] = euler.map((value) => value / 2);
   const sx = Math.sin(x!);
   const cx = Math.cos(x!);
@@ -339,11 +418,10 @@ function cloneMesh(
 function setMeshTransform(
   mesh: MeshFxMesh,
   authoredLocal: AuthoredLocalTransform,
-  position: PositionInput | undefined,
-  rotation: RotationInput | undefined,
+  transform: TimelineTransformSnapshot,
 ): void {
-  const [px, py, pz] = vector3(position);
-  const [qx, qy, qz, qw] = quaternion(rotation);
+  const [px, py, pz] = transform.position ?? [0, 0, 0];
+  const [qx, qy, qz, qw] = quaternion(transform.rotation);
   const [ax, ay, az] = authoredLocal.position;
   const tx = 2 * (qy * az - qz * ay);
   const ty = 2 * (qz * ax - qx * az);
@@ -399,6 +477,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   readonly #spawnEmitter: (key: string, options: EffectSpawnOptions) => VfxEffectInstance;
   readonly #timeline: TimelineDefinition;
   #attachment: EffectTransformSource | undefined;
+  #attachmentRevision = 0;
   #baseTimeScale: number;
   #cycle = 0;
   #ended = false;
@@ -406,9 +485,9 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   #hitStopRemaining = 0;
   #hitStopScale = 0;
   #localTime = 0;
-  #position: PositionInput | undefined;
+  #position: TimelinePositionSnapshot | undefined;
   #released = false;
-  #rotation: RotationInput | undefined;
+  #rotation: TimelineRotationSnapshot | undefined;
   #sequence = 0;
   #shakeOutputActive = false;
   #started = false;
@@ -426,6 +505,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       diagnostic: VfxDiagnostic,
     ) => void,
   ) {
+    const effectTransform = snapshotTimelineTransform(options.position, options.rotation);
     this.definition = definition;
     this.id = id;
     this.#scene = isSceneTarget(scene) ? scene : undefined;
@@ -437,10 +517,10 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       this.#timeline = { duration: 0, entries: [], kind: 'timeline', speed: 1 };
       timelineDiagnostics = error.diagnostics;
     }
-    this.#baseTimeScale = options.timeScale ?? 1;
+    this.#baseTimeScale = validateTimelineTimeScale(options.timeScale ?? 1);
     this.#seed = options.seed ?? 0;
-    this.#position = options.position;
-    this.#rotation = options.rotation;
+    this.#position = effectTransform.position;
+    this.#rotation = effectTransform.rotation;
     this.#cameraShakeTarget = options.cameraShakeTarget ?? defaultCameraShakeTarget;
     this.#spawnEmitter = spawnEmitter;
     this.#onRuntimeDiagnostic = onRuntimeDiagnostic;
@@ -465,7 +545,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
           vatControls,
         };
         publishMeshVisibility(runtime);
-        setMeshTransform(mesh, authoredLocal, this.#position, this.#rotation);
+        setMeshTransform(mesh, authoredLocal, effectTransform);
         this.#meshRuntimes.set(key, runtime);
         this.#scene?.add(mesh);
       }
@@ -615,18 +695,41 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
 
   attachTo(source: EffectTransformSource): void {
     this.#assertNotReleased();
+    const revision = ++this.#attachmentRevision;
+    const transform = source.getWorldTransform();
+    if (!this.#attachmentRevisionIsCurrent(revision)) return;
+    const snapshot = snapshotAttachmentTransform(transform);
+    if (!this.#attachmentRevisionIsCurrent(revision)) return;
+    this.#setTransformSnapshot(snapshot);
+    if (this.#released || this.#attachmentRevision !== revision) return;
     this.#attachment = source;
-    this.syncAttachment();
   }
 
   detach(): void {
     this.#assertNotReleased();
+    this.#attachmentRevision += 1;
     this.#attachment = undefined;
   }
 
   syncAttachment(): void {
-    const transform = this.#attachment?.getWorldTransform();
-    if (transform) this.setTransform(transform.position, transform.rotation);
+    const source = this.#attachment;
+    if (source === undefined) return;
+    const revision = ++this.#attachmentRevision;
+    const transform = source.getWorldTransform();
+    // Attachment getters are user code. Every nested operation, including same-source reentry or
+    // a caught invalid attach, owns a newer revision and makes this time-zero sample stale.
+    if (!this.#attachmentSampleIsCurrent(source, revision)) return;
+    const snapshot = snapshotAttachmentTransform(transform);
+    if (!this.#attachmentSampleIsCurrent(source, revision)) return;
+    this.#setTransformSnapshot(snapshot);
+  }
+
+  #attachmentRevisionIsCurrent(revision: number): boolean {
+    return !this.#released && this.#attachmentRevision === revision;
+  }
+
+  #attachmentSampleIsCurrent(source: EffectTransformSource, revision: number): boolean {
+    return this.#attachmentRevisionIsCurrent(revision) && this.#attachment === source;
   }
 
   setParameter<Path extends UserParameterKeys<Definition>>(
@@ -647,10 +750,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
 
   setTimeScale(timeScale: number): void {
     this.#assertNotReleased();
-    if (!Number.isFinite(timeScale) || timeScale < 0) {
-      throw new RangeError('timeScale must be a non-negative finite number.');
-    }
-    this.#baseTimeScale = timeScale;
+    this.#baseTimeScale = validateTimelineTimeScale(timeScale);
     for (const emitter of this.#activeEmitters.values()) {
       emitter.setTimeScale(this.#effectiveTimeScale());
     }
@@ -673,11 +773,17 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
 
   setTransform(position: PositionInput, rotation?: RotationInput): void {
     this.#assertNotReleased();
-    this.#position = position;
-    this.#rotation = rotation;
-    for (const emitter of this.#activeEmitters.values()) emitter.setTransform(position, rotation);
+    const snapshot = snapshotTimelineTransform(position, rotation, true);
+    this.#setTransformSnapshot(snapshot);
+  }
+
+  #setTransformSnapshot(snapshot: TimelineTransformSnapshot): void {
+    this.#position = snapshot.position;
+    this.#rotation = snapshot.rotation;
+    for (const emitter of this.#activeEmitters.values())
+      emitter.setTransform(snapshot.position!, snapshot.rotation);
     for (const runtime of this.#meshRuntimes.values())
-      setMeshTransform(runtime.mesh, runtime.authoredLocal, position, rotation);
+      setMeshTransform(runtime.mesh, runtime.authoredLocal, snapshot);
   }
 
   stop(): void {
@@ -688,6 +794,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
 
   release(): void {
     if (this.#released) return;
+    this.#attachmentRevision += 1;
     this.#stopAllElements();
     this.#disposeMeshes();
     this.#actionListeners.clear();
@@ -791,6 +898,8 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   beginUpdate(): void {
     this.#visitCompanions(() => undefined);
     if (this.#state !== 'active' || this.#started) return;
+    this.syncAttachment();
+    if (this.#state !== 'active') return;
     this.#started = true;
     this.#processDueEntries();
     if (this.#state !== 'active') return;
@@ -1204,12 +1313,27 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     definition: Definition,
     options: TimelineEffectSpawnOptions<Definition> = {},
   ): TimelineEffectInstance<Definition> {
+    const timeScale = validateTimelineTimeScale(options.timeScale ?? 1);
+    const position = options.position;
+    const rotation = options.rotation;
+    const transform = snapshotTimelineTransform(position, rotation);
+    const seed = options.seed;
+    const cameraShakeTarget = options.cameraShakeTarget;
+    const parameters = options.parameters;
+    const snapshotOptions = Object.freeze({
+      cameraShakeTarget,
+      parameters,
+      position: transform.position,
+      rotation: transform.rotation,
+      seed,
+      timeScale,
+    }) as TimelineEffectSpawnOptions<Definition>;
     const id = `nachi-timeline-${++this.#instanceSequence}`;
     const instance = new TimelineEffectInstance(
       definition,
       id,
       this.scene,
-      options,
+      snapshotOptions,
       this.#cameraShakeTarget,
       (key, spawnOptions) => this.#spawnEmitter(definition, key, spawnOptions),
       (owner, diagnostic) => this.#reportRuntimeDiagnostic(owner, diagnostic),

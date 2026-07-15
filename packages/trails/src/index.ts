@@ -54,16 +54,70 @@ function diagnostic(code: string, message: string, path: string): VfxDiagnostic 
   return { code, message, path, phase: 'compile', severity: 'error' };
 }
 
-function collectRibbonIdDiagnostics(value: RibbonIdInput, path: string): VfxDiagnostic[] {
-  return typeof value !== 'number' && (!Number.isSafeInteger(value.count) || value.count < 1)
-    ? [
-        diagnostic(
-          'NACHI_RIBBON_ID_COUNT_INVALID',
-          'Alternating ribbonId count must be a positive safe integer.',
-          `${path}.count`,
-        ),
-      ]
-    : [];
+function collectRibbonIdDiagnostics(value: unknown, path: string): VfxDiagnostic[] {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff
+      ? []
+      : [
+          diagnostic(
+            'NACHI_RIBBON_ID_VALUE_INVALID',
+            'ribbonId must be a non-negative safe integer within the u32 range.',
+            path,
+          ),
+        ];
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return [
+      diagnostic(
+        'NACHI_RIBBON_ID_VALUE_INVALID',
+        'ribbonId must be a u32 integer or alternating configuration.',
+        path,
+      ),
+    ];
+  }
+  const input = value as Readonly<Record<string, unknown>>;
+  const diagnostics: VfxDiagnostic[] = [];
+  if (input.mode !== 'alternating') {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_RIBBON_ID_MODE_INVALID',
+        'ribbonId mode must be "alternating".',
+        `${path}.mode`,
+      ),
+    );
+  }
+  const countValid =
+    Number.isSafeInteger(input.count) &&
+    (input.count as number) >= 1 &&
+    (input.count as number) <= 0xffff_ffff;
+  if (!countValid) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_RIBBON_ID_COUNT_INVALID',
+        'Alternating ribbonId count must be a positive integer within the u32 range.',
+        `${path}.count`,
+      ),
+    );
+  }
+  const offset = input.offset ?? 0;
+  if (!Number.isSafeInteger(offset) || (offset as number) < 0) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_RIBBON_ID_OFFSET_INVALID',
+        'Alternating ribbonId offset must be a non-negative safe integer.',
+        `${path}.offset`,
+      ),
+    );
+  } else if (countValid && (offset as number) + (input.count as number) - 1 > 0xffff_ffff) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_RIBBON_ID_OFFSET_INVALID',
+        'Alternating ribbonId range must remain within u32.',
+        `${path}.offset`,
+      ),
+    );
+  }
+  return diagnostics;
 }
 
 function collectRibbonDiagnostics(options: RibbonOptions, path: string): VfxDiagnostic[] {
@@ -119,7 +173,15 @@ function collectRibbonDiagnostics(options: RibbonOptions, path: string): VfxDiag
     );
   }
   const uv = options.uv ?? { mode: 'stretched' as const };
-  if (uv.mode === 'tiled' && (!Number.isFinite(uv.tileLength) || uv.tileLength <= 0)) {
+  if (uv.mode !== 'stretched' && uv.mode !== 'tiled') {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_RIBBON_UV_MODE_INVALID',
+        'Ribbon UV mode must be "stretched" or "tiled".',
+        `${path}.uv.mode`,
+      ),
+    );
+  } else if (uv.mode === 'tiled' && (!Number.isFinite(uv.tileLength) || uv.tileLength <= 0)) {
     diagnostics.push(
       diagnostic(
         'NACHI_RIBBON_TILE_LENGTH_INVALID',
@@ -129,6 +191,23 @@ function collectRibbonDiagnostics(options: RibbonOptions, path: string): VfxDiag
     );
   }
   return diagnostics;
+}
+
+function maximumRibbonId(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const input = value as Readonly<Record<string, unknown>>;
+  const offset = input.offset ?? 0;
+  if (
+    input.mode !== 'alternating' ||
+    !Number.isSafeInteger(input.count) ||
+    (input.count as number) < 1 ||
+    !Number.isSafeInteger(offset) ||
+    (offset as number) < 0
+  ) {
+    return undefined;
+  }
+  return (offset as number) + (input.count as number) - 1;
 }
 
 function throwIfInvalid(diagnostics: readonly VfxDiagnostic[]): void {
@@ -226,6 +305,21 @@ export function registerTrails(registry: KernelModuleRegistry): KernelModuleRegi
         context.diagnostic(item.code, item.message, item.path, item.severity);
       }
       if (configDiagnostics.some(({ severity }) => severity === 'error')) return undefined;
+      const authoredRibbonIds = (context.definition.init ?? [])
+        .filter((module) => module.type === 'trails/ribbon-id')
+        .map((module) =>
+          maximumRibbonId((module.config as Readonly<Record<string, unknown>>).value),
+        )
+        .filter((value): value is number => value !== undefined);
+      const highestRibbonId = authoredRibbonIds.length === 0 ? 0 : Math.max(...authoredRibbonIds);
+      if (highestRibbonId >= maxRibbons) {
+        context.diagnostic(
+          'NACHI_RIBBON_ID_OUT_OF_RANGE',
+          `Ribbon maxRibbons ${maxRibbons} does not cover authored ribbonId ${highestRibbonId}.`,
+          `${context.path}.config.maxRibbons`,
+        );
+        return undefined;
+      }
       const uv = options.uv ?? { mode: 'stretched' as const };
       const vertex = context.vertex(['color', 'position'], {
         additionalStorageBuffers: [

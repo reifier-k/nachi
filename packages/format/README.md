@@ -18,6 +18,11 @@ Inline TSL/functions and live engine resources must be replaced by registered or
 Built-in grid-stage source strings are checked against the core vocabulary, and serialized custom
 grid-stage references must resolve in the matching registry passed to `loadEffect()`.
 
+Timeline actions use the authoring invariants: hit-stop duration/scale are non-negative,
+camera-shake strength/duration are non-negative and frequency is positive, and marker names are
+non-empty. The exported JSON schemas publish those bounds, while validation/loading retain
+path-specific `NACHI_ASSET_TIMELINE_*` diagnostics.
+
 The default v1 → v2 migration changes only the envelope version and never upgrades module versions.
 Historical renderer module-v1 configs retain generic payload validation and their old compiler
 meaning. Renderer module-v2 billboard, mesh, and decal configs are closed recursively, including

@@ -1232,13 +1232,51 @@ class AssetValidator {
       this.finiteNumber(value.strength, `${path}.strength`);
       if (value.duration !== undefined) this.finiteNumber(value.duration, `${path}.duration`);
       if (value.frequency !== undefined) this.finiteNumber(value.frequency, `${path}.frequency`);
+      if (
+        (typeof value.strength === 'number' &&
+          Number.isFinite(value.strength) &&
+          value.strength < 0) ||
+        (typeof value.duration === 'number' &&
+          Number.isFinite(value.duration) &&
+          value.duration < 0) ||
+        (typeof value.frequency === 'number' &&
+          Number.isFinite(value.frequency) &&
+          value.frequency <= 0)
+      ) {
+        this.error(
+          'NACHI_ASSET_TIMELINE_CAMERA_SHAKE_INVALID',
+          'cameraShake strength/duration must be non-negative and frequency must be positive.',
+          path,
+        );
+      }
     } else if (kind === 'hit-stop') {
       this.required(value, ['durationMs', 'kind'], path);
       this.finiteNumber(value.durationMs, `${path}.durationMs`);
       if (value.timeScale !== undefined) this.finiteNumber(value.timeScale, `${path}.timeScale`);
+      if (
+        (typeof value.durationMs === 'number' &&
+          Number.isFinite(value.durationMs) &&
+          value.durationMs < 0) ||
+        (typeof value.timeScale === 'number' &&
+          Number.isFinite(value.timeScale) &&
+          value.timeScale < 0)
+      ) {
+        this.error(
+          'NACHI_ASSET_TIMELINE_HIT_STOP_INVALID',
+          'hitStop duration and timeScale must be non-negative finite numbers.',
+          path,
+        );
+      }
     } else {
       this.required(value, ['kind', 'name'], path);
       if (typeof value.name !== 'string') this.type('string', value.name, `${path}.name`);
+      else if (value.name.length === 0) {
+        this.error(
+          'NACHI_ASSET_TIMELINE_MARKER_INVALID',
+          'Marker name must not be empty.',
+          `${path}.name`,
+        );
+      }
       if (value.payload !== undefined) this.json(value.payload, `${path}.payload`);
     }
   }

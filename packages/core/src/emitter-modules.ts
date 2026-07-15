@@ -218,9 +218,12 @@ export function collectEmitterBehaviorConfigDiagnostics(
       module.config as Readonly<Record<string, unknown>>,
       `${path}.config`,
       module.version,
+      config.parameters,
     ).filter(
       ({ code }) =>
         code.startsWith('NACHI_COLLISION_') ||
+        code === 'NACHI_VALUE_INPUT_INVALID' ||
+        code === 'NACHI_TURBULENCE_OCTAVES_INVALID' ||
         code === 'NACHI_MODULE_SPACE_INVALID' ||
         code.startsWith('NACHI_POSITION_SPHERE_') ||
         code === 'NACHI_VELOCITY_CONE_DIRECTION_INVALID' ||

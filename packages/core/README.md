@@ -24,6 +24,42 @@ quality and significance controls, simulation bake/replay, debug snapshots, Grid
 grids, boids, and PBD constraints. Backend capability failures are explicit diagnostics; core does
 not silently replace WebGPU behavior with CPU simulation.
 
+## Input validation
+
+Built-in module factories reject malformed ordinary `ValueInput` constants, ranges, parameter
+fallbacks, and curve values synchronously; direct/JSON module data runs the same checks at compile
+time. Required ValueInput fields cannot be missing or `undefined`, while optional field omission
+retains its documented default. Parameter generators require a string path even when their fallback
+is omitted. Every scalar or vec3 field, including nested `positionSphere.arc.thetaMax`, validates
+finite shape and the declared type of both `User.*` and materialized built-in parameters from the
+shared uniform definition. `turbulence.octaves` is an integer from 1 through 4. Collision modes are
+exactly `bounce`, `kill`, or `stick`; plane, sphere, box, and SDF collisions require one, while
+scene-depth collision may omit it. A normalized-age reader without age+lifetime writers or an
+explicit normalized-age writer receives `NACHI_NORMALIZED_AGE_WITHOUT_LIFETIME`.
+
+Spawn `position`/`rotation`, `instance.setTransform()`, and attachment transforms are checked before
+uniform writes. Spawn may omit position, but live transforms and attachment samples require one.
+Positions are finite vec3 values; rotations are finite Euler vec3 or quaternion vec4 values.
+Invalid untyped JavaScript input never consumes an instance ID, replaces an attachment, or partially
+changes the live transform. Each operation reads the position/rotation properties, tuple length and
+components, or object `x/y/z` components once into an owned frozen snapshot. Validation, matrix
+construction, and uniform writes use only that snapshot, so mutable accessors cannot pass validation
+and then supply a different value during commit.
+
+System spawn reads `timeScale` and `priority` once, validates those primitive snapshots before ID
+allocation, and passes the same values to the instance clock and significance calculation. An
+accessor cannot return a valid value for validation and a different value for construction; an
+invalid first value does not consume an ID. Direct `VfxEffectInstance` construction still validates
+its clock value through `EffectClock`.
+
+Attachment sampling is guarded by an operation revision at both direct `attachTo()` and scheduled
+update boundaries. If a transform getter reentrantly attaches again, detaches, releases, or attempts
+an invalid attachment that it catches, that nested operation invalidates the outer sample. This also
+applies when the nested attachment uses the same source object, so stale poses cannot overwrite the
+newer operation. Runtime checks the revision both after the source getter and again after snapshotting
+the returned transform, preserving quiet release/replacement while also catching reentry from
+transform property or component accessors.
+
 ## Runtime diagnostic delivery
 
 `VFXSystem` reports runtime failures and warnings when they occur. Omit `onRuntimeDiagnostic` for

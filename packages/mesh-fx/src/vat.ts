@@ -434,6 +434,22 @@ function validateVat(mesh: THREE.Mesh, config: VatConfig): ValidatedVat {
   if (!position) invalid('applyVat.mesh.geometry.position', 'is required');
   const frameCount = integer(config.frameCount, 'applyVat.frameCount', 1);
   const fps = positive(config.fps, 'applyVat.fps');
+  if (typeof config.time === 'number') finite(config.time, 'applyVat.time');
+  else if (
+    config.time !== undefined &&
+    (typeof config.time !== 'object' || config.time === null || config.time.isNode !== true)
+  ) {
+    invalid('applyVat.time', 'must be a finite number or TSL node');
+  }
+  if (config.loop !== undefined && typeof config.loop !== 'boolean') {
+    invalid('applyVat.loop', 'must be a boolean');
+  }
+  if (
+    config.disableFrustumCulling !== undefined &&
+    typeof config.disableFrustumCulling !== 'boolean'
+  ) {
+    invalid('applyVat.disableFrustumCulling', 'must be a boolean');
+  }
   const [start, end] = validateRange(config.frameRange, frameCount);
   const dimensions = validatePositionTexture(config.positionTexture, position.count, frameCount);
   if (config.normalTexture) {

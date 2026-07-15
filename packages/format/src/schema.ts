@@ -402,10 +402,10 @@ export const effectAssetSchemaV1 = {
         {
           additionalProperties: false,
           properties: {
-            duration: { type: 'number' },
-            frequency: { type: 'number' },
+            duration: { minimum: 0, type: 'number' },
+            frequency: { exclusiveMinimum: 0, type: 'number' },
             kind: { const: 'camera-shake' },
-            strength: { type: 'number' },
+            strength: { minimum: 0, type: 'number' },
           },
           required: ['kind', 'strength'],
           type: 'object',
@@ -413,16 +413,20 @@ export const effectAssetSchemaV1 = {
         {
           additionalProperties: false,
           properties: {
-            durationMs: { type: 'number' },
+            durationMs: { minimum: 0, type: 'number' },
             kind: { const: 'hit-stop' },
-            timeScale: { type: 'number' },
+            timeScale: { minimum: 0, type: 'number' },
           },
           required: ['kind', 'durationMs'],
           type: 'object',
         },
         {
           additionalProperties: false,
-          properties: { kind: { const: 'marker' }, name: { type: 'string' }, payload: {} },
+          properties: {
+            kind: { const: 'marker' },
+            name: { minLength: 1, type: 'string' },
+            payload: {},
+          },
           required: ['kind', 'name'],
           type: 'object',
         },

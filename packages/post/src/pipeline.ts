@@ -5,6 +5,7 @@ import type UniformNode from 'three/src/nodes/core/UniformNode.js';
 
 import {
   POST_STANDARD_ORDER,
+  validatePostPipelineConfig,
   validateHeatHazeRegion,
   validateShockwaveSource,
 } from './authoring.js';
@@ -106,6 +107,7 @@ export class PostPipeline {
     config: PostPipelineConfig,
   ) {
     this.#renderer = renderer;
+    validatePostPipelineConfig(config);
     this.order = resolveOrder(config);
     const scenePass = pass(scene, camera);
     // PassNode applies these values lazily on its first update. Publish the final context now so

@@ -246,6 +246,405 @@ describe('M10 bitonic particle sort contract', () => {
   });
 });
 
+describe('H2-13 input validation hardening', () => {
+  it.each([
+    ['lifetime', () => lifetime(Number.NaN)],
+    ['drag', () => drag('0.5' as never)],
+    ['gravity', () => gravity([0, Number.POSITIVE_INFINITY, 0])],
+    [
+      'velocityCone.speed',
+      () => velocityCone({ angle: 30, direction: [0, 1, 0], speed: [] as never }),
+    ],
+  ])('rejects invalid ordinary ValueInput at the %s factory boundary', (_name, factory) => {
+    expect(factory).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_VALUE_INPUT_INVALID' })],
+      }),
+    );
+  });
+
+  it.each([
+    ['lifetime.value', () => lifetime(undefined as never)],
+    ['drag.value', () => drag(undefined as never)],
+    ['gravity.value', () => gravity(undefined as never)],
+    ['positionSphere.radius', () => positionSphere({ radius: undefined } as never)],
+    [
+      'positionSphere.arc.thetaMax',
+      () => positionSphere({ arc: { thetaMax: undefined }, radius: 1 } as never),
+    ],
+    [
+      'killVolume.radius',
+      () => killVolume({ mode: 'inside', radius: undefined, shape: 'sphere' } as never),
+    ],
+    [
+      'killVolume.size',
+      () => killVolume({ mode: 'inside', shape: 'box', size: undefined } as never),
+    ],
+    [
+      'velocityCone.speed',
+      () =>
+        velocityCone({
+          angle: 30,
+          direction: [0, 1, 0],
+          speed: undefined,
+        } as never),
+    ],
+  ])('rejects missing required ValueInput at the %s factory boundary', (_name, factory) => {
+    expect(factory).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_VALUE_INPUT_INVALID' })],
+      }),
+    );
+  });
+
+  it.each([
+    ['lifetime.value', lifetime(1), { value: undefined }, 'init[0].config.value'],
+    ['drag.value', drag(1), { value: undefined }, 'update[0].config.value'],
+    ['gravity.value', gravity(1), { value: undefined }, 'update[0].config.value'],
+    [
+      'positionSphere.radius',
+      positionSphere({ radius: 1 }),
+      { radius: undefined },
+      'init[0].config.radius',
+    ],
+    [
+      'positionSphere.arc.thetaMax',
+      positionSphere({ arc: { thetaMax: 90 }, radius: 1 }),
+      { arc: { thetaMax: undefined }, radius: 1 },
+      'init[0].config.arc.thetaMax',
+    ],
+    [
+      'killVolume.radius',
+      killVolume({ mode: 'inside', radius: 1, shape: 'sphere' }),
+      { mode: 'inside', radius: undefined, shape: 'sphere' },
+      'update[0].config.radius',
+    ],
+    [
+      'killVolume.size',
+      killVolume({ mode: 'inside', shape: 'box', size: [1, 1, 1] }),
+      { mode: 'inside', shape: 'box', size: undefined },
+      'update[0].config.size',
+    ],
+    [
+      'velocityCone.speed',
+      velocityCone({ angle: 30, direction: [0, 1, 0], speed: 1 }),
+      { angle: 30, direction: [0, 1, 0], space: 'world', speed: undefined },
+      'init[0].config.speed',
+    ],
+  ])('rejects missing required ValueInput at the raw %s compiler boundary', (_name, valid, config, path) => {
+    const invalid = { ...valid, config };
+    const program = compileEmitter(
+      invalid.stage === 'init'
+        ? { ...baseEmitter({ init: [invalid] }), integration: 'none' }
+        : { ...baseEmitter({ integration: 'none', update: [invalid] }) },
+    );
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_VALUE_INPUT_INVALID', path }),
+    );
+  });
+
+  it.each([
+    ['missing path', { kind: 'parameter' }],
+    ['numeric path', { kind: 'parameter', path: 123 }],
+    ['null path', { kind: 'parameter', path: null }],
+  ])('rejects a parameter ValueInput with %s at the factory boundary', (_name, value) => {
+    expect(() => lifetime(value as never)).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_VALUE_INPUT_INVALID' })],
+      }),
+    );
+  });
+
+  it.each([
+    ['missing path', { kind: 'parameter' }],
+    ['numeric path', { kind: 'parameter', path: 123 }],
+    ['null path', { kind: 'parameter', path: null }],
+  ])('rejects a parameter ValueInput with %s at the raw compiler boundary', (_name, value) => {
+    const invalidLifetime = { ...lifetime(1), config: { value } };
+    const program = compileEmitter({ ...baseEmitter(), init: [invalidLifetime] });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_VALUE_INPUT_INVALID',
+        path: 'init[0].config.value',
+      }),
+    );
+  });
+
+  it('keeps direct compiler input on the same ordinary ValueInput validator', () => {
+    const invalidLifetime = { ...lifetime(1), config: { value: Number.NEGATIVE_INFINITY } };
+    const program = compileEmitter({ ...baseEmitter(), init: [invalidLifetime] });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_VALUE_INPUT_INVALID',
+        path: 'init[0].config.value',
+      }),
+    );
+  });
+
+  it('rejects a parameter generator whose declared type does not match its ValueInput field', () => {
+    const wind = defineParameter('User.wind', { default: [0, 1, 0], type: 'vec3' });
+    const program = compileEmitter({
+      ...baseEmitter(),
+      init: [{ ...lifetime(1), config: { value: parameter('User.wind') } }],
+      parameters: { 'User.wind': wind },
+    });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_VALUE_INPUT_INVALID',
+        path: 'init[0].config.value',
+      }),
+    );
+  });
+
+  it.each([
+    [
+      'User f32 -> positionSphere.center',
+      {
+        ...positionSphere({ center: [0, 0, 0], radius: 1 }),
+        config: { center: parameter('User.scalar'), radius: 1 },
+      },
+      { 'User.scalar': defineParameter('User.scalar', { default: 1, type: 'f32' }) },
+      'init[0].config.center',
+    ],
+    [
+      'User vec3 -> positionSphere.arc.thetaMax',
+      {
+        ...positionSphere({ arc: { thetaMax: 90 }, radius: 1 }),
+        config: { arc: { thetaMax: parameter('User.vector') }, radius: 1 },
+      },
+      {
+        'User.vector': defineParameter('User.vector', {
+          default: [0, 1, 0],
+          type: 'vec3',
+        }),
+      },
+      'init[0].config.arc.thetaMax',
+    ],
+    [
+      'System.time -> positionSphere.center',
+      {
+        ...positionSphere({ center: [0, 0, 0], radius: 1 }),
+        config: { center: parameter('System.time'), radius: 1 },
+      },
+      {},
+      'init[0].config.center',
+    ],
+    [
+      'System.viewportSize -> gravity',
+      { ...gravity(0), config: { value: parameter('System.viewportSize') } },
+      {},
+      'update[0].config.value',
+    ],
+  ])('validates materialized parameter types for %s', (_name, module, parameters, path) => {
+    const definition =
+      module.stage === 'init'
+        ? { ...baseEmitter({ init: [module] }), parameters }
+        : { ...baseEmitter({ update: [module] }), parameters };
+    const program = compileEmitter(definition);
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_VALUE_INPUT_INVALID', path }),
+    );
+  });
+
+  it.each([
+    [
+      'System.time -> positionSphere.center',
+      () => positionSphere({ center: parameter('System.time') as never, radius: 1 }),
+    ],
+    ['System.viewportSize -> gravity', () => gravity(parameter('System.viewportSize') as never)],
+  ])('rejects mismatched built-in parameter type at the %s factory boundary', (_name, factory) => {
+    expect(factory).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_VALUE_INPUT_INVALID' })],
+      }),
+    );
+  });
+
+  it('keeps legal scalar/vec3 constants, ranges, curves, and parameters valid', () => {
+    const parameters = {
+      'User.scalar': defineParameter('User.scalar', { default: 1, type: 'f32' }),
+      'User.vector': defineParameter('User.vector', {
+        default: [0, 1, 0],
+        type: 'vec3',
+      }),
+    };
+    const program = compileEmitter({
+      ...baseEmitter({
+        init: [
+          positionSphere({
+            arc: { thetaMax: parameter('User.scalar') },
+            center: parameter<[number, number, number]>('User.vector'),
+            radius: range(0.5, 1),
+          }),
+          lifetime(curve([0, 0.5], [1, 1])),
+        ],
+        update: [
+          gravity([0, -9.8, 0]),
+          gravity(range([0, -10, 0], [0, -9, 0])),
+          gravity(curve([0, [0, -10, 0]], [1, [0, -9, 0]])),
+          gravity(parameter<[number, number, number]>('User.vector')),
+          drag(parameter<number>('System.time')),
+          sizeOverLife(curve([0, 1], [1, 0])),
+        ],
+      }),
+      parameters,
+    });
+
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain('NACHI_VALUE_INPUT_INVALID');
+  });
+
+  it('keeps optional omissions and string-path parameters without fallbacks valid', () => {
+    expect(() => collideSceneDepth({})).not.toThrow();
+    expect(() => positionSphere({ radius: 1 })).not.toThrow();
+    expect(() => pointAttractor({ position: [0, 0, 0], strength: 1 })).not.toThrow();
+    expect(() => vortex({ axis: [0, 1, 0], strength: 1 })).not.toThrow();
+    expect(() => killVolume({ mode: 'inside', normal: [0, 1, 0], shape: 'plane' })).not.toThrow();
+
+    const scalar = defineParameter('User.scalar', { default: 1, type: 'f32' });
+    const program = compileEmitter({
+      ...baseEmitter({ init: [lifetime(parameter('User.scalar'))] }),
+      parameters: { 'User.scalar': scalar },
+    });
+    expect(program.diagnostics.map(({ code }) => code)).not.toContain('NACHI_VALUE_INPUT_INVALID');
+  });
+
+  it.each([Number.NaN, 1.5, 0, 5])('rejects invalid turbulence octave count %s', (octaves) => {
+    expect(() => turbulence({ frequency: 1, octaves, strength: 1 })).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_TURBULENCE_OCTAVES_INVALID' })],
+      }),
+    );
+  });
+
+  it.each(['slide', '', 0])('rejects unknown collision mode %s', (mode) => {
+    expect(() => collidePlane({ mode: mode as never, normal: [0, 1, 0], offset: 0 })).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_COLLISION_MODE_INVALID' })],
+      }),
+    );
+  });
+
+  it.each([
+    ['plane', () => collidePlane({ normal: [0, 1, 0], offset: 0 } as never)],
+    ['sphere', () => collideSphere({ center: [0, 0, 0], radius: 1 } as never)],
+    ['box', () => collideBox({ center: [0, 0, 0], size: [1, 1, 1] } as never)],
+    [
+      'sdf',
+      () =>
+        collideSdf({
+          field: { assetType: 'sdf', kind: 'asset-ref', uri: 'missing-mode' },
+        } as never),
+    ],
+  ])('requires collision mode at the %s factory boundary', (_name, factory) => {
+    expect(factory).toThrowError(
+      expect.objectContaining({
+        diagnostics: [expect.objectContaining({ code: 'NACHI_COLLISION_MODE_INVALID' })],
+      }),
+    );
+  });
+
+  it.each([
+    ['plane', collidePlane({ mode: 'bounce', normal: [0, 1, 0], offset: 0 })],
+    ['sphere', collideSphere({ center: [0, 0, 0], mode: 'bounce', radius: 1 })],
+    ['box', collideBox({ center: [0, 0, 0], mode: 'bounce', size: [1, 1, 1] })],
+    [
+      'sdf',
+      collideSdf({
+        field: { assetType: 'sdf', kind: 'asset-ref', uri: 'missing-mode' },
+        mode: 'bounce',
+      }),
+    ],
+  ])('requires collision mode for raw %s compiler input', (_name, valid) => {
+    const raw = { ...valid, config: { ...valid.config, mode: undefined } };
+    const program = compileEmitter({ ...baseEmitter(), update: [raw] });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_COLLISION_MODE_INVALID' }),
+    );
+  });
+
+  it('diagnoses normalizedAge reads without both age and lifetime ownership', () => {
+    const normalizedAgeReader = {
+      access: { reads: ['Particles.normalizedAge'], writes: [] },
+      config: {},
+      kind: 'module',
+      stage: 'render',
+      type: 'test/normalized-age-reader',
+      version: 1,
+    } as const;
+    const program = compileEmitter({
+      ...baseEmitter({ integration: 'none' }),
+      render: normalizedAgeReader,
+    });
+
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_NORMALIZED_AGE_WITHOUT_LIFETIME' }),
+    );
+  });
+
+  it('uses write ownership rather than read-driven allocation for normalizedAge diagnostics', () => {
+    const reader = {
+      access: {
+        reads: ['Particles.age', 'Particles.lifetime', 'Particles.normalizedAge'],
+        writes: [],
+      },
+      config: {},
+      kind: 'module',
+      stage: 'render',
+      type: 'test/normalized-age-read-only-allocation',
+      version: 1,
+    } as const;
+    const readsOnly = compileEmitter({ ...baseEmitter({ integration: 'none' }), render: reader });
+    expect(readsOnly.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_NORMALIZED_AGE_WITHOUT_LIFETIME' }),
+    );
+
+    const writeAgeAndLifetime = {
+      access: { reads: [], writes: ['Particles.age', 'Particles.lifetime'] },
+      config: {},
+      kind: 'module',
+      stage: 'init',
+      type: 'test/write-age-and-lifetime',
+      version: 1,
+    } as const;
+    const owned = compileEmitter({
+      ...baseEmitter({ init: [writeAgeAndLifetime], integration: 'none' }),
+      render: reader,
+    });
+    expect(owned.diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_NORMALIZED_AGE_WITHOUT_LIFETIME',
+    );
+
+    const writeNormalizedAge = {
+      access: { reads: [], writes: ['Particles.normalizedAge'] },
+      config: {},
+      kind: 'module',
+      stage: 'init',
+      type: 'test/write-normalized-age',
+      version: 1,
+    } as const;
+    const explicitlyOwned = compileEmitter({
+      ...baseEmitter({ init: [writeNormalizedAge], integration: 'none' }),
+      render: reader,
+    });
+    expect(explicitlyOwned.diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_NORMALIZED_AGE_WITHOUT_LIFETIME',
+    );
+  });
+
+  it('accepts the ValueInput and octave boundaries', () => {
+    expect(() => lifetime(0)).not.toThrow();
+    expect(() => gravity([0, -9.8, 0])).not.toThrow();
+    expect(() => turbulence({ frequency: 1, octaves: 1, strength: 0 })).not.toThrow();
+    expect(() => turbulence({ frequency: 1, octaves: 4, strength: 1 })).not.toThrow();
+  });
+});
+
 describe('M12 neighbor-module diagnostic coverage', () => {
   const neighbors = defineNeighborGrid({ resolution: [4, 4, 4] });
 
@@ -2813,6 +3212,7 @@ describe('emitter kernel compiler', () => {
     );
 
     expect(program.diagnostics.map(({ code }) => code)).toEqual([
+      'NACHI_NORMALIZED_AGE_WITHOUT_LIFETIME',
       'NACHI_CURVE_POINT_COUNT_INVALID',
       'NACHI_CURVE_INTERPOLATION_UNSUPPORTED',
       'NACHI_GRADIENT_STOP_COUNT_INVALID',

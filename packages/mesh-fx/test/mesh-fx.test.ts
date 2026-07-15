@@ -326,6 +326,35 @@ describe('@nachi-vfx/mesh-fx Blender VAT runtime', () => {
     expect(() => external.setTime(0.5)).toThrow(MeshFxDiagnosticError);
   });
 
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ])('rejects non-finite external numeric VAT time %s', (time) => {
+    expect(() =>
+      applyVat(vatMesh(), {
+        fps: 8,
+        frameCount: 4,
+        positionTexture: vatTexture(),
+        time,
+      }),
+    ).toThrow(MeshFxDiagnosticError);
+  });
+
+  it.each([
+    ['loop', 'true'],
+    ['disableFrustumCulling', 'false'],
+  ] as const)('requires strict boolean VAT %s', (field, value) => {
+    expect(() =>
+      applyVat(vatMesh(), {
+        [field]: value,
+        fps: 8,
+        frameCount: 4,
+        positionTexture: vatTexture(),
+      } as never),
+    ).toThrow(MeshFxDiagnosticError);
+  });
+
   it('keeps controls.sampleAtTime aligned with an inclusive frameRange', () => {
     const controls = applyVat(vatMesh(), {
       fps: 1,

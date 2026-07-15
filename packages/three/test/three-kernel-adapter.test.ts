@@ -1289,7 +1289,7 @@ describe('three kernel adapter', () => {
     const program = compileEmitter(
       defineEmitter({
         capacity: 4,
-        init: [positionSphere({ radius: 1 })],
+        init: [positionSphere({ radius: 1 }), lifetime(1)],
         lifecycle: { duration: 1 },
         render: billboard({}),
         spawn: burst({ count: 4 }),

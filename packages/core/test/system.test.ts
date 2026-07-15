@@ -3144,15 +3144,25 @@ describe('VFXSystem runtime scheduler', () => {
 
     const selfReleasing = system.spawn(runtimeEffect({ duration: 1 }));
     let releaseOnRead = false;
+    let stalePropertyReads = 0;
     selfReleasing.attachTo({
       getWorldTransform: () => {
-        if (releaseOnRead) selfReleasing.release();
+        if (releaseOnRead) {
+          selfReleasing.release();
+          return {
+            get position(): never {
+              stalePropertyReads += 1;
+              throw new Error('released sample must not be read');
+            },
+          } as never;
+        }
         return { position: [1, 2, 3] };
       },
     });
     releaseOnRead = true;
     await expect(system.update(0.1)).resolves.toBeUndefined();
     expect(selfReleasing.state).toBe('released');
+    expect(stalePropertyReads).toBe(0);
   });
 
   it('keeps listener failures as warnings without killing or misdiagnosing the instance', async () => {
@@ -4305,6 +4315,133 @@ describe('VFXSystem runtime scheduler', () => {
     expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
   });
 
+  it('rejects malformed transforms atomically while preserving spawn IDs and attachments', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    expect(() => system.spawn(runtimeEffect(), { position: [0, Number.NaN, 0] })).toThrowError(
+      'Effect transform position must be a finite vec3.',
+    );
+    expect(() =>
+      system.spawn(runtimeEffect(), { rotation: [0, Number.POSITIVE_INFINITY, 0] }),
+    ).toThrowError('Effect transform rotation must be a finite Euler vec3 or quaternion vec4.');
+    expect(() => system.spawn(runtimeEffect(), { position: 'origin' as never })).toThrowError(
+      'Effect transform position must be a finite vec3.',
+    );
+    expect(system.instanceCount).toBe(0);
+
+    const instance = system.spawn(runtimeEffect({ duration: 1 }), { position: [1, 2, 3] });
+    expect(instance.id).toBe('nachi-effect-1');
+    const transform = instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform'];
+    const before = transform?.value;
+    for (const [position, rotation] of [
+      [undefined, undefined],
+      ['origin', undefined],
+      [[1, 2, Number.POSITIVE_INFINITY], undefined],
+      [
+        [1, 2, 3],
+        [0, Number.NEGATIVE_INFINITY, 0],
+      ],
+    ] as const) {
+      expect(() => instance.setTransform(position as never, rotation as never)).toThrow();
+      expect(transform?.value).toEqual(before);
+    }
+
+    let attachedPosition: readonly [number, number, number] = [4, 5, 6];
+    instance.attachTo({ getWorldTransform: () => ({ position: attachedPosition }) });
+    const attached = transform?.value;
+    expect(() =>
+      instance.attachTo({ getWorldTransform: () => ({ rotation: [0, 0, 0] }) as never }),
+    ).toThrowError('Effect transform position must be a finite vec3.');
+    expect(() => instance.attachTo({ getWorldTransform: () => undefined as never })).toThrowError(
+      'Effect attachment must return a world transform with a finite position.',
+    );
+    expect(transform?.value).toEqual(attached);
+    attachedPosition = [7, 8, 9];
+    await system.update(0);
+    expect((transform?.value as readonly number[] | undefined)?.slice(12, 15)).toEqual([7, 8, 9]);
+
+    const omitted = new VFXSystem(new FakeRuntimeRenderer()).spawn(runtimeEffect());
+    expect(omitted.id).toBe('nachi-effect-1');
+  });
+
+  it('snapshots accessor-backed spawn transforms before allocating an ID', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const componentReads = [0, 0, 0];
+    const position = new Proxy([4, 5, 6], {
+      get(target, property, receiver) {
+        if (property === '0' || property === '1' || property === '2') {
+          const index = Number(property);
+          componentReads[index] = componentReads[index]! + 1;
+          return componentReads[index] === 1 ? target[index] : Number.NaN;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    let positionReads = 0;
+    const instance = system.spawn(runtimeEffect({ duration: 1 }), {
+      get position() {
+        positionReads += 1;
+        return position as never;
+      },
+    });
+
+    expect(instance.id).toBe('nachi-effect-1');
+    expect(positionReads).toBe(1);
+    expect(componentReads).toEqual([1, 1, 1]);
+    const transform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((transform as readonly number[] | undefined)?.slice(12, 15)).toEqual([4, 5, 6]);
+  });
+
+  it('snapshots accessor-backed spawn timeScale once before ID allocation', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    let timeScaleReads = 0;
+    const instance = system.spawn(runtimeEffect({ duration: 1 }), {
+      get timeScale() {
+        timeScaleReads += 1;
+        return timeScaleReads === 1 ? 1 : Number.NaN;
+      },
+    });
+
+    expect(instance.id).toBe('nachi-effect-1');
+    expect(instance.timeScale).toBe(1);
+    expect(timeScaleReads).toBe(1);
+  });
+
+  it('snapshots accessor-backed spawn priority once before ID allocation', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    let priorityReads = 0;
+    const instance = system.spawn(runtimeEffect({ duration: 1 }), {
+      get priority() {
+        priorityReads += 1;
+        return priorityReads === 1 ? 2 : Number.NaN;
+      },
+    });
+
+    expect(instance.id).toBe('nachi-effect-1');
+    expect(priorityReads).toBe(1);
+  });
+
+  it('rejects the first invalid spawn timeScale read without consuming an ID', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    let reads = 0;
+    expect(() =>
+      system.spawn(runtimeEffect(), {
+        get timeScale() {
+          reads += 1;
+          return reads === 1 ? Number.NaN : 1;
+        },
+      }),
+    ).toThrowError('timeScale must be a non-negative finite number.');
+    expect(reads).toBe(1);
+    expect(system.instanceCount).toBe(0);
+    expect(system.spawn(runtimeEffect()).id).toBe('nachi-effect-1');
+
+    expect(
+      () =>
+        new VfxEffectInstance(runtimeEffect(), 'direct', 'pool', Number.NaN, {}, () => undefined),
+    ).toThrowError('timeScale must be a non-negative finite number.');
+  });
+
   it('refreshes attached transforms before every system update', async () => {
     const system = new VFXSystem(new FakeRuntimeRenderer());
     const instance = system.spawn(runtimeEffect({ duration: 1 }));
@@ -4315,6 +4452,334 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value).toEqual([
       1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1,
     ]);
+  });
+
+  it('snapshots accessor-backed live transform components exactly once', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }), { position: [1, 2, 3] });
+    const tupleReads = { components: [0, 0, 0], length: 0 };
+    const position = new Proxy([4, 5, 6], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          tupleReads.length += 1;
+          return Reflect.get(target, property, receiver);
+        }
+        if (property === '0' || property === '1' || property === '2') {
+          const index = Number(property);
+          tupleReads.components[index] = tupleReads.components[index]! + 1;
+          return tupleReads.components[index] === 1 ? target[index] : Number.NaN;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() => instance.setTransform(position as never)).not.toThrow();
+    const transform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((transform as readonly number[] | undefined)?.slice(12, 15)).toEqual([4, 5, 6]);
+    expect(tupleReads).toEqual({ components: [1, 1, 1], length: 1 });
+
+    const objectReads = [0, 0, 0];
+    const objectPosition = {
+      get x() {
+        objectReads[0] = objectReads[0]! + 1;
+        return objectReads[0] === 1 ? 7 : Number.NaN;
+      },
+      get y() {
+        objectReads[1] = objectReads[1]! + 1;
+        return objectReads[1] === 1 ? 8 : Number.NaN;
+      },
+      get z() {
+        objectReads[2] = objectReads[2]! + 1;
+        return objectReads[2] === 1 ? 9 : Number.NaN;
+      },
+    };
+    expect(() => instance.setTransform(objectPosition)).not.toThrow();
+    const objectTransform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((objectTransform as readonly number[] | undefined)?.slice(12, 15)).toEqual([7, 8, 9]);
+    expect(objectReads).toEqual([1, 1, 1]);
+
+    const rotationReads = { components: [0, 0, 0, 0], length: 0 };
+    const rotation = new Proxy([0, 0, 0, 1], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          rotationReads.length += 1;
+          return Reflect.get(target, property, receiver);
+        }
+        if (property === '0' || property === '1' || property === '2' || property === '3') {
+          const index = Number(property);
+          rotationReads.components[index] = rotationReads.components[index]! + 1;
+          return rotationReads.components[index] === 1 ? target[index] : Number.NaN;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => instance.setTransform([10, 11, 12], rotation as never)).not.toThrow();
+    const rotatedTransform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((rotatedTransform as readonly number[] | undefined)?.every(Number.isFinite)).toBe(true);
+    expect(rotationReads).toEqual({ components: [1, 1, 1, 1], length: 1 });
+  });
+
+  it('invalidates a direct attachment when transform property access installs a replacement', () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }), { position: [1, 2, 3] });
+    const replacement = {
+      getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+    };
+    let positionReads = 0;
+    let rotationReads = 0;
+    const staleTransform = {
+      get position() {
+        positionReads += 1;
+        instance.attachTo(replacement);
+        return [40, 50, 60] as const;
+      },
+      get rotation() {
+        rotationReads += 1;
+        return undefined;
+      },
+    };
+
+    instance.attachTo({ getWorldTransform: () => staleTransform as never });
+
+    const transform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((transform as readonly number[] | undefined)?.slice(12, 15)).toEqual([7, 8, 9]);
+    expect({ positionReads, rotationReads }).toEqual({ positionReads: 1, rotationReads: 1 });
+
+    instance.attachTo({
+      getWorldTransform: () =>
+        ({
+          get position() {
+            instance.detach();
+            return [70, 80, 90] as const;
+          },
+        }) as never,
+    });
+    const detachedTransform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((detachedTransform as readonly number[] | undefined)?.slice(12, 15)).toEqual([7, 8, 9]);
+
+    instance.attachTo(replacement);
+    instance.attachTo({
+      getWorldTransform: () =>
+        ({
+          position: {
+            get x() {
+              try {
+                instance.attachTo({
+                  getWorldTransform: () => ({ position: [Number.NaN, 0, 0] }),
+                });
+              } catch (error) {
+                expect(error).toBeInstanceOf(RangeError);
+              }
+              return 100;
+            },
+            y: 110,
+            z: 120,
+          },
+        }) as never,
+    });
+    const invalidatedTransform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((invalidatedTransform as readonly number[] | undefined)?.slice(12, 15)).toEqual([
+      7, 8, 9,
+    ]);
+  });
+
+  it('invalidates an update-time attachment sample after component access replaces its source', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const replacement = {
+      getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+    };
+    let replaceDuringSnapshot = false;
+    const componentReads = [0, 0, 0];
+    const source = {
+      getWorldTransform: () => {
+        if (!replaceDuringSnapshot) return { position: [1, 2, 3] as const };
+        const position = new Proxy([40, 50, 60], {
+          get(target, property, receiver) {
+            if (property === '0' || property === '1' || property === '2') {
+              const index = Number(property);
+              componentReads[index] = componentReads[index]! + 1;
+              if (index === 0) instance.attachTo(replacement);
+            }
+            return Reflect.get(target, property, receiver);
+          },
+        });
+        return { position };
+      },
+    };
+    instance.attachTo(source as never);
+    replaceDuringSnapshot = true;
+
+    await system.update(0);
+
+    const transform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((transform as readonly number[] | undefined)?.slice(12, 15)).toEqual([7, 8, 9]);
+    expect(componentReads).toEqual([1, 1, 1]);
+  });
+
+  it('keeps nested direct attachment operations authoritative', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const position = () =>
+      (
+        instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']!
+          .value as readonly number[]
+      ).slice(12, 15);
+    const replacement = {
+      getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+    };
+
+    instance.attachTo({
+      getWorldTransform: () => {
+        instance.attachTo(replacement);
+        return { position: [40, 50, 60] as const };
+      },
+    });
+    expect(position()).toEqual([7, 8, 9]);
+    await system.update(0);
+    expect(position()).toEqual([7, 8, 9]);
+
+    instance.attachTo({
+      getWorldTransform: () => {
+        instance.detach();
+        return { position: [70, 80, 90] as const };
+      },
+    });
+    expect(position()).toEqual([7, 8, 9]);
+    await system.update(0);
+    expect(position()).toEqual([7, 8, 9]);
+
+    expect(() =>
+      instance.attachTo({
+        getWorldTransform: () => {
+          instance.release();
+          return { position: [100, 110, 120] as const };
+        },
+      }),
+    ).not.toThrow();
+    expect(instance.state).toBe('released');
+  });
+
+  it('invalidates outer samples for same-source reentry and caught nested invalid input', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const direct = system.spawn(runtimeEffect({ duration: 1 }));
+    const directPosition = () =>
+      (
+        direct.getEmitter('particles')!.kernels.uniforms['Emitter.transform']!
+          .value as readonly number[]
+      ).slice(12, 15);
+    let directDepth = 0;
+    const directSource = {
+      getWorldTransform: () => {
+        if (directDepth === 0) {
+          directDepth += 1;
+          direct.attachTo(directSource);
+          return { position: [40, 50, 60] as const };
+        }
+        return { position: [7, 8, 9] as const };
+      },
+    };
+    direct.attachTo(directSource);
+    expect(directPosition()).toEqual([7, 8, 9]);
+
+    const syncing = system.spawn(runtimeEffect({ duration: 1 }));
+    const syncingPosition = () =>
+      (
+        syncing.getEmitter('particles')!.kernels.uniforms['Emitter.transform']!
+          .value as readonly number[]
+      ).slice(12, 15);
+    let syncPhase: 'initial' | 'outer' | 'nested' | 'steady' = 'initial';
+    const syncingSource = {
+      getWorldTransform: () => {
+        if (syncPhase === 'outer') {
+          syncPhase = 'nested';
+          syncing.attachTo(syncingSource);
+          syncPhase = 'steady';
+          return { position: [40, 50, 60] as const };
+        }
+        return { position: syncPhase === 'initial' ? ([1, 2, 3] as const) : ([7, 8, 9] as const) };
+      },
+    };
+    syncing.attachTo(syncingSource);
+    syncPhase = 'outer';
+    await system.update(0);
+    expect(syncingPosition()).toEqual([7, 8, 9]);
+
+    const stable = { getWorldTransform: () => ({ position: [2, 3, 4] as const }) };
+    syncing.attachTo(stable);
+    syncing.attachTo({
+      getWorldTransform: () => {
+        try {
+          syncing.attachTo({ getWorldTransform: () => ({ position: [Number.NaN, 0, 0] }) });
+        } catch (error) {
+          expect(error).toBeInstanceOf(RangeError);
+        }
+        return { position: [70, 80, 90] as const };
+      },
+    });
+    expect(syncingPosition()).toEqual([2, 3, 4]);
+    await system.update(0);
+    expect(syncingPosition()).toEqual([2, 3, 4]);
+  });
+
+  it('keeps a reentrant attachment replacement authoritative in the same update', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const replacement = {
+      getWorldTransform: () => ({ position: [7, 8, 9] as const }),
+    };
+    let replaceDuringRead = false;
+    const original = {
+      getWorldTransform: () => {
+        if (replaceDuringRead) {
+          instance.attachTo(replacement);
+          return { position: [40, 50, 60] as const };
+        }
+        return { position: [1, 2, 3] as const };
+      },
+    };
+    instance.attachTo(original);
+    replaceDuringRead = true;
+
+    await system.update(0);
+
+    const transform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((transform as readonly number[] | undefined)?.slice(12, 15)).toEqual([7, 8, 9]);
+  });
+
+  it('discards an attachment sample when its source detaches itself', async () => {
+    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    let detachDuringRead = false;
+    let reads = 0;
+    const source = {
+      getWorldTransform: () => {
+        reads += 1;
+        if (detachDuringRead) {
+          instance.detach();
+          return { position: [40, 50, 60] as const };
+        }
+        return { position: [1, 2, 3] as const };
+      },
+    };
+    instance.attachTo(source);
+    detachDuringRead = true;
+
+    await system.update(0);
+    await system.update(0);
+
+    const transform =
+      instance.getEmitter('particles')!.kernels.uniforms['Emitter.transform']?.value;
+    expect((transform as readonly number[] | undefined)?.slice(12, 15)).toEqual([1, 2, 3]);
+    expect(reads).toBe(2);
   });
 
   it('stops socket transform refresh after detach', async () => {

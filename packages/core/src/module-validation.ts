@@ -1,9 +1,12 @@
 import { MAX_PBD_ITERATIONS, RENDER_ORDER_BUCKET_MAX, RENDER_ORDER_BUCKET_MIN } from './limits.js';
+import { materializedParameterType } from './uniform-definitions.js';
 import type {
   BillboardOptions,
   BoidsOptions,
   DecalRendererOptions,
   MeshRendererOptions,
+  ParameterPath,
+  ParameterSchema,
   PbdDistanceConstraintOptions,
   VfxDiagnostic,
 } from './types.js';
@@ -105,6 +108,183 @@ function staticGeneratorValues(value: unknown): readonly unknown[] {
 
 function isStaticFiniteVectorInput(value: unknown, length: number): boolean {
   return staticGeneratorValues(value).every((candidate) => isFiniteVector(candidate, length));
+}
+
+type ValueInputShape = 'scalar' | 'scalar-or-vec3' | 'vec3';
+
+const CORE_VALUE_INPUT_FIELDS: Readonly<Record<string, Readonly<Record<string, ValueInputShape>>>> =
+  {
+    'core/collide-box': { bounce: 'scalar', center: 'vec3', friction: 'scalar', size: 'vec3' },
+    'core/collide-plane': { bounce: 'scalar', friction: 'scalar', offset: 'scalar' },
+    'core/collide-scene-depth': {
+      bounce: 'scalar',
+      friction: 'scalar',
+      surfaceOffset: 'scalar',
+      thickness: 'scalar',
+    },
+    'core/collide-sdf': { bounce: 'scalar', friction: 'scalar', thickness: 'scalar' },
+    'core/collide-sphere': {
+      bounce: 'scalar',
+      center: 'vec3',
+      friction: 'scalar',
+      radius: 'scalar',
+    },
+    'core/curl-noise': { frequency: 'scalar', strength: 'scalar' },
+    'core/drag': { value: 'scalar' },
+    'core/gravity': { value: 'scalar-or-vec3' },
+    'core/intensity-over-life': { value: 'scalar' },
+    'core/kill-volume': { center: 'vec3', offset: 'scalar', radius: 'scalar', size: 'vec3' },
+    'core/lifetime': { value: 'scalar' },
+    'core/light-intensity': { value: 'scalar' },
+    'core/linear-force': { force: 'vec3' },
+    'core/point-attractor': {
+      falloff: 'scalar',
+      position: 'vec3',
+      radius: 'scalar',
+      strength: 'scalar',
+    },
+    'core/position-sphere': {
+      'arc.thetaMax': 'scalar',
+      center: 'vec3',
+      radius: 'scalar',
+    },
+    'core/rotation-over-life': { value: 'scalar' },
+    'core/size-over-life': { value: 'scalar' },
+    'core/turbulence': { frequency: 'scalar', strength: 'scalar' },
+    'core/vector-field': { strength: 'scalar' },
+    'core/velocity-cone': { angle: 'scalar', speed: 'scalar' },
+    'core/velocity-mesh-normal': { speed: 'scalar' },
+    'core/velocity-over-life': { value: 'scalar' },
+    'core/vortex': { center: 'vec3', inwardStrength: 'scalar', strength: 'scalar' },
+  };
+
+const REQUIRED_CORE_VALUE_INPUT_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  'core/collide-box': ['center', 'size'],
+  'core/collide-plane': ['offset'],
+  'core/collide-sphere': ['center', 'radius'],
+  'core/curl-noise': ['frequency', 'strength'],
+  'core/drag': ['value'],
+  'core/gravity': ['value'],
+  'core/intensity-over-life': ['value'],
+  'core/lifetime': ['value'],
+  'core/light-intensity': ['value'],
+  'core/linear-force': ['force'],
+  'core/point-attractor': ['position', 'strength'],
+  'core/position-sphere': ['radius'],
+  'core/rotation-over-life': ['value'],
+  'core/size-over-life': ['value'],
+  'core/turbulence': ['frequency', 'strength'],
+  'core/vector-field': ['strength'],
+  'core/velocity-cone': ['angle', 'speed'],
+  'core/velocity-mesh-normal': ['speed'],
+  'core/velocity-over-life': ['value'],
+  'core/vortex': ['strength'],
+};
+
+function isRequiredValueInputField(
+  type: string,
+  field: string,
+  config: Readonly<Record<string, unknown>>,
+): boolean {
+  if (type === 'core/position-sphere' && field === 'arc.thetaMax') {
+    return typeof config.arc === 'object' && config.arc !== null && !Array.isArray(config.arc);
+  }
+  if (type === 'core/kill-volume') {
+    return (
+      (field === 'radius' && config.shape === 'sphere') ||
+      (field === 'size' && config.shape === 'box')
+    );
+  }
+  return REQUIRED_CORE_VALUE_INPUT_FIELDS[type]?.includes(field) === true;
+}
+
+function isFiniteValueForShape(value: unknown, shape: ValueInputShape): boolean {
+  const finiteScalar = typeof value === 'number' && Number.isFinite(value);
+  if (shape === 'scalar') return finiteScalar;
+  if (shape === 'vec3') return isFiniteVector(value, 3);
+  return finiteScalar || isFiniteVector(value, 3);
+}
+
+function collectValueInputDiagnostics(
+  type: string,
+  config: Readonly<Record<string, unknown>>,
+  path: string,
+  parameters?: ParameterSchema,
+): VfxDiagnostic[] {
+  const fields = CORE_VALUE_INPUT_FIELDS[type];
+  if (!fields) return [];
+  const diagnostics: VfxDiagnostic[] = [];
+  for (const [field, shape] of Object.entries(fields)) {
+    const value = field.split('.').reduce<unknown>((candidate, segment) => {
+      if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+        return undefined;
+      }
+      return (candidate as Readonly<Record<string, unknown>>)[segment];
+    }, config);
+    if (value === undefined) {
+      if (isRequiredValueInputField(type, field, config)) {
+        diagnostics.push(
+          diagnostic(
+            'NACHI_VALUE_INPUT_INVALID',
+            'Required ValueInput must be present and resolve to a finite value of the declared shape.',
+            fieldPath(path, field),
+          ),
+        );
+      }
+      continue;
+    }
+    const candidates = staticGeneratorValues(value);
+    const rangeOutOfOrder =
+      typeof value === 'object' &&
+      value !== null &&
+      'kind' in value &&
+      value.kind === 'range' &&
+      shape === 'scalar' &&
+      candidates.length === 2 &&
+      typeof candidates[0] === 'number' &&
+      typeof candidates[1] === 'number' &&
+      candidates[0] > candidates[1];
+    const parameterTypeInvalid = (() => {
+      if (
+        typeof value !== 'object' ||
+        value === null ||
+        !('kind' in value) ||
+        value.kind !== 'parameter'
+      ) {
+        return false;
+      }
+      if (!('path' in value) || typeof value.path !== 'string') return true;
+      const parameterType = materializedParameterType(value.path as ParameterPath, parameters);
+      if (parameterType === undefined) return false;
+      if (shape === 'vec3') return parameterType !== 'vec3';
+      if (shape === 'scalar-or-vec3') {
+        return (
+          parameterType !== 'f32' &&
+          parameterType !== 'i32' &&
+          parameterType !== 'u32' &&
+          parameterType !== 'vec3'
+        );
+      }
+      return parameterType !== 'f32' && parameterType !== 'i32' && parameterType !== 'u32';
+    })();
+    const specializedPositionSphereField =
+      type === 'core/position-sphere' && (field === 'center' || field === 'arc.thetaMax');
+    if (
+      parameterTypeInvalid ||
+      (!specializedPositionSphereField &&
+        (rangeOutOfOrder ||
+          !candidates.every((candidate) => isFiniteValueForShape(candidate, shape))))
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_VALUE_INPUT_INVALID',
+          `ValueInput must resolve to a finite ${shape === 'scalar' ? 'number' : shape === 'vec3' ? 'vec3' : 'number or vec3'}.`,
+          fieldPath(path, field),
+        ),
+      );
+    }
+  }
+  return diagnostics;
 }
 
 function isStaticScalarInRange(value: unknown, exclusiveMinimum: number, maximum: number): boolean {
@@ -266,7 +446,10 @@ function collectBehaviorDiagnostics(
         );
       } else {
         const arcConfig = arc as Readonly<Record<string, unknown>>;
-        if (!isStaticScalarInRange(arcConfig.thetaMax, 0, 180)) {
+        if (
+          arcConfig.thetaMax !== undefined &&
+          !isStaticScalarInRange(arcConfig.thetaMax, 0, 180)
+        ) {
           diagnostics.push(
             diagnostic(
               'NACHI_POSITION_SPHERE_ARC_THETA_INVALID',
@@ -291,6 +474,19 @@ function collectBehaviorDiagnostics(
     }
   }
   if (type.startsWith('core/collide-')) {
+    const modeRequired = type !== 'core/collide-scene-depth';
+    if (
+      (modeRequired && config.mode === undefined) ||
+      (config.mode !== undefined && !['bounce', 'kill', 'stick'].includes(config.mode as string))
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_COLLISION_MODE_INVALID',
+          'Collision mode must be "bounce", "kill", or "stick".',
+          fieldPath(path, 'mode'),
+        ),
+      );
+    }
     for (const coefficient of ['bounce', 'friction'] as const) {
       if (!validateStaticScalarRange(config[coefficient], 0, 1)) {
         diagnostics.push(
@@ -411,6 +607,22 @@ function collectBehaviorDiagnostics(
         ),
       );
     }
+  }
+
+  if (
+    type === 'core/turbulence' &&
+    config.octaves !== undefined &&
+    (!Number.isSafeInteger(config.octaves) ||
+      (config.octaves as number) < 1 ||
+      (config.octaves as number) > 4)
+  ) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_TURBULENCE_OCTAVES_INVALID',
+        'Turbulence octaves must be a safe integer from 1 through 4.',
+        fieldPath(path, 'octaves'),
+      ),
+    );
   }
 
   if (type === 'core/point-attractor') {
@@ -807,6 +1019,7 @@ export function collectCoreModuleConfigDiagnostics(
   config: Readonly<Record<string, unknown>>,
   path: string,
   version = 2,
+  parameters?: ParameterSchema,
 ): VfxDiagnostic[] {
   if (type === 'core/burst') return collectBurstDiagnostics(config, path);
   if (type === 'core/rate' || type === 'core/per-distance') {
@@ -918,6 +1131,7 @@ export function collectCoreModuleConfigDiagnostics(
     return diagnostics;
   }
   return [
+    ...collectValueInputDiagnostics(type, config, path, parameters),
     ...collectBehaviorDiagnostics(type, config, path),
     ...collectNeighborDiagnostics(type, config, path),
   ];
