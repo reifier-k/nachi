@@ -10,13 +10,21 @@ import type {
 } from '@nachi-vfx/core';
 
 export const EFFECT_ASSET_FORMAT = 'nachi-effect' as const;
-export const EFFECT_ASSET_VERSION = 1 as const;
+export const EFFECT_ASSET_VERSION = 2 as const;
 
 export interface EffectAssetDocumentV1 extends VfxAssetDocument {
+  readonly format: typeof EFFECT_ASSET_FORMAT;
+  readonly version: 1;
+  readonly effect: JsonValue;
+}
+
+export interface EffectAssetDocumentV2 extends VfxAssetDocument {
   readonly format: typeof EFFECT_ASSET_FORMAT;
   readonly version: typeof EFFECT_ASSET_VERSION;
   readonly effect: JsonValue;
 }
+
+export type EffectAssetDocument = EffectAssetDocumentV2;
 
 /**
  * An emitter inheritance node stored only in an asset document. `loadEffect()` resolves it to an

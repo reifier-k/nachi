@@ -68,18 +68,27 @@ are covered even when most users consume higher-level helpers.
 Package versions and asset versions are separate axes. The current envelope is:
 
 ```ts
-{ format: 'nachi-effect', version: 1, effect: /* closed declarative data */ }
+{ format: 'nachi-effect', version: 2, effect: /* closed declarative data */ }
 ```
 
-Adding optional fields that old readers can reject safely may ship in a package minor, but writers
-must not emit them as version 1 if that would make the same version ambiguous across readers. Any
-incompatible shape or meaning increments the envelope/module format version and supplies an
-explicit one-step migration in `EffectAssetMigrationRegistry`. Readers never guess, silently drop
-unknown fields, or reinterpret version 1. A supported reader continues to accept version 1 for the
-lifetime of the package major; removal requires a package major and release-note migration plan.
+The default registry retains historical v1 input compatibility through an explicit envelope-only
+v1 → v2 migration. It changes only the top-level version, does not mutate input, and preserves the
+effect payload and every module version unchanged. A v1-only old reader rejects canonical v2 before
+compilation, so it cannot silently reinterpret new renderer semantics.
 
-The version-1 limitation recorded in RFC 001 remains normative: inline functions require a
-registration/reference boundary, and simulation-cache embedding is not part of the envelope.
+Adding optional fields that old readers can reject safely may ship in a package minor, but writers
+must not emit them under an already published envelope version if that would make the version
+ambiguous across readers. Any incompatible shape or meaning increments the envelope/module format
+version and supplies an explicit one-step migration in `EffectAssetMigrationRegistry`. Readers
+never guess or silently drop unknown fields; envelope migration never implies a module-version
+upgrade. A supported reader continues to accept historical v1 through the documented compatibility
+path for the lifetime of the package major; removal requires a package major and release-note
+migration plan.
+
+The payload limitations recorded in RFC 001 apply to both historical v1 and canonical v2: inline
+functions require a registration/reference boundary, and simulation-cache embedding is not part of
+either envelope. RFC 006 §9 owns the renderer-v2 reserved-version guard and old-reader safe-rejection
+details.
 
 ## 5. Experimental API
 

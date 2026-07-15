@@ -1,4 +1,4 @@
-import { EFFECT_ASSET_FORMAT, EFFECT_ASSET_VERSION } from './types.js';
+import { EFFECT_ASSET_FORMAT } from './types.js';
 
 /** Draft 2020-12 schema for the stable envelope and closed format-owned effect structures. */
 export const effectAssetSchemaV1 = {
@@ -551,9 +551,226 @@ export const effectAssetSchemaV1 = {
       type: 'object',
     },
     format: { const: EFFECT_ASSET_FORMAT },
-    version: { const: EFFECT_ASSET_VERSION },
+    version: { const: 1 },
   },
   required: ['format', 'version', 'effect'],
   title: 'Nachi effect asset v1',
   type: 'object',
+} as const;
+
+const renderOrderOffsetSchema = {
+  maximum: 2_147_483_647,
+  minimum: -2_147_483_648,
+  type: 'integer',
+} as const;
+
+const sortCenterSchema = {
+  items: { type: 'number' },
+  maxItems: 3,
+  minItems: 3,
+  type: 'array',
+} as const;
+
+const textureRefV2 = {
+  additionalProperties: false,
+  properties: {
+    assetType: { const: 'texture' },
+    kind: { const: 'asset-ref' },
+    uri: { minLength: 1, type: 'string' },
+  },
+  required: ['assetType', 'kind', 'uri'],
+  type: 'object',
+} as const;
+
+const geometryRefV2 = {
+  additionalProperties: false,
+  properties: {
+    assetType: { const: 'geometry' },
+    kind: { const: 'asset-ref' },
+    uri: { minLength: 1, type: 'string' },
+  },
+  required: ['assetType', 'kind', 'uri'],
+  type: 'object',
+} as const;
+
+const flipbookV2 = {
+  additionalProperties: false,
+  properties: {
+    cols: { minimum: 1, type: 'integer' },
+    interpolate: { type: 'boolean' },
+    kind: { const: 'flipbook' },
+    motionVectors: {
+      oneOf: [{ type: 'boolean' }, { $ref: '#/$defs/textureRefV2' }],
+    },
+    rows: { minimum: 1, type: 'integer' },
+    texture: { $ref: '#/$defs/textureRefV2' },
+  },
+  required: ['cols', 'kind', 'rows', 'texture'],
+  type: 'object',
+} as const;
+
+const billboardAlignmentV2 = {
+  oneOf: [
+    {
+      additionalProperties: false,
+      properties: { mode: { const: 'camera-facing' } },
+      required: ['mode'],
+      type: 'object',
+    },
+    {
+      additionalProperties: false,
+      properties: { axis: sortCenterSchema, mode: { const: 'custom-axis' } },
+      required: ['axis', 'mode'],
+      type: 'object',
+    },
+    {
+      additionalProperties: false,
+      properties: { mode: { const: 'velocity-aligned' } },
+      required: ['mode'],
+      type: 'object',
+    },
+    {
+      additionalProperties: false,
+      properties: { factor: { minimum: 0, type: 'number' }, mode: { const: 'velocity-stretch' } },
+      required: ['mode'],
+      type: 'object',
+    },
+  ],
+} as const;
+
+const meshAlignmentV2 = {
+  oneOf: [
+    {
+      additionalProperties: false,
+      properties: { axis: sortCenterSchema, mode: { const: 'custom-axis' } },
+      required: ['axis', 'mode'],
+      type: 'object',
+    },
+    ...(['none', 'quaternion', 'velocity'] as const).map((mode) => ({
+      additionalProperties: false as const,
+      properties: { mode: { const: mode } },
+      required: ['mode'] as const,
+      type: 'object' as const,
+    })),
+  ],
+} as const;
+
+const billboardLitV2 = {
+  additionalProperties: false,
+  properties: {
+    metalness: { maximum: 1, minimum: 0, type: 'number' },
+    normalMap: { $ref: '#/$defs/textureRefV2' },
+    roughness: { maximum: 1, minimum: 0, type: 'number' },
+  },
+  type: 'object',
+} as const;
+
+const billboardSoftV2 = {
+  additionalProperties: false,
+  properties: { fadeDistance: { exclusiveMinimum: 0, type: 'number' } },
+  required: ['fadeDistance'],
+  type: 'object',
+} as const;
+
+const billboardRendererConfigV2 = {
+  additionalProperties: false,
+  properties: {
+    alignment: { $ref: '#/$defs/billboardAlignmentV2' },
+    blending: { enum: ['additive', 'alpha', 'multiply', 'premultiplied'] },
+    cutout: {
+      additionalProperties: false,
+      properties: { vertices: { maximum: 8, minimum: 4, type: 'integer' } },
+      required: ['vertices'],
+      type: 'object',
+    },
+    lit: { oneOf: [{ type: 'boolean' }, { $ref: '#/$defs/billboardLitV2' }] },
+    map: { oneOf: [{ $ref: '#/$defs/textureRefV2' }, { $ref: '#/$defs/flipbookV2' }] },
+    renderOrderOffset: renderOrderOffsetSchema,
+    soft: { oneOf: [{ type: 'boolean' }, { $ref: '#/$defs/billboardSoftV2' }] },
+    sortCenter: sortCenterSchema,
+    sorted: { type: 'boolean' },
+  },
+  type: 'object',
+} as const;
+
+const meshRendererConfigV2 = {
+  additionalProperties: false,
+  properties: {
+    alignment: { $ref: '#/$defs/meshAlignmentV2' },
+    blending: { enum: ['additive', 'alpha', 'multiply', 'premultiplied'] },
+    geometry: { $ref: '#/$defs/geometryRefV2' },
+    renderOrderOffset: renderOrderOffsetSchema,
+    sortCenter: sortCenterSchema,
+    sorted: { type: 'boolean' },
+  },
+  required: ['geometry'],
+  type: 'object',
+} as const;
+
+const decalRendererConfigV2 = {
+  additionalProperties: false,
+  properties: {
+    blending: { enum: ['alpha', 'premultiplied'] },
+    fadeOverLife: { type: 'boolean' },
+    map: { $ref: '#/$defs/textureRefV2' },
+    renderOrderOffset: renderOrderOffsetSchema,
+    sizeScale: { exclusiveMinimum: 0, type: 'number' },
+    sortCenter: sortCenterSchema,
+    sorted: { type: 'boolean' },
+  },
+  type: 'object',
+} as const;
+
+/** Current envelope schema. Renderer module v2 configs are closed; module v1 remains generic. */
+export const effectAssetSchemaV2 = {
+  ...effectAssetSchemaV1,
+  $id: 'https://nachi.dev/schema/effect-v2.json',
+  $defs: {
+    ...effectAssetSchemaV1.$defs,
+    billboardAlignmentV2,
+    billboardLitV2,
+    billboardRendererConfigV2,
+    billboardSoftV2,
+    decalRendererConfigV2,
+    flipbookV2,
+    geometryRefV2,
+    meshAlignmentV2,
+    meshRendererConfigV2,
+    textureRefV2,
+    module: {
+      ...effectAssetSchemaV1.$defs.module,
+      allOf: [
+        ...effectAssetSchemaV1.$defs.module.allOf,
+        {
+          if: {
+            properties: { type: { const: 'core/billboard' }, version: { const: 2 } },
+            required: ['type', 'version'],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: Draft 2020-12 conditional schema keyword.
+          then: { properties: { config: { $ref: '#/$defs/billboardRendererConfigV2' } } },
+        },
+        {
+          if: {
+            properties: { type: { const: 'core/mesh-renderer' }, version: { const: 2 } },
+            required: ['type', 'version'],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: Draft 2020-12 conditional schema keyword.
+          then: { properties: { config: { $ref: '#/$defs/meshRendererConfigV2' } } },
+        },
+        {
+          if: {
+            properties: { type: { const: 'core/decal-renderer' }, version: { const: 2 } },
+            required: ['type', 'version'],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: Draft 2020-12 conditional schema keyword.
+          then: { properties: { config: { $ref: '#/$defs/decalRendererConfigV2' } } },
+        },
+      ],
+    },
+  },
+  properties: {
+    ...effectAssetSchemaV1.properties,
+    version: { const: 2 },
+  },
+  title: 'Nachi effect asset v2',
 } as const;

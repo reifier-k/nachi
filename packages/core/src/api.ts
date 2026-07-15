@@ -191,6 +191,7 @@ function createModule<Stage extends ModuleStage, Config extends object>(
     type,
     config as Readonly<Record<string, unknown>>,
     'config',
+    version,
   );
   const errors = diagnostics.filter(({ severity }) => severity === 'error');
   if (errors.length > 0) throw new VfxDiagnosticError(errors);
@@ -1082,24 +1083,36 @@ export function flipbook(
 }
 
 export function billboard(options: BillboardOptions): RenderModule {
+  const blending = options.blending ?? 'alpha';
+  const normalized = {
+    ...options,
+    sorted: options.sorted ?? (blending === 'alpha' || blending === 'premultiplied'),
+  };
   const velocityRead =
-    options.alignment?.mode === 'velocity-aligned' || options.alignment?.mode === 'velocity-stretch'
+    normalized.alignment?.mode === 'velocity-aligned' ||
+    normalized.alignment?.mode === 'velocity-stretch'
       ? (['Particles.velocity'] as const)
       : [];
   const flipbookRead =
-    options.map?.kind === 'flipbook' ? (['Particles.normalizedAge'] as const) : [];
-  return createModule('render', 'core/billboard', options, {
-    reads: [
-      'Particles.color',
-      'Particles.position',
-      'Particles.size',
-      'Particles.spriteRotation',
-      ...velocityRead,
-      ...flipbookRead,
-      ...(options.sorted ? (['System.viewMatrix'] as const) : []),
-    ],
-    writes: [],
-  });
+    normalized.map?.kind === 'flipbook' ? (['Particles.normalizedAge'] as const) : [];
+  return createModule(
+    'render',
+    'core/billboard',
+    normalized,
+    {
+      reads: [
+        'Particles.color',
+        'Particles.position',
+        'Particles.size',
+        'Particles.spriteRotation',
+        ...velocityRead,
+        ...flipbookRead,
+        ...(normalized.sorted ? (['System.viewMatrix'] as const) : []),
+      ],
+      writes: [],
+    },
+    2,
+  );
 }
 
 export function faceCamera(options: Omit<BillboardOptions, 'alignment'> = {}): RenderModule {
@@ -1107,22 +1120,33 @@ export function faceCamera(options: Omit<BillboardOptions, 'alignment'> = {}): R
 }
 
 export function meshRenderer(options: MeshRendererOptions): RenderModule {
+  const blending = options.blending ?? 'alpha';
+  const normalized = {
+    ...options,
+    sorted: options.sorted ?? (blending === 'alpha' || blending === 'premultiplied'),
+  };
   const orientationRead =
-    options.alignment?.mode === 'velocity'
+    normalized.alignment?.mode === 'velocity'
       ? (['Particles.velocity'] as const)
-      : options.alignment?.mode === 'quaternion'
+      : normalized.alignment?.mode === 'quaternion'
         ? (['Particles.rotation'] as const)
         : [];
-  return createModule('render', 'core/mesh-renderer', options, {
-    reads: [
-      'Particles.color',
-      'Particles.position',
-      'Particles.scale',
-      ...orientationRead,
-      ...(options.sorted ? (['System.viewMatrix'] as const) : []),
-    ],
-    writes: [],
-  });
+  return createModule(
+    'render',
+    'core/mesh-renderer',
+    normalized,
+    {
+      reads: [
+        'Particles.color',
+        'Particles.position',
+        'Particles.scale',
+        ...orientationRead,
+        ...(normalized.sorted ? (['System.viewMatrix'] as const) : []),
+      ],
+      writes: [],
+    },
+    2,
+  );
 }
 
 export function lightRenderer(options: LightRendererOptions = {}): RenderModule {
@@ -1140,16 +1164,24 @@ export function lightRenderer(options: LightRendererOptions = {}): RenderModule 
 }
 
 export function decalRenderer(options: DecalRendererOptions = {}): RenderModule {
-  return createModule('render', 'core/decal-renderer', options, {
-    reads: [
-      'Particles.color',
-      'Particles.normalizedAge',
-      'Particles.position',
-      'Particles.rotation',
-      'Particles.size',
-    ],
-    writes: [],
-  });
+  const normalized = { ...options, sorted: options.sorted ?? true };
+  return createModule(
+    'render',
+    'core/decal-renderer',
+    normalized,
+    {
+      reads: [
+        'Particles.color',
+        'Particles.normalizedAge',
+        'Particles.position',
+        'Particles.rotation',
+        'Particles.size',
+        ...(normalized.sorted ? (['System.viewMatrix'] as const) : []),
+      ],
+      writes: [],
+    },
+    2,
+  );
 }
 
 export function defineTslFunction<Bindings extends object = TslParticleBindings>(

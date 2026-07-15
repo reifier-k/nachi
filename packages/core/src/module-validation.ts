@@ -1,4 +1,4 @@
-import { MAX_PBD_ITERATIONS } from './limits.js';
+import { MAX_PBD_ITERATIONS, RENDER_ORDER_BUCKET_MAX, RENDER_ORDER_BUCKET_MIN } from './limits.js';
 import type {
   BillboardOptions,
   BoidsOptions,
@@ -47,6 +47,43 @@ function isFiniteVector(value: unknown, length: number): value is readonly numbe
     value.length === length &&
     value.every((component) => typeof component === 'number' && Number.isFinite(component))
   );
+}
+
+function collectRenderOrderDiagnostics(
+  config: { readonly renderOrderOffset?: number; readonly sortCenter?: readonly number[] },
+  path: string,
+  options: { readonly renderOrderOffset: boolean; readonly sortCenter: boolean },
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = [];
+  if (
+    options.renderOrderOffset &&
+    config.renderOrderOffset !== undefined &&
+    (!Number.isInteger(config.renderOrderOffset) ||
+      config.renderOrderOffset < RENDER_ORDER_BUCKET_MIN ||
+      config.renderOrderOffset > RENDER_ORDER_BUCKET_MAX)
+  ) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_RENDER_ORDER_OFFSET_INVALID',
+        'renderOrderOffset must be a signed 32-bit integer.',
+        fieldPath(path, 'renderOrderOffset'),
+      ),
+    );
+  }
+  if (
+    options.sortCenter &&
+    config.sortCenter !== undefined &&
+    !isFiniteVector(config.sortCenter, 3)
+  ) {
+    diagnostics.push(
+      diagnostic(
+        'NACHI_PARTICLE_SORT_CENTER_INVALID',
+        'Emitter sortCenter must be a finite local-space vec3.',
+        fieldPath(path, 'sortCenter'),
+      ),
+    );
+  }
+  return diagnostics;
 }
 
 function staticGeneratorValues(value: unknown): readonly unknown[] {
@@ -543,8 +580,15 @@ function collectNeighborDiagnostics(
   return diagnostics;
 }
 
-function collectBillboardDiagnostics(config: BillboardOptions, path: string): VfxDiagnostic[] {
-  const diagnostics: VfxDiagnostic[] = [];
+function collectBillboardDiagnostics(
+  config: BillboardOptions,
+  path: string,
+  version: number,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = collectRenderOrderDiagnostics(config, path, {
+    renderOrderOffset: version >= 2,
+    sortCenter: true,
+  });
   const blending = config.blending ?? 'alpha';
   if (!['additive', 'alpha', 'multiply', 'premultiplied'].includes(blending)) {
     diagnostics.push(
@@ -555,12 +599,12 @@ function collectBillboardDiagnostics(config: BillboardOptions, path: string): Vf
       ),
     );
   }
-  if (config.sortCenter !== undefined && !isFiniteVector(config.sortCenter, 3)) {
+  if (version >= 2 && config.sorted !== undefined && typeof config.sorted !== 'boolean') {
     diagnostics.push(
       diagnostic(
-        'NACHI_PARTICLE_SORT_CENTER_INVALID',
-        'Emitter sortCenter must be a finite local-space vec3.',
-        fieldPath(path, 'sortCenter'),
+        'NACHI_PARTICLE_SORT_VALUE_INVALID',
+        'Billboard renderer sorted must be a boolean.',
+        fieldPath(path, 'sorted'),
       ),
     );
   }
@@ -691,8 +735,15 @@ function collectBillboardDiagnostics(config: BillboardOptions, path: string): Vf
   return diagnostics;
 }
 
-function collectMeshDiagnostics(config: MeshRendererOptions, path: string): VfxDiagnostic[] {
-  const diagnostics: VfxDiagnostic[] = [];
+function collectMeshDiagnostics(
+  config: MeshRendererOptions,
+  path: string,
+  version: number,
+): VfxDiagnostic[] {
+  const diagnostics: VfxDiagnostic[] = collectRenderOrderDiagnostics(config, path, {
+    renderOrderOffset: version >= 2,
+    sortCenter: true,
+  });
   const blending = config.blending ?? 'alpha';
   if (!['additive', 'alpha', 'multiply', 'premultiplied'].includes(blending)) {
     diagnostics.push(
@@ -703,12 +754,12 @@ function collectMeshDiagnostics(config: MeshRendererOptions, path: string): VfxD
       ),
     );
   }
-  if (config.sortCenter !== undefined && !isFiniteVector(config.sortCenter, 3)) {
+  if (version >= 2 && config.sorted !== undefined && typeof config.sorted !== 'boolean') {
     diagnostics.push(
       diagnostic(
-        'NACHI_PARTICLE_SORT_CENTER_INVALID',
-        'Emitter sortCenter must be a finite local-space vec3.',
-        fieldPath(path, 'sortCenter'),
+        'NACHI_PARTICLE_SORT_VALUE_INVALID',
+        'Mesh renderer sorted must be a boolean.',
+        fieldPath(path, 'sorted'),
       ),
     );
   }
@@ -755,6 +806,7 @@ export function collectCoreModuleConfigDiagnostics(
   type: string,
   config: Readonly<Record<string, unknown>>,
   path: string,
+  version = 2,
 ): VfxDiagnostic[] {
   if (type === 'core/burst') return collectBurstDiagnostics(config, path);
   if (type === 'core/rate' || type === 'core/per-distance') {
@@ -770,10 +822,10 @@ export function collectCoreModuleConfigDiagnostics(
       : [];
   }
   if (type === 'core/billboard') {
-    return collectBillboardDiagnostics(config as unknown as BillboardOptions, path);
+    return collectBillboardDiagnostics(config as unknown as BillboardOptions, path, version);
   }
   if (type === 'core/mesh-renderer') {
-    return collectMeshDiagnostics(config as unknown as MeshRendererOptions, path);
+    return collectMeshDiagnostics(config as unknown as MeshRendererOptions, path, version);
   }
   if (type === 'core/light-renderer') {
     const diagnostics: VfxDiagnostic[] = [];
@@ -818,7 +870,10 @@ export function collectCoreModuleConfigDiagnostics(
   }
   if (type === 'core/decal-renderer') {
     const options = config as unknown as DecalRendererOptions;
-    const diagnostics: VfxDiagnostic[] = [];
+    const diagnostics: VfxDiagnostic[] = collectRenderOrderDiagnostics(options, path, {
+      renderOrderOffset: version >= 2,
+      sortCenter: version >= 2,
+    });
     const sizeScale = options.sizeScale ?? 1;
     if (!Number.isFinite(sizeScale) || sizeScale <= 0) {
       diagnostics.push(
@@ -848,6 +903,15 @@ export function collectCoreModuleConfigDiagnostics(
           'NACHI_DECAL_FADE_OVER_LIFE_INVALID',
           'Decal renderer fadeOverLife must be a boolean.',
           fieldPath(path, 'fadeOverLife'),
+        ),
+      );
+    }
+    if (version >= 2 && options.sorted !== undefined && typeof options.sorted !== 'boolean') {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_VALUE_INVALID',
+          'Decal renderer sorted must be a boolean.',
+          fieldPath(path, 'sorted'),
         ),
       );
     }

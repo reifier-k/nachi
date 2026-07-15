@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { billboard, burst, defineEffect, defineEmitter, meshRenderer } from '../src/index.js';
+import {
+  billboard,
+  burst,
+  compileEmitter,
+  decalRenderer,
+  defineEffect,
+  defineEmitter,
+  meshRenderer,
+} from '../src/index.js';
 import {
   applyEmitterQualityTier,
   detectDeviceQualityTier,
@@ -74,6 +82,136 @@ describe('M11 quality tiers and device selection', () => {
     expect(applyEmitterQualityTier(inherited, 'low').render).toMatchObject([
       { config: { sorted: false } },
     ]);
+  });
+
+  it('gates valid raw v2 omitted and explicit sorting across every tier', () => {
+    const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'mesh.glb' } as const;
+    const rawBillboards = [
+      { ...billboard({}), config: { blending: 'alpha' } },
+      { ...billboard({}), config: { blending: 'alpha', sorted: true } },
+      { ...billboard({}), config: { blending: 'premultiplied' } },
+      { ...billboard({}), config: { blending: 'premultiplied', sorted: true } },
+    ] as const;
+    const rawMeshes = [
+      { ...meshRenderer({ geometry }), config: { blending: 'alpha', geometry } },
+      {
+        ...meshRenderer({ geometry }),
+        config: { blending: 'alpha', geometry, sorted: true },
+      },
+      {
+        ...meshRenderer({ geometry }),
+        config: { blending: 'premultiplied', geometry },
+      },
+      {
+        ...meshRenderer({ geometry }),
+        config: { blending: 'premultiplied', geometry, sorted: true },
+      },
+    ] as const;
+    const rawDecals = [
+      { ...decalRenderer({}), config: { blending: 'alpha' } },
+      { ...decalRenderer({}), config: { blending: 'alpha', sorted: true } },
+      { ...decalRenderer({}), config: { blending: 'premultiplied' } },
+      { ...decalRenderer({}), config: { blending: 'premultiplied', sorted: true } },
+    ] as const;
+    for (const render of [...rawBillboards, ...rawMeshes, ...rawDecals]) {
+      const emitter = defineEmitter({
+        capacity: 4,
+        integration: 'none',
+        render,
+        spawn: burst({ count: 1 }),
+      });
+      const physicalIndex = (tier: 'epic' | 'high' | 'low' | 'medium') => {
+        const draw = compileEmitter(applyEmitterQualityTier(emitter, tier)).draws[0];
+        if (!draw || !('indirect' in draw)) throw new Error('Expected an indirect renderer draw.');
+        return draw.indirect.physicalIndex;
+      };
+      expect(physicalIndex('low')).toBe('alive-indices');
+      expect(physicalIndex('medium')).toBe('alive-indices');
+      expect(physicalIndex('high')).toBe('sorted-indices');
+      expect(physicalIndex('epic')).toBe('sorted-indices');
+    }
+  });
+
+  it('preserves unsupported raw v2 explicit sorting for diagnostics in every tier', () => {
+    const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'mesh.glb' } as const;
+    const renderers = [
+      { ...billboard({ blending: 'additive' }), config: { blending: 'additive', sorted: true } },
+      { ...billboard({ blending: 'multiply' }), config: { blending: 'multiply', sorted: true } },
+      {
+        ...meshRenderer({ blending: 'additive', geometry }),
+        config: { blending: 'additive', geometry, sorted: true },
+      },
+      {
+        ...meshRenderer({ blending: 'multiply', geometry }),
+        config: { blending: 'multiply', geometry, sorted: true },
+      },
+    ] as const;
+
+    for (const render of renderers) {
+      const emitter = defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render,
+        spawn: burst({ count: 1 }),
+      });
+      for (const tier of ['low', 'medium', 'high', 'epic'] as const) {
+        const gated = applyEmitterQualityTier(emitter, tier);
+        const gatedRender = Array.isArray(gated.render) ? gated.render[0] : gated.render;
+        expect(gatedRender?.config.sorted).toBe(true);
+        expect(compileEmitter(gated).diagnostics).toContainEqual(
+          expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_BLEND_UNSUPPORTED' }),
+        );
+      }
+    }
+  });
+
+  it('preserves an invalid raw sorted value for compiler diagnostics across quality gating', () => {
+    const render = {
+      ...billboard({}),
+      config: { blending: 'alpha', sorted: 'yes' },
+    } as unknown as ReturnType<typeof billboard>;
+    const emitter = defineEmitter({
+      capacity: 1,
+      integration: 'none',
+      render,
+      spawn: burst({ count: 1 }),
+    });
+
+    for (const tier of ['low', 'medium', 'high', 'epic'] as const) {
+      const gated = applyEmitterQualityTier(emitter, tier);
+      const gatedRender = Array.isArray(gated.render) ? gated.render[0] : gated.render;
+      expect(gatedRender?.config.sorted).toBe('yes');
+      expect(compileEmitter(gated).diagnostics).toContainEqual(
+        expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_VALUE_INVALID' }),
+      );
+    }
+  });
+
+  it('preserves v1 omitted sorting and v1 decal non-participation across tiers', () => {
+    const legacyBillboard = {
+      ...billboard({}),
+      config: { blending: 'alpha' },
+      version: 1,
+    } as const;
+    const legacyDecal = {
+      ...decalRenderer({}),
+      config: { blending: 'alpha', sorted: true },
+      version: 1,
+    } as const;
+    for (const render of [legacyBillboard, legacyDecal]) {
+      const emitter = defineEmitter({
+        capacity: 4,
+        integration: 'none',
+        render,
+        spawn: burst({ count: 1 }),
+      });
+      for (const tier of ['low', 'medium', 'high', 'epic'] as const) {
+        const draw = compileEmitter(applyEmitterQualityTier(emitter, tier)).draws[0];
+        expect(draw && 'indirect' in draw ? draw.indirect.physicalIndex : 'missing').toBe(
+          'alive-indices',
+        );
+      }
+    }
   });
 
   it('rejects invalid bounds, quality scales, and culling distances at authoring time', () => {

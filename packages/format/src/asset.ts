@@ -3,6 +3,8 @@ import {
   MAX_EMITTER_CAPACITY,
   MAX_PBD_ITERATIONS,
   MAX_PREWARM_SECONDS,
+  RENDER_ORDER_BUCKET_MAX,
+  RENDER_ORDER_BUCKET_MIN,
   defineEffect,
   defineEmitter,
   type AttributeType,
@@ -17,11 +19,11 @@ import {
   type VfxDiagnostic,
 } from '@nachi-vfx/core';
 
-import { defaultEffectAssetMigrations } from './migrations.js';
+import { defaultEffectAssetMigrations, legacyV1RendererVersionDiagnostics } from './migrations.js';
 import {
   EFFECT_ASSET_FORMAT,
   EFFECT_ASSET_VERSION,
-  type EffectAssetDocumentV1,
+  type EffectAssetDocumentV2,
   type LoadEffectOptions,
 } from './types.js';
 
@@ -589,7 +591,14 @@ class AssetValidator {
     if (value.label !== undefined && typeof value.label !== 'string')
       this.type('string', value.label, `${path}.label`);
     if (this.record(value.config, `${path}.config`)) {
-      if (value.type === 'core/position-sphere') {
+      if (
+        value.version === 2 &&
+        (value.type === 'core/billboard' ||
+          value.type === 'core/mesh-renderer' ||
+          value.type === 'core/decal-renderer')
+      ) {
+        this.rendererConfig(value.type, value.config, `${path}.config`);
+      } else if (value.type === 'core/position-sphere') {
         this.positionSphereConfig(value.config, `${path}.config`);
       } else if (value.type === 'core/velocity-cone') {
         this.velocityConeConfig(value.config, `${path}.config`);
@@ -611,6 +620,234 @@ class AssetValidator {
       }
     }
     if (value.access !== undefined) this.access(value.access, `${path}.access`);
+  }
+
+  rendererConfig(type: unknown, value: UnknownRecord, path: string): void {
+    this.json(value, path);
+    const common = ['blending', 'renderOrderOffset', 'sortCenter', 'sorted'];
+    const fields =
+      type === 'core/billboard'
+        ? new Set([...common, 'alignment', 'cutout', 'lit', 'map', 'soft'])
+        : type === 'core/mesh-renderer'
+          ? new Set([...common, 'alignment', 'geometry'])
+          : new Set([
+              'blending',
+              'fadeOverLife',
+              'map',
+              'renderOrderOffset',
+              'sizeScale',
+              'sortCenter',
+              'sorted',
+            ]);
+    this.unknownFields(value, fields, path);
+    if (type === 'core/mesh-renderer') this.required(value, ['geometry'], path);
+    if (
+      value.renderOrderOffset !== undefined &&
+      (!Number.isInteger(value.renderOrderOffset) ||
+        (value.renderOrderOffset as number) < RENDER_ORDER_BUCKET_MIN ||
+        (value.renderOrderOffset as number) > RENDER_ORDER_BUCKET_MAX)
+    ) {
+      this.type('signed 32-bit integer', value.renderOrderOffset, `${path}.renderOrderOffset`);
+    }
+    if (value.sortCenter !== undefined) this.numberTuple(value.sortCenter, 3, `${path}.sortCenter`);
+    if (value.sorted !== undefined && typeof value.sorted !== 'boolean')
+      this.type('boolean', value.sorted, `${path}.sorted`);
+    if (
+      value.blending !== undefined &&
+      !(type === 'core/decal-renderer'
+        ? value.blending === 'alpha' || value.blending === 'premultiplied'
+        : ['additive', 'alpha', 'multiply', 'premultiplied'].includes(value.blending as string))
+    ) {
+      this.type('supported renderer blending mode', value.blending, `${path}.blending`);
+    }
+    if (type === 'core/decal-renderer') {
+      if (value.fadeOverLife !== undefined && typeof value.fadeOverLife !== 'boolean')
+        this.type('boolean', value.fadeOverLife, `${path}.fadeOverLife`);
+      if (value.sizeScale !== undefined) {
+        this.finiteNumber(value.sizeScale, `${path}.sizeScale`);
+        if (typeof value.sizeScale === 'number' && value.sizeScale <= 0) {
+          this.error(
+            'NACHI_ASSET_VALUE_INVALID',
+            'Decal sizeScale must be positive.',
+            `${path}.sizeScale`,
+          );
+        }
+      }
+      if (value.map !== undefined) this.rendererAssetRef(value.map, 'texture', `${path}.map`);
+      return;
+    }
+    if (value.alignment !== undefined) {
+      this.rendererAlignment(type, value.alignment, `${path}.alignment`);
+    }
+    if (type === 'core/mesh-renderer') {
+      this.rendererAssetRef(value.geometry, 'geometry', `${path}.geometry`);
+      return;
+    }
+    if (value.cutout !== undefined) this.rendererCutout(value.cutout, `${path}.cutout`);
+    if (value.lit !== undefined) this.rendererLit(value.lit, `${path}.lit`);
+    if (value.map !== undefined) this.rendererMap(value.map, `${path}.map`);
+    if (value.soft !== undefined) this.rendererSoft(value.soft, `${path}.soft`);
+  }
+
+  rendererAlignment(type: unknown, value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.required(value, ['mode'], path);
+    const mode = value.mode;
+    if (type === 'core/billboard') {
+      if (
+        mode !== 'camera-facing' &&
+        mode !== 'custom-axis' &&
+        mode !== 'velocity-aligned' &&
+        mode !== 'velocity-stretch'
+      ) {
+        this.type('supported billboard alignment mode', mode, `${path}.mode`);
+      }
+      this.unknownFields(
+        value,
+        mode === 'custom-axis'
+          ? new Set(['axis', 'mode'])
+          : mode === 'velocity-stretch'
+            ? new Set(['factor', 'mode'])
+            : new Set(['mode']),
+        path,
+      );
+      if (mode === 'custom-axis') {
+        this.required(value, ['axis'], path);
+        this.numberTuple(value.axis, 3, `${path}.axis`);
+        if (
+          Array.isArray(value.axis) &&
+          value.axis.length === 3 &&
+          value.axis.every((component) => typeof component === 'number') &&
+          Math.hypot(...value.axis) === 0
+        ) {
+          this.error(
+            'NACHI_ASSET_VALUE_INVALID',
+            'Alignment axis must be non-zero.',
+            `${path}.axis`,
+          );
+        }
+      } else if (mode === 'velocity-stretch' && value.factor !== undefined) {
+        this.finiteNumber(value.factor, `${path}.factor`);
+        if (typeof value.factor === 'number' && value.factor < 0) {
+          this.error(
+            'NACHI_ASSET_VALUE_INVALID',
+            'Velocity stretch factor must be non-negative.',
+            `${path}.factor`,
+          );
+        }
+      }
+      return;
+    }
+    if (mode !== 'custom-axis' && mode !== 'none' && mode !== 'quaternion' && mode !== 'velocity') {
+      this.type('supported mesh alignment mode', mode, `${path}.mode`);
+    }
+    this.unknownFields(
+      value,
+      mode === 'custom-axis' ? new Set(['axis', 'mode']) : new Set(['mode']),
+      path,
+    );
+    if (mode === 'custom-axis') {
+      this.required(value, ['axis'], path);
+      this.numberTuple(value.axis, 3, `${path}.axis`);
+      if (
+        Array.isArray(value.axis) &&
+        value.axis.length === 3 &&
+        value.axis.every((component) => typeof component === 'number') &&
+        Math.hypot(...value.axis) === 0
+      ) {
+        this.error('NACHI_ASSET_VALUE_INVALID', 'Alignment axis must be non-zero.', `${path}.axis`);
+      }
+    }
+  }
+
+  rendererAssetRef(value: unknown, assetType: 'geometry' | 'texture', path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['assetType', 'kind', 'uri']), path);
+    this.required(value, ['assetType', 'kind', 'uri'], path);
+    if (value.kind !== 'asset-ref') this.literal(value.kind, 'asset-ref', `${path}.kind`);
+    if (value.assetType !== assetType)
+      this.literal(value.assetType, assetType, `${path}.assetType`);
+    if (typeof value.uri !== 'string' || value.uri.length === 0) {
+      this.type('non-empty string', value.uri, `${path}.uri`);
+    }
+  }
+
+  rendererCutout(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['vertices']), path);
+    this.required(value, ['vertices'], path);
+    if (
+      !Number.isSafeInteger(value.vertices) ||
+      (value.vertices as number) < 4 ||
+      (value.vertices as number) > 8
+    ) {
+      this.type('integer from 4 through 8', value.vertices, `${path}.vertices`);
+    }
+  }
+
+  rendererLit(value: unknown, path: string): void {
+    if (typeof value === 'boolean') return;
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['metalness', 'normalMap', 'roughness']), path);
+    for (const field of ['metalness', 'roughness'] as const) {
+      if (value[field] === undefined) continue;
+      this.finiteNumber(value[field], `${path}.${field}`);
+      if (typeof value[field] === 'number' && (value[field] < 0 || value[field] > 1)) {
+        this.error(
+          'NACHI_ASSET_VALUE_INVALID',
+          `${field} must be between zero and one.`,
+          `${path}.${field}`,
+        );
+      }
+    }
+    if (value.normalMap !== undefined) {
+      this.rendererAssetRef(value.normalMap, 'texture', `${path}.normalMap`);
+    }
+  }
+
+  rendererMap(value: unknown, path: string): void {
+    if (!this.record(value, path)) return;
+    if (value.kind === 'asset-ref') {
+      this.rendererAssetRef(value, 'texture', path);
+      return;
+    }
+    if (value.kind !== 'flipbook') {
+      this.type('TextureRef or flipbook', value, path);
+      return;
+    }
+    this.unknownFields(
+      value,
+      new Set(['cols', 'interpolate', 'kind', 'motionVectors', 'rows', 'texture']),
+      path,
+    );
+    this.required(value, ['cols', 'kind', 'rows', 'texture'], path);
+    for (const field of ['cols', 'rows'] as const) {
+      if (!Number.isSafeInteger(value[field]) || (value[field] as number) <= 0) {
+        this.type('positive safe integer', value[field], `${path}.${field}`);
+      }
+    }
+    this.rendererAssetRef(value.texture, 'texture', `${path}.texture`);
+    if (value.interpolate !== undefined && typeof value.interpolate !== 'boolean') {
+      this.type('boolean', value.interpolate, `${path}.interpolate`);
+    }
+    if (value.motionVectors !== undefined && typeof value.motionVectors !== 'boolean') {
+      this.rendererAssetRef(value.motionVectors, 'texture', `${path}.motionVectors`);
+    }
+  }
+
+  rendererSoft(value: unknown, path: string): void {
+    if (typeof value === 'boolean') return;
+    if (!this.record(value, path)) return;
+    this.unknownFields(value, new Set(['fadeDistance']), path);
+    this.required(value, ['fadeDistance'], path);
+    this.finiteNumber(value.fadeDistance, `${path}.fadeDistance`);
+    if (typeof value.fadeDistance === 'number' && value.fadeDistance <= 0) {
+      this.error(
+        'NACHI_ASSET_VALUE_INVALID',
+        'Soft-particle fadeDistance must be positive.',
+        `${path}.fadeDistance`,
+      );
+    }
   }
 
   positionSphereConfig(value: UnknownRecord, path: string): void {
@@ -1546,19 +1783,31 @@ export function validateEffectAsset(
   input: unknown,
   options: LoadEffectOptions = {},
 ): readonly VfxDiagnostic[] {
+  const legacyRendererDiagnostics = legacyV1RendererVersionDiagnostics(input);
+  let migrated: unknown = input;
+  try {
+    migrated = (options.migrations ?? defaultEffectAssetMigrations).migrate(
+      input,
+      EFFECT_ASSET_VERSION,
+    );
+  } catch (error) {
+    if (error instanceof VfxDiagnosticError) return error.diagnostics;
+    throw error;
+  }
   const validator = new AssetValidator('deserialize');
-  validator.document(input);
+  validator.document(migrated);
   return [
+    ...legacyRendererDiagnostics,
     ...validator.diagnostics,
-    ...gridStageSourceDiagnostics(input, options),
-    ...gridStageConfigDiagnostics(input),
+    ...gridStageSourceDiagnostics(migrated, options),
+    ...gridStageConfigDiagnostics(migrated),
   ];
 }
 
 export function serializeEffect<
   Elements extends EffectElements,
   Parameters extends ParameterSchema,
->(definition: EffectDefinition<Elements, Parameters>): EffectAssetDocumentV1 {
+>(definition: EffectDefinition<Elements, Parameters>): EffectAssetDocumentV2 {
   const diagnostics = collectSerializableDiagnostics(definition, 'serialize');
   if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
   const effect = jsonClone(definition);
@@ -1567,7 +1816,7 @@ export function serializeEffect<
     format: EFFECT_ASSET_FORMAT,
     version: EFFECT_ASSET_VERSION,
     effect,
-  } satisfies EffectAssetDocumentV1;
+  } satisfies EffectAssetDocumentV2;
   const validator = new AssetValidator('serialize');
   validator.document(document);
   const validationDiagnostics = [...validator.diagnostics, ...gridStageConfigDiagnostics(document)];
@@ -1577,6 +1826,7 @@ export function serializeEffect<
 
 function migratedDocument(input: unknown, options: LoadEffectOptions): UnknownRecord {
   const parsed = parseInput(input);
+  const legacyRendererDiagnostics = legacyV1RendererVersionDiagnostics(parsed);
   const migrated = (options.migrations ?? defaultEffectAssetMigrations).migrate(
     parsed,
     EFFECT_ASSET_VERSION,
@@ -1584,6 +1834,7 @@ function migratedDocument(input: unknown, options: LoadEffectOptions): UnknownRe
   const validator = new AssetValidator('deserialize');
   validator.document(migrated);
   const diagnostics = [
+    ...legacyRendererDiagnostics,
     ...validator.diagnostics,
     ...gridStageSourceDiagnostics(migrated, options),
     ...gridStageConfigDiagnostics(migrated),

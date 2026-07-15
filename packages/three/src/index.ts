@@ -26,8 +26,16 @@ import type {
   VfxEmitterRuntimeView,
   VfxPrepareEmitterContext,
   VfxRuntimeRenderer,
+  VfxTransparentDrawOrderAssignment,
 } from '@nachi-vfx/core';
-import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS, resolvePackedAttributeAddress } from '@nachi-vfx/core';
+import {
+  MAX_TRANSPARENT_DRAW_ORDER_ENTRIES,
+  RENDER_ORDER_BUCKET_MAX,
+  RENDER_ORDER_BUCKET_MIN,
+  RENDER_ORDER_RANK_DENOMINATOR,
+  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
+  resolvePackedAttributeAddress,
+} from '@nachi-vfx/core';
 import * as THREE from 'three/webgpu';
 import {
   Fn,
@@ -90,6 +98,8 @@ export interface ThreeKernelAdapterOptions {
 }
 
 export interface ThreeSpriteMaterializationOptions {
+  /** Integer host-order base. Defaults to 1000. */
+  readonly renderOrder?: number;
   readonly resolveTexture?: ThreeTextureResolver;
 }
 
@@ -97,6 +107,8 @@ type ThreeLitSpriteNodeMaterial = THREE.MeshStandardNodeMaterial &
   Pick<THREE.SpriteNodeMaterial, 'rotationNode' | 'scaleNode' | 'sizeAttenuation'>;
 
 export interface ThreeMeshMaterializationOptions {
+  /** Integer host-order base. Defaults to 1000. */
+  readonly renderOrder?: number;
   readonly resolveGeometry: ThreeGeometryResolver;
 }
 
@@ -406,7 +418,7 @@ type StorageArrayConstructor = new (length: number) => StorageArray;
 const THREE_STORAGE_ATTRIBUTE_TYPE = 3;
 const THREE_INDIRECT_ATTRIBUTE_TYPE = 4;
 const THREE_DRAW_REGISTRY = Symbol.for('@nachi-vfx/three/materialized-draw-registry');
-const THREE_RENDER_ORDER = Symbol.for('@nachi-vfx/three/render-order');
+const THREE_RENDER_ORDER_ASSIGNMENTS = Symbol.for('@nachi-vfx/three/render-order-assignments');
 const THREE_VISIBILITY = Symbol.for('@nachi-vfx/three/visibility');
 const indirectAttributesByAdapter = new WeakMap<
   KernelTslAdapter,
@@ -415,14 +427,61 @@ const indirectAttributesByAdapter = new WeakMap<
 
 type ThreeDrawRegistration = {
   readonly attributes: readonly THREE.BufferAttribute[];
+  base: number;
   readonly dispose: () => void;
+  readonly drawIndex: number;
   readonly object: THREE.Object3D;
+  readonly offset: number;
   userVisible?: boolean;
 };
 
 /** User-owned visibility component composed with runtime culling and lifecycle visibility. */
 export interface ThreeDrawVisibilityControl {
   setUserVisible(visible: boolean): void;
+}
+
+export interface ThreeDrawRenderOrderControl extends ThreeDrawVisibilityControl {
+  setRenderOrderBase(base: number): void;
+}
+
+/** Exact Three host-order composition shared by registration and regression tests. */
+export function composeThreeRenderOrder(base: number, offset: number, rank?: number): number {
+  const validBucketComponent = (value: number) =>
+    Number.isInteger(value) && value >= RENDER_ORDER_BUCKET_MIN && value <= RENDER_ORDER_BUCKET_MAX;
+  const bucket = base + offset;
+  if (
+    !validBucketComponent(base) ||
+    !validBucketComponent(offset) ||
+    !validBucketComponent(bucket) ||
+    (rank !== undefined &&
+      (!Number.isSafeInteger(rank) || rank < 0 || rank >= MAX_TRANSPARENT_DRAW_ORDER_ENTRIES))
+  ) {
+    throw new RangeError(
+      'NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID: base, offset, bucket, and rank must remain inside their exact supported ranges.',
+    );
+  }
+  return rank === undefined ? bucket : bucket + (rank + 1) / RENDER_ORDER_RANK_DENOMINATOR;
+}
+
+function renderOrderAssignments(
+  kernels: BuiltEmitterKernels,
+): ReadonlyMap<number, number> | undefined {
+  return (
+    kernels as BuiltEmitterKernels & {
+      [THREE_RENDER_ORDER_ASSIGNMENTS]?: ReadonlyMap<number, number>;
+    }
+  )[THREE_RENDER_ORDER_ASSIGNMENTS];
+}
+
+function applyDrawRenderOrder(
+  kernels: BuiltEmitterKernels,
+  registration: ThreeDrawRegistration,
+): void {
+  registration.object.renderOrder = composeThreeRenderOrder(
+    registration.base,
+    registration.offset,
+    renderOrderAssignments(kernels)?.get(registration.drawIndex),
+  );
 }
 
 function runtimeVisibility(kernels: BuiltEmitterKernels): boolean {
@@ -476,21 +535,52 @@ function registerDrawObject(
   object: THREE.Object3D,
   attributes: readonly THREE.BufferAttribute[] = [],
   dispose: () => void = () => disposeObjectResources(object),
-): ThreeDrawVisibilityControl {
+  order: { readonly base: number; readonly drawIndex: number; readonly offset: number } = {
+    base: object.renderOrder,
+    drawIndex: -1,
+    offset: 0,
+  },
+): ThreeDrawRenderOrderControl {
+  let initialRenderOrder: number;
+  try {
+    initialRenderOrder = composeThreeRenderOrder(
+      order.base,
+      order.offset,
+      renderOrderAssignments(kernels)?.get(order.drawIndex),
+    );
+  } catch (error) {
+    // Materializers have already allocated their Three object by this point. Validation failure
+    // must release it because no handle can be returned to the caller for explicit disposal.
+    try {
+      dispose();
+    } catch {
+      // Preserve the deterministic composition diagnostic as the primary failure.
+    }
+    throw error;
+  }
   const instanceMatrix = object instanceof THREE.InstancedMesh ? [object.instanceMatrix] : [];
   const registration: ThreeDrawRegistration = {
     attributes: [...instanceMatrix, ...attributes],
+    base: order.base,
     dispose,
+    drawIndex: order.drawIndex,
     object,
+    offset: order.offset,
     userVisible: true,
   };
-  drawRegistry(kernels, true)!.add(registration);
-  const state = kernels as BuiltEmitterKernels & {
-    [THREE_RENDER_ORDER]?: number;
-  };
-  object.renderOrder = state[THREE_RENDER_ORDER] ?? object.renderOrder;
+  object.renderOrder = initialRenderOrder;
   applyDrawVisibility(kernels, registration);
+  drawRegistry(kernels, true)!.add(registration);
   return {
+    setRenderOrderBase(base: number): void {
+      const renderOrder = composeThreeRenderOrder(
+        base,
+        registration.offset,
+        renderOrderAssignments(kernels)?.get(registration.drawIndex),
+      );
+      registration.base = base;
+      registration.object.renderOrder = renderOrder;
+    },
     setUserVisible(visible: boolean): void {
       registration.userVisible = visible;
       applyDrawVisibility(kernels, registration);
@@ -552,9 +642,7 @@ function retainThreeDrawPipeline(
         if (disposed || active) return;
         drawRegistry(kernels, true)!.add(registration);
         active = true;
-        const state = kernels as BuiltEmitterKernels & { [THREE_RENDER_ORDER]?: number };
-        registration.object.renderOrder =
-          state[THREE_RENDER_ORDER] ?? registration.object.renderOrder;
+        applyDrawRenderOrder(kernels, registration);
         applyDrawVisibility(kernels, registration);
       },
       dispose(): void {
@@ -952,6 +1040,11 @@ export function createThreeRuntimeRenderer(
   };
   const prepareKernelsForPooling = (kernels: BuiltEmitterKernels): void => {
     disposeKernelDraws(kernels, renderer);
+    delete (
+      kernels as BuiltEmitterKernels & {
+        [THREE_RENDER_ORDER_ASSIGNMENTS]?: ReadonlyMap<number, number>;
+      }
+    )[THREE_RENDER_ORDER_ASSIGNMENTS];
     if (kernels.drawIndirect && kernels.drawIndirectOffsetBytes !== undefined) {
       const indirect = kernels.drawIndirect
         .indirectResource as THREE.IndirectStorageBufferAttribute;
@@ -979,10 +1072,10 @@ export function createThreeRuntimeRenderer(
     }
     replayReadyKernels.delete(kernels);
     const state = kernels as BuiltEmitterKernels & {
-      [THREE_RENDER_ORDER]?: number;
+      [THREE_RENDER_ORDER_ASSIGNMENTS]?: ReadonlyMap<number, number>;
       [THREE_VISIBILITY]?: boolean;
     };
-    delete state[THREE_RENDER_ORDER];
+    delete state[THREE_RENDER_ORDER_ASSIGNMENTS];
     delete state[THREE_VISIBILITY];
   };
   const writeStorage: NonNullable<VfxRuntimeRenderer['writeStorage']> = (
@@ -1078,10 +1171,19 @@ export function createThreeRuntimeRenderer(
       return renderer.getArrayBufferAsync(storageNode.value as never);
     },
     setUniformValue: setThreeUniformValue,
-    setRenderOrder: (kernels: BuiltEmitterKernels, order: number) => {
-      (kernels as BuiltEmitterKernels & { [THREE_RENDER_ORDER]?: number })[THREE_RENDER_ORDER] =
-        order;
-      for (const { object } of drawRegistry(kernels) ?? []) object.renderOrder = order;
+    setRenderOrder: (
+      kernels: BuiltEmitterKernels,
+      assignments: readonly VfxTransparentDrawOrderAssignment[],
+    ) => {
+      const byDrawIndex = new Map(assignments.map(({ drawIndex, rank }) => [drawIndex, rank]));
+      (
+        kernels as BuiltEmitterKernels & {
+          [THREE_RENDER_ORDER_ASSIGNMENTS]?: ReadonlyMap<number, number>;
+        }
+      )[THREE_RENDER_ORDER_ASSIGNMENTS] = byDrawIndex;
+      for (const registration of drawRegistry(kernels) ?? []) {
+        applyDrawRenderOrder(kernels, registration);
+      }
     },
     setVisibility: (kernels: BuiltEmitterKernels, visible: boolean) => {
       (kernels as BuiltEmitterKernels & { [THREE_VISIBILITY]?: boolean })[THREE_VISIBILITY] =
@@ -1267,7 +1369,7 @@ export function materializeThreeSpriteDraw(
   THREE.BufferGeometry,
   THREE.SpriteNodeMaterial | ThreeLitSpriteNodeMaterial
 > &
-  ThreeDrawVisibilityControl {
+  ThreeDrawRenderOrderControl {
   const draw = program.draws[drawIndex];
   if (draw?.kind !== 'billboard') {
     throw new Error(`Compiled sprite draw ${drawIndex} is missing.`);
@@ -1463,7 +1565,14 @@ export function materializeThreeSpriteDraw(
   }
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
-  return Object.assign(mesh, registerDrawObject(kernels, mesh));
+  return Object.assign(
+    mesh,
+    registerDrawObject(kernels, mesh, [], undefined, {
+      base: options.renderOrder ?? 1_000,
+      drawIndex,
+      offset: draw.renderOrderOffset,
+    }),
+  );
 }
 
 function indexedGeometry(source: THREE.BufferGeometry): THREE.BufferGeometry {
@@ -1512,7 +1621,7 @@ export function materializeThreeMeshDraw(
   drawIndex = 0,
   options: ThreeMeshMaterializationOptions,
 ): THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial> &
-  ThreeDrawVisibilityControl {
+  ThreeDrawRenderOrderControl {
   const draw = program.draws[drawIndex];
   if (draw?.kind !== 'mesh') {
     throw new Error(`Compiled mesh draw ${drawIndex} is missing.`);
@@ -1565,7 +1674,7 @@ export function materializeThreeMeshDraw(
   const material = new THREE.MeshBasicNodeMaterial({
     blending: blend.blending,
     depthTest: true,
-    depthWrite: true,
+    depthWrite: draw.moduleVersion === 1,
     premultipliedAlpha: blend.premultipliedAlpha,
     transparent,
   });
@@ -1586,7 +1695,14 @@ export function materializeThreeMeshDraw(
   }
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
-  return Object.assign(mesh, registerDrawObject(kernels, mesh));
+  return Object.assign(
+    mesh,
+    registerDrawObject(kernels, mesh, [], undefined, {
+      base: options.renderOrder ?? 1_000,
+      drawIndex,
+      offset: draw.renderOrderOffset,
+    }),
+  );
 }
 
 type MutableNode = KernelNode & {
@@ -1893,7 +2009,7 @@ export function materializeThreeDecalDraw(
   drawIndex = 0,
   options: ThreeDecalMaterializationOptions,
 ): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicNodeMaterial> &
-  ThreeDrawVisibilityControl {
+  ThreeDrawRenderOrderControl {
   const draw = program.draws[drawIndex];
   if (draw?.kind !== 'decal') throw new Error(`Compiled decal draw ${drawIndex} is missing.`);
   if (kernels.capabilityPath !== 'webgpu-atomic-indirect') {
@@ -1988,8 +2104,14 @@ export function materializeThreeDecalDraw(
     mesh.setMatrixAt(index, identity);
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
-  mesh.renderOrder = options.renderOrder ?? 10;
-  return Object.assign(mesh, registerDrawObject(kernels, mesh));
+  return Object.assign(
+    mesh,
+    registerDrawObject(kernels, mesh, [], undefined, {
+      base: options.renderOrder ?? 10,
+      drawIndex,
+      offset: draw.renderOrderOffset,
+    }),
+  );
 }
 
 export interface ThreePreparedDraw {

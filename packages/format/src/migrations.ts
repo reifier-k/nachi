@@ -21,6 +21,61 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const H2_7_RENDERER_MODULES = new Set([
+  'core/billboard',
+  'core/decal-renderer',
+  'core/mesh-renderer',
+]);
+
+/** Reserved-version check shared by direct migration and the loader preflight. */
+export function legacyV1RendererVersionDiagnostics(input: unknown): readonly VfxDiagnostic[] {
+  if (!isRecord(input) || input.format !== EFFECT_ASSET_FORMAT || input.version !== 1) return [];
+  if (!isRecord(input.effect) || !isRecord(input.effect.elements)) return [];
+  const diagnostics: VfxDiagnostic[] = [];
+  const checkModule = (value: unknown, path: string): void => {
+    if (
+      isRecord(value) &&
+      value.kind === 'module' &&
+      typeof value.type === 'string' &&
+      H2_7_RENDERER_MODULES.has(value.type) &&
+      value.version !== 1
+    ) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_ASSET_V1_RENDERER_VERSION_UNSUPPORTED',
+          `A v1 asset may contain ${value.type}@1 only; later renderer versions cannot be reinterpreted safely during envelope-only migration.`,
+          `${path}.version`,
+        ),
+      );
+    }
+  };
+  const checkModuleOrArray = (value: unknown, path: string): void => {
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (index in value) checkModule(value[index], `${path}[${index}]`);
+      }
+    } else {
+      checkModule(value, path);
+    }
+  };
+  for (const [key, element] of Object.entries(input.effect.elements)) {
+    if (!isRecord(element)) continue;
+    const path = `$.effect.elements.${key}`;
+    if (element.kind === 'emitter') {
+      checkModuleOrArray(element.render, `${path}.render`);
+      continue;
+    }
+    if (
+      element.kind === 'emitter-extends' &&
+      isRecord(element.overrides) &&
+      isRecord(element.overrides.render)
+    ) {
+      checkModuleOrArray(element.overrides.render.modules, `${path}.overrides.render.modules`);
+    }
+  }
+  return diagnostics;
+}
+
 /** Explicit, one-step-at-a-time migration graph. No semver or best-effort coercion is inferred. */
 export class EffectAssetMigrationRegistry {
   readonly #entries = new Map<number, MigrationEntry>();
@@ -110,4 +165,12 @@ export class EffectAssetMigrationRegistry {
   }
 }
 
-export const defaultEffectAssetMigrations = new EffectAssetMigrationRegistry();
+export const defaultEffectAssetMigrations = new EffectAssetMigrationRegistry().register(
+  1,
+  2,
+  (document) => {
+    const diagnostics = legacyV1RendererVersionDiagnostics(document);
+    if (diagnostics.length > 0) throw new VfxDiagnosticError(diagnostics);
+    return { ...document, version: 2 };
+  },
+);

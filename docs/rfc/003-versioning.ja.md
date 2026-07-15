@@ -67,19 +67,23 @@ Nachiのパッケージはセマンティックバージョニングを使用し
 パッケージバージョンとアセットバージョンは別個の軸である。現在のエンベロープは以下の通りである:
 
 ```ts
-{ format: 'nachi-effect', version: 1, effect: /* closed declarative data */ }
+{ format: 'nachi-effect', version: 2, effect: /* closed declarative data */ }
 ```
 
-旧リーダーが安全に拒否できるオプションフィールドの追加は、パッケージのマイナーリリースで出荷しても
-よいが、それによって同一バージョンがリーダー間で曖昧になる場合、書き手はそれをバージョン1として出力
-してはならない。非互換な形状または意味の変更は、エンベロープ／モジュールフォーマットバージョンを
-インクリメントし、`EffectAssetMigrationRegistry` に明示的なワンステップのマイグレーションを提供する。
-リーダーは決して推測せず、未知のフィールドを黙って破棄せず、バージョン1を再解釈しない。サポートされて
-いるリーダーは、パッケージのメジャーバージョンが存続する限りバージョン1を受け入れ続ける。削除には
-パッケージのメジャーリリースとリリースノートでのマイグレーションプランが必要である。
+default registryは明示的なenvelope-only v1→v2 migrationによりhistorical v1 input compatibilityを保持する。
+top-level versionだけを変更し、inputをmutationせず、effect payloadと全module versionを変更しない。v1-only old
+readerはcanonical v2をcompile前に拒否するため、新しいrenderer semanticsを黙って再解釈できない。
 
-RFC 001に記録されたバージョン1の制約は規範的なままである。インライン関数は登録／参照境界を必要とし、
-シミュレーションキャッシュの埋め込みはエンベロープの一部ではない。
+old readerが安全に拒否できるoptional fieldの追加はpackage minorで出荷してよいが、reader間で同じversionが
+曖昧になる場合、writerは既に公開済みのenvelope versionとして出力してはならない。非互換なshape/meaning変更は
+envelope/module format versionをincrementし、`EffectAssetMigrationRegistry`へ明示1-step migrationを提供する。
+readerは推測せず未知fieldを黙って破棄しない。envelope migrationはmodule-version upgradeを意味しない。
+supported readerはpackage majorが存続する間、documented compatibility pathを通してhistorical v1を受理し続ける。
+削除にはpackage majorとrelease-note migration planが必要である。
+
+RFC 001に記録されたpayload制約はhistorical v1とcanonical v2の双方に適用する。inline functionは
+registration/reference境界を必要とし、simulation-cache embeddingはどちらのenvelopeにも含まれない。
+renderer-v2 reserved-version guardとold-reader safe rejectionの詳細はRFC 006 §9が所有する。
 
 ## 5. 実験的API
 

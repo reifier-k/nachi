@@ -82,6 +82,16 @@ visibility update overwrites that field. Use `setUserVisible(false)` for a persi
 contract to their returned `group` while keeping every pooled child PointLight shader-stably
 visible.
 
+Sprite, mesh, and decal draws also expose `setRenderOrderBase(base)`. The adapter composes that
+persistent host base with the renderer-v2 module's signed `renderOrderOffset` and core's fractional
+far-to-near rank; it never substitutes a fixed `1000 + rank`. Sprite/mesh bases default to 1000 and
+the existing decal base defaults to 10. An external Three object at the resulting integer bucket is
+submitted before Nachi's automatic draws in that bucket, and one at the next integer is submitted
+after them. Assigning `.renderOrder` directly is not persistent and may be overwritten by a runtime
+update or pool transition. Version-2 transparent mesh materials use `depthWrite: false`; module-v1
+mesh draws preserve the old `true` behavior. See
+[RFC 006](../../docs/rfc/006-transparent-draw-order.md) for the exact formula and supported ranges.
+
 ## Preparing first-use pipelines
 
 Use `createThreeEffectPreparer()` with core or timeline `system.prepare()` to compile draw

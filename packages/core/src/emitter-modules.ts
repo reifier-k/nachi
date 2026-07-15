@@ -217,6 +217,7 @@ export function collectEmitterBehaviorConfigDiagnostics(
       module.type,
       module.config as Readonly<Record<string, unknown>>,
       `${path}.config`,
+      module.version,
     ).filter(
       ({ code }) =>
         code.startsWith('NACHI_COLLISION_') ||

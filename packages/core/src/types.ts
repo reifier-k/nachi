@@ -581,6 +581,8 @@ export interface BillboardOptions {
       };
   /** WebGPU-only back-to-front particle sorting by camera depth. Alpha modes only. */
   readonly sorted?: boolean;
+  /** Signed-integer offset composed with the renderer materialization base. Defaults to 0. */
+  readonly renderOrderOffset?: number;
   /** Local-space center used by emitter-level coarse sorting. Defaults to the emitter origin. */
   readonly sortCenter?: Vec3;
   readonly cutout?: { readonly vertices: 4 | 5 | 6 | 7 | 8 };
@@ -601,6 +603,8 @@ export interface MeshRendererOptions {
   readonly blending?: BlendingMode;
   /** WebGPU-only back-to-front particle sorting by camera depth. Alpha modes only. */
   readonly sorted?: boolean;
+  /** Signed-integer offset composed with the renderer materialization base. Defaults to 0. */
+  readonly renderOrderOffset?: number;
   /** Local-space center used by emitter-level coarse sorting. Defaults to the emitter origin. */
   readonly sortCenter?: Vec3;
   readonly geometry: GeometryRef;
@@ -622,6 +626,12 @@ export interface DecalRendererOptions {
   /** Multiplies alpha by 1 - normalizedAge. Defaults to true. */
   readonly fadeOverLife?: boolean;
   readonly map?: TextureRef;
+  /** Signed-integer offset composed with the renderer materialization base. Defaults to 0. */
+  readonly renderOrderOffset?: number;
+  /** Emitter-local center used by coarse draw sorting. Defaults to the emitter origin. */
+  readonly sortCenter?: Vec3;
+  /** WebGPU-only back-to-front particle sorting by camera depth. */
+  readonly sorted?: boolean;
 }
 
 export interface EmitToOptions {

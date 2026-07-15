@@ -172,12 +172,15 @@ historical meaning:
 4. Current authoring helpers emit module version 2 and materialize defaults explicitly: `emitter`
    for the five H1 modules and `world` for `velocityCone` and `linearForce`.
 5. Re-serialization preserves the module version, is canonical and explicit, and never mutates the
-   input. Loading v1 does not silently upgrade it to v2.
+   input. Loading an envelope-v1 asset does not silently upgrade module-v1 records to module v2.
 
-The asset envelope stays version 1 because module records carry their own version. A pre-H2-6 reader
-has only the `type@1` registry entry and therefore safely rejects a newly authored `type@2` with
-`NACHI_MODULE_UNKNOWN`; it cannot silently reinterpret the selector. Code-first definitions that
-want local cone or thruster direction opt into `space: 'emitter'` on the v2 helper.
+At H2-6, the asset envelope stayed version 1 because module records carried their own version. A
+pre-H2-6 reader had only the `type@1` registry entry and therefore safely rejected a newly authored
+`type@2` with `NACHI_MODULE_UNKNOWN`; it could not silently reinterpret the selector. H2-7 later
+raised the canonical envelope to version 2 for the renderer boundary. Its default envelope-only
+v1 → v2 migration changes no module payload or version, so both module-v1 and module-v2 space records
+retain the H2-6 semantics above. Code-first definitions that want local cone or thruster direction
+opt into `space: 'emitter'` on the v2 helper.
 
 ## 6. Checklist for a new or changed public API
 

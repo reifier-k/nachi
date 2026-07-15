@@ -54,7 +54,10 @@ async function verifyReleasePlan(packages) {
     await run('pnpm', ['changeset', 'status', '--output', output]);
     const status = JSON.parse(await readFile(path.join(root, output), 'utf8'));
     const expectedNames = packages.map(({ manifest }) => manifest.name).sort();
-    const unknownReleases = status.releases.filter(({ name }) => !expectedNames.includes(name));
+    // Changesets includes private workspace packages as informational `type: "none"` rows. They
+    // are not releases and must not trip the public-package boundary.
+    const actionableReleases = status.releases.filter(({ type }) => type !== 'none');
+    const unknownReleases = actionableReleases.filter(({ name }) => !expectedNames.includes(name));
     if (unknownReleases.length > 0) {
       throw new Error(
         `Changeset release plan contains non-public packages: ${unknownReleases
@@ -62,7 +65,7 @@ async function verifyReleasePlan(packages) {
           .join(', ')}.`,
       );
     }
-    const releases = status.releases.sort((left, right) => left.name.localeCompare(right.name));
+    const releases = actionableReleases.sort((left, right) => left.name.localeCompare(right.name));
     const initialPackages = packages.filter(({ manifest }) => manifest.version === '0.0.0');
     if (initialPackages.length > 0) {
       if (initialPackages.length !== packages.length) {

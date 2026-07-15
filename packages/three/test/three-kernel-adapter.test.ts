@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
+  MAX_TRANSPARENT_DRAW_ORDER_ENTRIES,
+  RENDER_ORDER_BUCKET_MAX,
   billboard,
   bakeSdf,
   burst,
@@ -50,6 +52,7 @@ import { context } from 'three/tsl';
 
 import {
   createThreeKernelAdapter,
+  composeThreeRenderOrder,
   createThreeRuntimeRenderer,
   createThreeGeometryResolver,
   createThreeEffectPreparer,
@@ -71,6 +74,74 @@ import {
 } from '../src/index.js';
 
 describe('three kernel adapter', () => {
+  it('composes exact render-order buckets and rank fractions without collisions', () => {
+    expect(composeThreeRenderOrder(1_000, -3)).toBe(997);
+    expect(composeThreeRenderOrder(1_000, -3, 0)).toBe(997 + 1 / 2 ** 20);
+    expect(composeThreeRenderOrder(1_000, -3, 1)).toBe(997 + 2 / 2 ** 20);
+    expect(() => composeThreeRenderOrder(2_147_483_647, 1)).toThrowError(
+      'NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID',
+    );
+    expect(() => composeThreeRenderOrder(0.5, 0)).toThrowError(
+      'NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID',
+    );
+    expect(() => composeThreeRenderOrder(0, 0.5)).toThrowError(
+      'NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID',
+    );
+    expect(() => composeThreeRenderOrder(0, 0, MAX_TRANSPARENT_DRAW_ORDER_ENTRIES)).toThrowError(
+      'NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID',
+    );
+  });
+
+  it('rolls back registry and Three resources for every invalid initial order component', () => {
+    const failures = [
+      { base: 0.5, name: 'base', offset: 0 },
+      { base: 0, name: 'offset', offset: 0.5 },
+      { base: RENDER_ORDER_BUCKET_MAX, name: 'bucket', offset: 1 },
+      { base: 0, name: 'rank', offset: 0, rank: MAX_TRANSPARENT_DRAW_ORDER_ENTRIES },
+    ] as const;
+
+    for (const failure of failures) {
+      const compiled = compileEmitter(
+        defineEmitter({
+          capacity: 1,
+          render: billboard({ blending: 'additive' }),
+          spawn: burst({ count: 1 }),
+        }),
+      );
+      const program = {
+        ...compiled,
+        draws: compiled.draws.map((draw, index) =>
+          index === 0 ? { ...draw, renderOrderOffset: failure.offset } : draw,
+        ),
+      } as typeof compiled;
+      const kernels = compiled.buildKernels(createThreeKernelAdapter());
+      if ('rank' in failure) {
+        Reflect.set(
+          kernels,
+          Symbol.for('@nachi-vfx/three/render-order-assignments'),
+          new Map([[0, failure.rank]]),
+        );
+      }
+      const geometryDispose = vi.spyOn(THREE.BufferGeometry.prototype, 'dispose');
+      const materialDispose = vi.spyOn(THREE.Material.prototype, 'dispose');
+      try {
+        expect(
+          () => materializeThreeSpriteDraw(program, kernels, 0, { renderOrder: failure.base }),
+          failure.name,
+        ).toThrowError('NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID');
+        expect(
+          Reflect.get(kernels, Symbol.for('@nachi-vfx/three/materialized-draw-registry')),
+          failure.name,
+        ).toBeUndefined();
+        expect(geometryDispose, failure.name).toHaveBeenCalledTimes(1);
+        expect(materialDispose, failure.name).toHaveBeenCalledTimes(1);
+      } finally {
+        geometryDispose.mockRestore();
+        materialDispose.mockRestore();
+      }
+    }
+  });
+
   it.each([
     ['rate', rate(600)],
     ['per-distance', perDistance(20)],
@@ -258,7 +329,7 @@ describe('three kernel adapter', () => {
       defineEmitter({
         capacity: 8,
         integration: 'none',
-        render: billboard({}),
+        render: billboard({ sorted: false }),
         spawn: burst({ count: 8 }),
         update: [reducedModule],
       }),
@@ -682,7 +753,7 @@ describe('three kernel adapter', () => {
         capacity: 2,
         init: [positionSphere({ radius: 0 }), lifetime(1)],
         integration: 'none',
-        render: decalRenderer({ sizeScale: 2 }),
+        render: decalRenderer({ renderOrderOffset: 4, sizeScale: 2 }),
         spawn: burst({ count: 1 }),
       }),
     );
@@ -706,9 +777,17 @@ describe('three kernel adapter', () => {
       .indirectResource as THREE.IndirectStorageBufferAttribute;
     expect(decal.geometry).toBeInstanceOf(THREE.BoxGeometry);
     expect(decal.geometry.getIndirect()).toBeDefined();
-    expect(decal.renderOrder).toBe(23);
+    expect(decal.renderOrder).toBe(27);
     expect(decal.visible).toBe(false);
     expect(decal.setUserVisible).toBeTypeOf('function');
+    expect(decal.setRenderOrderBase).toBeTypeOf('function');
+    decalRuntime.setRenderOrder?.(decalKernels, [{ drawIndex: 0, rank: 5 }]);
+    expect(decal.renderOrder).toBe(27 + 6 / 2 ** 20);
+    decal.renderOrder = -100;
+    decalRuntime.setRenderOrder?.(decalKernels, [{ drawIndex: 0, rank: 5 }]);
+    expect(decal.renderOrder).toBe(27 + 6 / 2 ** 20);
+    decal.setRenderOrderBase(30);
+    expect(decal.renderOrder).toBe(34 + 6 / 2 ** 20);
     expect(decalRuntime.getRenderableIndirectDrawCount?.(decalKernels)).toBe(1);
     expect(decalIndirect.updateRanges).toEqual([
       { count: 1, start: decalKernels.drawIndirectOffsetBytes! / 4 },
@@ -1708,7 +1787,39 @@ describe('three kernel adapter', () => {
     expect(mesh.material.positionNode).not.toBeNull();
     expect(mesh.material.colorNode).not.toBeNull();
     expect(mesh.material.transparent).toBe(true);
+    expect(mesh.material.depthWrite).toBe(false);
+    expect(mesh.renderOrder).toBe(1_000);
     expect(mesh.setUserVisible).toBeTypeOf('function');
+    expect(mesh.setRenderOrderBase).toBeTypeOf('function');
+  });
+
+  it('preserves v1 mesh depth writes while v2 disables them for every blend mode', () => {
+    const geometryRef = { assetType: 'geometry', kind: 'asset-ref', uri: 'box' } as const;
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    const resolveGeometry = createThreeGeometryResolver(new Map([['box', geometry]]));
+    for (const blending of ['additive', 'alpha', 'multiply', 'premultiplied'] as const) {
+      const current = meshRenderer({ blending, geometry: geometryRef, sorted: false });
+      const v2Program = compileEmitter(
+        defineEmitter({ capacity: 1, render: current, spawn: burst({ count: 1 }) }),
+      );
+      const v1Program = compileEmitter(
+        defineEmitter({
+          capacity: 1,
+          render: { ...current, version: 1 },
+          spawn: burst({ count: 1 }),
+        }),
+      );
+      expect(
+        materializeThreeMeshDraw(v2Program, v2Program.buildKernels(createThreeKernelAdapter()), 0, {
+          resolveGeometry,
+        }).material.depthWrite,
+      ).toBe(false);
+      expect(
+        materializeThreeMeshDraw(v1Program, v1Program.buildKernels(createThreeKernelAdapter()), 0, {
+          resolveGeometry,
+        }).material.depthWrite,
+      ).toBe(true);
+    }
   });
 
   it('maps mesh +Y to five directions using the transposed TSL rotate convention', () => {

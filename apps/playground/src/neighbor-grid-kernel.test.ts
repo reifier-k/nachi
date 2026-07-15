@@ -267,7 +267,7 @@ describe('M12 NeighborGrid Three r185 materialization', () => {
       capacity: 2,
       integration: 'none',
       lifecycle: { duration: 10 },
-      render: billboard({}),
+      render: billboard({ sorted: false }),
       spawn: burst({ count: 2 }),
       update: [pbdDistanceConstraint({ distance: 0.2, grid: 'neighbors', iterations: 3 })],
     });

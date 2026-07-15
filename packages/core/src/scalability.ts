@@ -77,7 +77,7 @@ const QUALITY_PRESETS: Readonly<Record<QualityTier, ResolvedEmitterQuality>> = {
   },
   high: {
     capacityScale: 0.75,
-    features: { lit: true, soft: true, sorted: false },
+    features: { lit: true, soft: true, sorted: true },
     spawnRateScale: 0.75,
   },
   epic: {
@@ -233,15 +233,41 @@ export function resolveEmitterQuality(
 }
 
 function gateRender(module: RenderModule, gates: Required<QualityFeatureGates>): RenderModule {
-  if (module.type !== 'core/billboard' && module.type !== 'core/mesh-renderer') return module;
+  if (
+    module.type !== 'core/billboard' &&
+    module.type !== 'core/mesh-renderer' &&
+    module.type !== 'core/decal-renderer'
+  )
+    return module;
   const config = module.config as Readonly<Record<string, unknown>>;
+  const blending = config.blending ?? 'alpha';
+  const defaultSorted =
+    module.type === 'core/decal-renderer' || blending === 'alpha' || blending === 'premultiplied';
+  const preserveUnsupportedExplicitSort =
+    module.version === 2 &&
+    config.sorted === true &&
+    (blending === 'additive' || blending === 'multiply');
+  const sorted =
+    module.version === 1 && module.type === 'core/decal-renderer'
+      ? undefined
+      : config.sorted === undefined
+        ? module.version === 1
+          ? undefined
+          : defaultSorted && gates.sorted
+        : typeof config.sorted === 'boolean'
+          ? preserveUnsupportedExplicitSort || (config.sorted && gates.sorted)
+          : config.sorted;
   return {
     ...module,
     config: {
       ...config,
-      ...(config.lit === undefined || gates.lit ? {} : { lit: false }),
-      ...(config.soft === undefined || gates.soft ? {} : { soft: false }),
-      ...(config.sorted === undefined || gates.sorted ? {} : { sorted: false }),
+      ...(module.type === 'core/decal-renderer' || config.lit === undefined || gates.lit
+        ? {}
+        : { lit: false }),
+      ...(module.type === 'core/decal-renderer' || config.soft === undefined || gates.soft
+        ? {}
+        : { soft: false }),
+      ...(sorted === undefined ? {} : { sorted }),
     },
   };
 }

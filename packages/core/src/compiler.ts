@@ -797,6 +797,7 @@ export interface CompiledDrawVertexDescription {
 }
 
 export interface CompiledSpriteDrawDescription {
+  readonly automaticRenderOrder: boolean;
   readonly coarseSortCenter: Vec3;
   readonly fragment: {
     readonly blending: BlendingMode;
@@ -824,19 +825,24 @@ export interface CompiledSpriteDrawDescription {
   };
   readonly indirect: CompiledDrawIndirectDescription;
   readonly kind: 'billboard';
+  readonly moduleVersion: number;
   readonly path: string;
+  readonly renderOrderOffset: number;
   readonly vertex: CompiledDrawVertexDescription & {
     readonly alignment: NonNullable<BillboardOptions['alignment']>;
   };
 }
 
 export interface CompiledMeshDrawDescription {
+  readonly automaticRenderOrder: boolean;
   readonly coarseSortCenter: Vec3;
   readonly fragment: { readonly blending: BlendingMode };
   readonly geometry: { readonly resource: GeometryRef; readonly topology: 'triangle-list' };
   readonly indirect: CompiledDrawIndirectDescription;
   readonly kind: 'mesh';
+  readonly moduleVersion: number;
   readonly path: string;
+  readonly renderOrderOffset: number;
   readonly vertex: CompiledDrawVertexDescription & {
     readonly alignment: NonNullable<MeshRendererOptions['alignment']>;
   };
@@ -858,6 +864,8 @@ export interface CompiledLightDrawDescription {
 }
 
 export interface CompiledDecalDrawDescription {
+  readonly automaticRenderOrder: boolean;
+  readonly coarseSortCenter: Vec3;
   readonly fadeOverLife: boolean;
   readonly fragment: {
     readonly blending: 'alpha' | 'premultiplied';
@@ -866,7 +874,9 @@ export interface CompiledDecalDrawDescription {
   readonly geometry: { readonly shape: 'projection-box'; readonly topology: 'triangle-list' };
   readonly indirect: CompiledDrawIndirectDescription;
   readonly kind: 'decal';
+  readonly moduleVersion: number;
   readonly path: string;
+  readonly renderOrderOffset: number;
   readonly requiresBackend: 'webgpu';
   readonly requiresSceneDepth: true;
   readonly sizeScale: number;
@@ -906,6 +916,19 @@ const AGE_MODULE: UpdateModule = {
   version: 1,
 };
 
+const DECAL_SPAWN_ROTATION_MODULE: InitModule = {
+  access: {
+    reads: ['Emitter.spawnInterpolatedRotation'],
+    writes: ['Particles.rotation'],
+  },
+  config: {},
+  kind: 'module',
+  label: '$decal-spawn-rotation',
+  stage: 'init',
+  type: 'core/decal-spawn-rotation',
+  version: 1,
+};
+
 const INTEGRATE_MODULE: UpdateModule = {
   access: INTEGRATE_ACCESS,
   config: {},
@@ -937,6 +960,7 @@ const EMITTER_PATHS = new Set<ParameterPath>([
   'Emitter.spawnCount',
   'Emitter.spawnGeneration',
   'Emitter.spawnInterpolatedTransform',
+  'Emitter.spawnInterpolatedRotation',
   'Emitter.transform',
   'Emitter.updateInterpolatedTransform',
   'Emitter.updateRandomStep',
@@ -2138,16 +2162,31 @@ function compileSpriteDraws(
   const draws: CompiledSpriteDrawDescription[] = [];
   for (const { module, path } of renderModules) {
     if (module.type !== 'core/billboard') continue;
+    if (module.version !== 1 && module.version !== 2) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_MODULE_UNKNOWN',
+          `No renderer implementation is registered for ${module.type}@${module.version}.`,
+          path,
+        ),
+      );
+      continue;
+    }
     const options = module.config as BillboardOptions;
     diagnostics.push(
       ...collectCoreModuleConfigDiagnostics(
         module.type,
         module.config as Readonly<Record<string, unknown>>,
         `${path}.config`,
+        module.version,
       ),
     );
     const blending = options.blending ?? 'alpha';
-    const sorted = options.sorted === true;
+    const sorted =
+      options.sorted === true ||
+      (options.sorted === undefined &&
+        module.version === 2 &&
+        (blending === 'alpha' || blending === 'premultiplied'));
     const coarseSortCenter = options.sortCenter ?? ([0, 0, 0] as const);
     if (sorted && definition.capacity > MAX_SORTED_PARTICLE_CAPACITY) {
       diagnostics.push(
@@ -2226,6 +2265,7 @@ function compileSpriteDraws(
         : undefined;
     const geometryVertexCount = cutoutVertices as 4 | 5 | 6 | 7 | 8;
     draws.push({
+      automaticRenderOrder: blending === 'alpha' || blending === 'premultiplied',
       coarseSortCenter,
       fragment: {
         blending,
@@ -2261,7 +2301,9 @@ function compileSpriteDraws(
         ...(sorted ? { sortedPaddedCapacity: paddedSortCapacity(definition.capacity) } : {}),
       },
       kind: 'billboard',
+      moduleVersion: module.version,
       path,
+      renderOrderOffset: module.version === 2 ? (options.renderOrderOffset ?? 0) : 0,
       vertex: {
         alignment,
         attributes,
@@ -2285,16 +2327,31 @@ function compileMeshDraws(
   const draws: CompiledMeshDrawDescription[] = [];
   for (const { module, path } of renderModules) {
     if (module.type !== 'core/mesh-renderer') continue;
+    if (module.version !== 1 && module.version !== 2) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_MODULE_UNKNOWN',
+          `No renderer implementation is registered for ${module.type}@${module.version}.`,
+          path,
+        ),
+      );
+      continue;
+    }
     const options = module.config as MeshRendererOptions;
     diagnostics.push(
       ...collectCoreModuleConfigDiagnostics(
         module.type,
         module.config as Readonly<Record<string, unknown>>,
         `${path}.config`,
+        module.version,
       ),
     );
     const blending = options.blending ?? 'alpha';
-    const sorted = options.sorted === true;
+    const sorted =
+      options.sorted === true ||
+      (options.sorted === undefined &&
+        module.version === 2 &&
+        (blending === 'alpha' || blending === 'premultiplied'));
     const coarseSortCenter = options.sortCenter ?? ([0, 0, 0] as const);
     if (sorted && definition.capacity > MAX_SORTED_PARTICLE_CAPACITY) {
       diagnostics.push(
@@ -2344,6 +2401,7 @@ function compileMeshDraws(
       );
     }
     draws.push({
+      automaticRenderOrder: blending === 'alpha' || blending === 'premultiplied',
       coarseSortCenter,
       fragment: { blending },
       geometry: { resource: options.geometry, topology: 'triangle-list' },
@@ -2357,7 +2415,9 @@ function compileMeshDraws(
         ...(sorted ? { sortedPaddedCapacity: paddedSortCapacity(definition.capacity) } : {}),
       },
       kind: 'mesh',
+      moduleVersion: module.version,
       path,
+      renderOrderOffset: module.version === 2 ? (options.renderOrderOffset ?? 0) : 0,
       vertex: {
         alignment,
         attributes,
@@ -2516,6 +2576,7 @@ function compileLightDraws(
       module.type,
       module.config as Readonly<Record<string, unknown>>,
       `${path}.config`,
+      module.version,
     );
     diagnostics.push(...configDiagnostics);
     const maxLights = options.maxLights ?? 8;
@@ -2563,21 +2624,49 @@ function compileDecalDraws(
   const draws: CompiledDecalDrawDescription[] = [];
   for (const { module, path } of collectEmitterModules(definition)) {
     if (module.stage !== 'render' || module.type !== 'core/decal-renderer') continue;
+    if (module.version !== 1 && module.version !== 2) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_MODULE_UNKNOWN',
+          `No renderer implementation is registered for ${module.type}@${module.version}.`,
+          path,
+        ),
+      );
+      continue;
+    }
     const options = module.config as DecalRendererOptions;
     const configDiagnostics = collectCoreModuleConfigDiagnostics(
       module.type,
       module.config as Readonly<Record<string, unknown>>,
       `${path}.config`,
+      module.version,
     );
     diagnostics.push(...configDiagnostics);
     const sizeScale = options.sizeScale ?? 1;
+    const sorted = module.version === 2 ? (options.sorted ?? true) : false;
+    if (sorted && definition.capacity > MAX_SORTED_PARTICLE_CAPACITY) {
+      diagnostics.push(
+        diagnostic(
+          'NACHI_PARTICLE_SORT_CAPACITY_EXCEEDED',
+          `Sorted particle capacity ${definition.capacity} exceeds the WebGPU limit ${MAX_SORTED_PARTICLE_CAPACITY}.`,
+          `${path}.config.sorted`,
+        ),
+      );
+    }
     if (configDiagnostics.some(({ severity }) => severity === 'error')) continue;
     const attributes = ['color', 'normalizedAge', 'position', 'rotation', 'size'];
     const attributeBuffers = rendererAttributeBuffers(schema, attributes);
     if (!attributeBuffers) continue;
-    const storageBuffers = [...attributeBuffers, 'NachiLifecycleState'];
+    const storageBuffers = [
+      ...attributeBuffers,
+      'NachiLifecycleState',
+      ...(sorted ? ['NachiSortedIndices'] : []),
+    ];
     validateRendererStorageBudget(storageBuffers, path, 'Decal vertex stage', diagnostics);
     draws.push({
+      automaticRenderOrder: module.version === 2,
+      coarseSortCenter:
+        module.version === 2 ? (options.sortCenter ?? ([0, 0, 0] as const)) : [0, 0, 0],
       fadeOverLife: options.fadeOverLife ?? true,
       fragment: {
         blending: options.blending ?? 'alpha',
@@ -2590,10 +2679,13 @@ function compileDecalDraws(
           lifecycleLayout.buffers.indirectArguments.fields.drawIndirect.offsetWords *
           Uint32Array.BYTES_PER_ELEMENT,
         instanceCount: 'alive-count',
-        physicalIndex: 'alive-indices',
+        physicalIndex: sorted ? 'sorted-indices' : 'alive-indices',
+        ...(sorted ? { sortedPaddedCapacity: paddedSortCapacity(definition.capacity) } : {}),
       },
       kind: 'decal',
+      moduleVersion: module.version,
       path,
+      renderOrderOffset: module.version === 2 ? (options.renderOrderOffset ?? 0) : 0,
       requiresBackend: 'webgpu',
       requiresSceneDepth: true,
       sizeScale,
@@ -3260,6 +3352,25 @@ function createBuildKernels(
         .clamp(0, 1);
       return interpolatedEmitterTransform(phase, currentTransform);
     };
+    const spawnInterpolatedRotation = (spawnIndex?: KernelNode): KernelUniformNode => {
+      const currentRotation = uniformNode('Emitter.rotation');
+      // Event spawning and the all-slots compatibility Init kernel retain the exact current
+      // rotation, matching spawnInterpolatedTransform's compatibility path.
+      if (spawnIndex === undefined) return currentRotation;
+      const phase = uniformNode('Emitter.spawnPhaseStart')
+        .add(spawnIndex.toFloat().mul(uniformNode('Emitter.spawnPhaseStep')))
+        .clamp(0, 1);
+      const rotation = mutable(currentRotation);
+      adapter.branch(
+        adapter.uint(uniformNode('Emitter.interpolationActive')).equal(adapter.uint(1)),
+        () => {
+          rotation.assign(
+            slerpQuaternion(uniformNode('Emitter.previousRotation'), currentRotation, phase),
+          );
+        },
+      );
+      return rotation as KernelUniformNode;
+    };
     let updateInterpolatedTransformNode: KernelUniformNode | undefined;
     const updateInterpolatedTransform = (): KernelUniformNode => {
       updateInterpolatedTransformNode ??= interpolatedEmitterTransform(constant(0.5, 'f32'));
@@ -3403,9 +3514,11 @@ function createBuildKernels(
       uniform: (path) =>
         path === 'Emitter.spawnInterpolatedTransform'
           ? spawnInterpolatedTransform(spawnIndex)
-          : path === 'Emitter.updateInterpolatedTransform'
-            ? updateInterpolatedTransform()
-            : uniformNode(path),
+          : path === 'Emitter.spawnInterpolatedRotation'
+            ? spawnInterpolatedRotation(spawnIndex)
+            : path === 'Emitter.updateInterpolatedTransform'
+              ? updateInterpolatedTransform()
+              : uniformNode(path),
       value: (input, type, sampleOffset = 0) =>
         buildValue(input, type, module, particleIndex, sampleOffset),
       write: (name, value) => {
@@ -4177,8 +4290,13 @@ function createBuildKernels(
     }
 
     const particleSortedDraw = program.draws.find(
-      (draw): draw is CompiledSpriteDrawDescription | CompiledMeshDrawDescription =>
-        (draw.kind === 'billboard' || draw.kind === 'mesh') &&
+      (
+        draw,
+      ): draw is
+        | CompiledSpriteDrawDescription
+        | CompiledMeshDrawDescription
+        | CompiledDecalDrawDescription =>
+        (draw.kind === 'billboard' || draw.kind === 'mesh' || draw.kind === 'decal') &&
         draw.indirect.physicalIndex === 'sorted-indices',
     );
     if (gpuLifecycle && particleSortedDraw) {
@@ -4188,82 +4306,86 @@ function createBuildKernels(
       sortedIndices = adapter.instancedArray(padded, 'uint').setName('NachiSortedIndices');
       const depths = sortedDepths;
       const indices = sortedIndices;
-      prepareSort = adapter
-        .fn(() => {
-          const outputIndex = adapter.uint(adapter.instanceIndex);
-          const aliveCount = readLifecycle(counterOffsets.aliveCount);
-          const paddingCount = adapter.uint(padded).sub(aliveCount);
-          adapter.branch(
-            outputIndex.lessThan(paddingCount),
-            () => {
-              // Padding lives at the front after sorting. Vertex fetch skips it dynamically.
-              depths.element(outputIndex).assign(adapter.constant(-3.402823466e38, 'f32'));
-              // Its outputIndex is reused as a harmless index; depth=-FLT_MAX identifies it.
-              indices.element(outputIndex).assign(outputIndex);
-            },
-            () => {
-              const compactIndex = outputIndex.sub(paddingCount);
-              const physicalIndex = readLifecycle(
-                stateLayout.fields.aliveIndices.offsetWords,
-                compactIndex,
-              );
-              const position = attributeNode('position', physicalIndex);
-              const viewPosition = uniformNode('System.viewMatrix').mul(
-                adapter.vec4(position.x, position.y, position.z, adapter.constant(1, 'f32')),
-              );
-              depths.element(outputIndex).assign(viewPosition.z);
-              indices.element(outputIndex).assign(physicalIndex);
-            },
-          );
-        })
-        .compute(padded, [program.kernels.update.workgroupSize])
-        .setName('NachiEmitterPrepareDepthSort');
-
-      sortPassNodes = bitonicSortPasses(padded).map(({ blockSize, compareDistance }) =>
-        adapter
+      // A capacity-one draw can only address physical index zero. Its zero-initialized sorted
+      // indirection is already exact, so avoid a permanent per-frame depth-preparation submission.
+      if (padded > 1) {
+        prepareSort = adapter
           .fn(() => {
-            const invocation = adapter.uint(adapter.instanceIndex);
-            const group = invocation.div(adapter.uint(compareDistance));
-            const local = invocation.sub(group.mul(adapter.uint(compareDistance)));
-            const left = group.mul(adapter.uint(compareDistance * 2)).add(local);
-            const right = left.add(adapter.uint(compareDistance));
-            const leftDepth =
-              (depths.element(left) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
-              depths.element(left);
-            const rightDepth =
-              (depths.element(right) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
-              depths.element(right);
-            const leftIndex =
-              (indices.element(left) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
-              indices.element(left);
-            const rightIndex =
-              (indices.element(right) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
-              indices.element(right);
-            const block = left.div(adapter.uint(blockSize));
-            const ascending = block
-              .sub(block.div(adapter.uint(2)).mul(adapter.uint(2)))
-              .equal(adapter.uint(0));
-            const depthSwap = adapter.select(
-              ascending,
-              rightDepth.lessThan(leftDepth),
-              leftDepth.lessThan(rightDepth),
+            const outputIndex = adapter.uint(adapter.instanceIndex);
+            const aliveCount = readLifecycle(counterOffsets.aliveCount);
+            const paddingCount = adapter.uint(padded).sub(aliveCount);
+            adapter.branch(
+              outputIndex.lessThan(paddingCount),
+              () => {
+                // Padding lives at the front after sorting. Vertex fetch skips it dynamically.
+                depths.element(outputIndex).assign(adapter.constant(-3.402823466e38, 'f32'));
+                // Its outputIndex is reused as a harmless index; depth=-FLT_MAX identifies it.
+                indices.element(outputIndex).assign(outputIndex);
+              },
+              () => {
+                const compactIndex = outputIndex.sub(paddingCount);
+                const physicalIndex = readLifecycle(
+                  stateLayout.fields.aliveIndices.offsetWords,
+                  compactIndex,
+                );
+                const position = attributeNode('position', physicalIndex);
+                const viewPosition = uniformNode('System.viewMatrix').mul(
+                  adapter.vec4(position.x, position.y, position.z, adapter.constant(1, 'f32')),
+                );
+                depths.element(outputIndex).assign(viewPosition.z);
+                indices.element(outputIndex).assign(physicalIndex);
+              },
             );
-            const tieSwap = adapter.select(
-              ascending,
-              rightIndex.lessThan(leftIndex),
-              leftIndex.lessThan(rightIndex),
-            );
-            const swap = adapter.select(leftDepth.equal(rightDepth), tieSwap, depthSwap);
-            adapter.branch(swap, () => {
-              depths.element(left).assign(rightDepth);
-              depths.element(right).assign(leftDepth);
-              indices.element(left).assign(rightIndex);
-              indices.element(right).assign(leftIndex);
-            });
           })
-          .compute(padded / 2, [program.kernels.update.workgroupSize])
-          .setName(`NachiBitonicSort_k${blockSize}_j${compareDistance}`),
-      );
+          .compute(padded, [program.kernels.update.workgroupSize])
+          .setName('NachiEmitterPrepareDepthSort');
+
+        sortPassNodes = bitonicSortPasses(padded).map(({ blockSize, compareDistance }) =>
+          adapter
+            .fn(() => {
+              const invocation = adapter.uint(adapter.instanceIndex);
+              const group = invocation.div(adapter.uint(compareDistance));
+              const local = invocation.sub(group.mul(adapter.uint(compareDistance)));
+              const left = group.mul(adapter.uint(compareDistance * 2)).add(local);
+              const right = left.add(adapter.uint(compareDistance));
+              const leftDepth =
+                (depths.element(left) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+                depths.element(left);
+              const rightDepth =
+                (depths.element(right) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+                depths.element(right);
+              const leftIndex =
+                (indices.element(left) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+                indices.element(left);
+              const rightIndex =
+                (indices.element(right) as KernelNode & { toVar?(): KernelNode }).toVar?.() ??
+                indices.element(right);
+              const block = left.div(adapter.uint(blockSize));
+              const ascending = block
+                .sub(block.div(adapter.uint(2)).mul(adapter.uint(2)))
+                .equal(adapter.uint(0));
+              const depthSwap = adapter.select(
+                ascending,
+                rightDepth.lessThan(leftDepth),
+                leftDepth.lessThan(rightDepth),
+              );
+              const tieSwap = adapter.select(
+                ascending,
+                rightIndex.lessThan(leftIndex),
+                leftIndex.lessThan(rightIndex),
+              );
+              const swap = adapter.select(leftDepth.equal(rightDepth), tieSwap, depthSwap);
+              adapter.branch(swap, () => {
+                depths.element(left).assign(rightDepth);
+                depths.element(right).assign(leftDepth);
+                indices.element(left).assign(rightIndex);
+                indices.element(right).assign(leftIndex);
+              });
+            })
+            .compute(padded / 2, [program.kernels.update.workgroupSize])
+            .setName(`NachiBitonicSort_k${blockSize}_j${compareDistance}`),
+        );
+      }
     }
 
     const builtEventOutputs = Object.fromEntries(
@@ -4576,9 +4698,23 @@ export function compileEmitter<
   const attributeSchema = attributeResult.value ?? emptyAttributeSchema(definition.capacity);
   const events = compileEventQueues(untypedDefinition, attributeSchema, diagnostics);
   const updateStageOffset = includeAgeModule ? 1 : 0;
+  const includeDecalSpawnRotation = collectEmitterModules(normalizedDefinition).some(
+    ({ module }) =>
+      module.stage === 'render' && module.type === 'core/decal-renderer' && module.version === 2,
+  );
 
   const initialModules: CompiledKernelModule[] = [
     moduleDescriptor(defaultsModule(attributeSchema), 'init[$defaults]', 0, 'compiler'),
+    ...(includeDecalSpawnRotation
+      ? [
+          moduleDescriptor(
+            DECAL_SPAWN_ROTATION_MODULE,
+            'init[$decal-spawn-rotation]',
+            1,
+            'compiler',
+          ),
+        ]
+      : []),
     ...normalized.init.map((module, index) =>
       moduleDescriptor(module, `init[${index}]`, index + 1, 'author'),
     ),
@@ -5018,6 +5154,23 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     },
     stage: 'init',
     type: 'core/defaults',
+    version: 1,
+  });
+  registry.register({
+    access: DECAL_SPAWN_ROTATION_MODULE.access!,
+    build(context) {
+      const rotation = context.uniform('Emitter.spawnInterpolatedRotation');
+      const length = rotation.x
+        .mul(rotation.x)
+        .add(rotation.y.mul(rotation.y))
+        .add(rotation.z.mul(rotation.z))
+        .add(rotation.w.mul(rotation.w))
+        .sqrt()
+        .clamp(0.000001, 1e20);
+      context.write('rotation', rotation.div(length));
+    },
+    stage: 'init',
+    type: 'core/decal-spawn-rotation',
     version: 1,
   });
   registry.register({

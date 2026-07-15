@@ -53,5 +53,14 @@ pnpm verify:gpu
 
 The 15-page suite covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope and canonical
 event routing, Grid2D, WBOIT, logical light top-N selection, VAT, textured ribbons, NeighborGrid,
-H2-6 world/emitter selectors plus shared Update-midpoint collision response, and all six showcase
-pages.
+H2-6 world/emitter selectors plus shared Update-midpoint collision response, H2-7 renderer-v2
+particle/coarse ordering, mesh depth, decal spawn orientation, quality/pool boundaries on the
+existing `/m10-sort/` page, and all six showcase pages. H2-7 does not increase the page count.
+
+The M10 fixture accepts five isolated fault names through `forceFailure`:
+`default-unsorted`, `mesh-depth-write`, `rank-overwrite`, `decal-no-spawn-rotation`, and
+`pool-stale-order`. Run each through `spike-runner.mjs`; exactly its corresponding validation must
+be false and diagnostics must remain clean. `?backend=webgl` is the explicit negative path and must
+publish both `NACHI_PARTICLE_SORT_WEBGL2_UNSUPPORTED` and `NACHI_WBOIT_WEBGL2_UNSUPPORTED` as
+successful structured checks. Optional `?quality=low` or `?quality=medium` keeps the M10 perf
+fixture's particle count fixed while proving the sorted-off budget path.

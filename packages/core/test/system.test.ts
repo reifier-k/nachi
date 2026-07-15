@@ -1868,11 +1868,11 @@ describe('VFXSystem runtime scheduler', () => {
 
   it('warns without a camera and reverses stable coarse alpha render order with the view', async () => {
     class OrderRenderer extends FakeRuntimeRenderer {
-      readonly orders: number[] = [];
-      readonly byKernels = new Map<unknown, number>();
-      setRenderOrder(kernels: unknown, order: number): void {
-        this.orders.push(order);
-        this.byKernels.set(kernels, order);
+      readonly orders: unknown[] = [];
+      readonly byKernels = new Map<unknown, unknown>();
+      setRenderOrder(kernels: unknown, assignments: unknown): void {
+        this.orders.push(assignments);
+        this.byKernels.set(kernels, assignments);
       }
     }
     const renderer = new OrderRenderer();
@@ -1908,8 +1908,36 @@ describe('VFXSystem runtime scheduler', () => {
       viewportSize: [64, 64],
     });
     const reverse = [renderer.byKernels.get(farKernels), renderer.byKernels.get(nearKernels)];
-    expect(forward).toEqual([1_000, 1_001]);
-    expect(reverse).toEqual([1_001, 1_000]);
+    expect(forward).toEqual([[{ drawIndex: 0, rank: 0 }], [{ drawIndex: 0, rank: 1 }]]);
+    expect(reverse).toEqual([[{ drawIndex: 0, rank: 1 }], [{ drawIndex: 0, rank: 0 }]]);
+  });
+
+  it('rejects transparent draw-order overflow before retaining or replacing active resources', () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      maxTransparentDrawOrderEntries: 1,
+    });
+    const effect = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 1,
+          integration: 'none',
+          render: billboard({ blending: 'alpha', sorted: false }),
+          spawn: burst({ count: 1 }),
+        }),
+      },
+    });
+    const retained = system.spawn(effect);
+    const retainedKernels = retained.getEmitter('particles')!.kernels;
+    const rejected = system.spawn(effect);
+
+    expect(system.instanceCount).toBe(1);
+    expect(retained.state).toBe('active');
+    expect(retained.getEmitter('particles')!.kernels).toBe(retainedKernels);
+    expect(rejected.state).toBe('error');
+    expect(rejected.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_TRANSPARENT_DRAW_ORDER_CAPACITY_EXCEEDED' }),
+    );
   });
 
   it('warns without a camera and submits each bitonic stage in dependency order', async () => {
@@ -1978,7 +2006,7 @@ describe('VFXSystem runtime scheduler', () => {
       },
     });
 
-  it('does not consume an alpha coarse-sort rank for a projection decal', async () => {
+  it('ranks a v2 projection decal while preserving v1 non-participation', async () => {
     const base = sceneDepthRenderer();
     let renderOrderWrites = 0;
     const system = new VFXSystem({
@@ -2002,10 +2030,39 @@ describe('VFXSystem runtime scheduler', () => {
 
     await system.update(0);
 
-    expect(renderOrderWrites).toBe(0);
-    expect(instance.diagnostics).not.toContainEqual(
+    expect(renderOrderWrites).toBeGreaterThan(0);
+    expect(instance.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_ALPHA_SORT_CAMERA_UNSET' }),
     );
+
+    let legacyRenderOrderWrites = 0;
+    const legacyBase = sceneDepthRenderer();
+    const legacySystem = new VFXSystem({
+      ...legacyBase,
+      setRenderOrder: () => {
+        legacyRenderOrderWrites += 1;
+      },
+    });
+    const legacy = decalRenderer({ blending: 'alpha' });
+    const legacyInstance = legacySystem.spawn(
+      defineEffect({
+        elements: {
+          decal: defineEmitter({
+            capacity: 1,
+            integration: 'none',
+            render: { ...legacy, version: 1 },
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    await legacySystem.update(0);
+    expect(legacyInstance.state).toBe('active');
+    expect(legacyRenderOrderWrites).toBe(0);
+    expect(legacyInstance.getEmitter('decal')!.program.draws[0]).toMatchObject({
+      automaticRenderOrder: false,
+      moduleVersion: 1,
+    });
   });
 
   it('warns on first update when scene-depth collision has no configured camera', async () => {

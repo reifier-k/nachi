@@ -57,6 +57,22 @@ world/current-endpoint meaning, and format round trips never upgrade it implicit
 without the v2 registrations rejects `type@2` with `NACHI_MODULE_UNKNOWN` instead of silently
 misreading a selector.
 
+## Transparent ordering
+
+The current `billboard()`, `meshRenderer()`, and `decalRenderer()` helpers emit renderer module v2.
+Alpha and premultiplied draws default to WebGPU particle sorting; use `sorted: false` for the faster,
+explicitly unordered compact-alive path. Additive and multiply billboard/mesh draws default to
+unsorted. Low/medium quality tiers gate sorting off, while high/epic retain it. Module-v1 definitions
+keep their historical behavior.
+
+`renderOrderOffset` is a signed-integer core bucket offset and `sortCenter` is an emitter-local point
+for draw-level coarse ordering. `VFXSystem` ranks participating compiled draws far-to-near and sends
+draw-index assignments to the renderer. A system accepts at most `2^20 - 1` automatic transparent
+draw entries and rejects an overflowing spawn before retaining its resources. Version-2 decals also
+capture the emitter's interpolated rotation at birth; authored Init rotation remains a later
+world-space override. See [RFC 006](../../docs/rfc/006-transparent-draw-order.md) for exact v1/v2,
+quality, camera, pooling, and numeric contracts.
+
 ## Resource preparation
 
 `await system.prepare(effect, { signal, onProgress, preparer })` compiles the current quality

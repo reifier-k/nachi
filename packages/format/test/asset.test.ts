@@ -18,6 +18,7 @@ import {
   defineSimStage,
   defineParameter,
   defineTslFunction,
+  decalRenderer,
   drag,
   boids,
   collideBox,
@@ -64,7 +65,9 @@ import {
   EFFECT_ASSET_FORMAT,
   EFFECT_ASSET_VERSION,
   EffectAssetMigrationRegistry,
+  defaultEffectAssetMigrations,
   effectAssetSchemaV1,
+  effectAssetSchemaV2,
   loadEffect,
   serializeEffect,
   validateEffectAsset,
@@ -90,6 +93,25 @@ function thrownDiagnostics(callback: () => unknown) {
     expect(error).toBeInstanceOf(VfxDiagnosticError);
     return (error as VfxDiagnosticError).diagnostics;
   }
+}
+
+function moduleConditionalTypes(schema: { readonly allOf: readonly unknown[] }): string[] {
+  return schema.allOf.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null || !('if' in entry)) return [];
+    const condition = entry.if;
+    if (typeof condition !== 'object' || condition === null || !('properties' in condition)) {
+      return [];
+    }
+    const properties = condition.properties;
+    if (typeof properties !== 'object' || properties === null || !('type' in properties)) return [];
+    const type = properties.type;
+    return typeof type === 'object' &&
+      type !== null &&
+      'const' in type &&
+      typeof type.const === 'string'
+      ? [type.const]
+      : [];
+  });
 }
 
 function representativeEffect() {
@@ -177,7 +199,7 @@ function representativeEffect() {
   });
 }
 
-describe('effect asset v1', () => {
+describe('effect asset v2 and v1 compatibility', () => {
   it('keeps invalid JSON-loaded ribbon config on the compile-diagnostic path', () => {
     const document = serializeEffect(
       defineEffect({
@@ -301,10 +323,11 @@ describe('effect asset v1', () => {
     );
   });
 
-  it('publishes the v1 JSON schema and treats v1 -> v1 migration as identity', () => {
+  it('publishes historical v1 and current v2 schemas and loads the current envelope', () => {
     const document = serializeEffect(representativeEffect());
     expect(effectAssetSchemaV1.properties.format.const).toBe('nachi-effect');
     expect(effectAssetSchemaV1.properties.version.const).toBe(1);
+    expect(effectAssetSchemaV2.properties.version.const).toBe(2);
     expect(effectAssetSchemaV1.$defs.emitter.properties.attributes).toEqual({
       $ref: '#/$defs/attributes',
     });
@@ -356,6 +379,274 @@ describe('effect asset v1', () => {
       expect(effectAssetSchemaV1.$defs[name].additionalProperties).toBe(false);
     }
     expect(loadEffect(document)).toEqual(document.effect);
+  });
+
+  it('inherits every v1 module conditional into v2 before adding unique renderer conditionals', () => {
+    const legacyConditionals = effectAssetSchemaV1.$defs.module.allOf;
+    const currentConditionals = effectAssetSchemaV2.$defs.module.allOf;
+    const legacyTypes = moduleConditionalTypes(effectAssetSchemaV1.$defs.module);
+    const currentTypes = moduleConditionalTypes(effectAssetSchemaV2.$defs.module);
+
+    expect(currentConditionals.slice(0, legacyConditionals.length)).toEqual(legacyConditionals);
+    expect(currentConditionals).toHaveLength(legacyConditionals.length + 3);
+    expect(currentTypes).toEqual(expect.arrayContaining(legacyTypes));
+    expect(new Set(currentTypes.filter((type) => !legacyTypes.includes(type)))).toEqual(
+      new Set(['core/billboard', 'core/decal-renderer', 'core/mesh-renderer']),
+    );
+    expect(new Set(currentTypes).size).toBe(currentTypes.length);
+
+    const valid = serializeEffect(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            init: [positionSphere({ radius: 1 })],
+            render: billboard({}),
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    expect(validateEffectAsset(valid)).toEqual([]);
+    const invalid = structuredClone(valid) as unknown as {
+      effect: { elements: { particles: { init: Array<{ config: Record<string, unknown> }> } } };
+    };
+    invalid.effect.elements.particles.init[0]!.config.futurePositionField = true;
+    expect(validateEffectAsset(invalid)).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_UNKNOWN_FIELD',
+        path: '$.effect.elements.particles.init[0].config.futurePositionField',
+      }),
+    );
+  });
+
+  it('migrates v1 to v2 by changing only the envelope without mutating the source payload', () => {
+    const legacyBillboard = { ...billboard({ sorted: false }), version: 1 } as const;
+    const current = serializeEffect(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            render: legacyBillboard,
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    const legacy = { ...current, version: 1 as const };
+    const before = JSON.stringify(legacy);
+    const migrated = defaultEffectAssetMigrations.migrate(legacy) as typeof current;
+
+    expect(migrated).not.toBe(legacy);
+    expect(migrated.version).toBe(2);
+    expect(migrated.effect).toBe(legacy.effect);
+    expect(JSON.stringify(migrated.effect)).toBe(JSON.stringify(legacy.effect));
+    expect(JSON.stringify(legacy)).toBe(before);
+    expect(
+      (migrated.effect as { elements: { particles: { render: { version: number } } } }).elements
+        .particles.render.version,
+    ).toBe(1);
+  });
+
+  it('keeps v1 renderer configs generic but closes built-in renderer@2 configs in v2', () => {
+    const current = serializeEffect(representativeEffect());
+    const invalid = structuredClone(current) as typeof current;
+    const render = (
+      invalid.effect as {
+        elements: { sparks: { render: { config: Record<string, unknown> } } };
+      }
+    ).elements.sparks.render;
+    render.config.futureReaderField = true;
+
+    expect(validateEffectAsset(invalid)).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_UNKNOWN_FIELD',
+        path: '$.effect.elements.sparks.render.config.futureReaderField',
+      }),
+    );
+    const legacy = structuredClone(invalid) as unknown as {
+      effect: { elements: { sparks: { render: { version: number } } } };
+      version: number;
+    };
+    legacy.version = 1;
+    legacy.effect.elements.sparks.render.version = 1;
+    expect(validateEffectAsset(legacy)).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ASSET_UNKNOWN_FIELD' }),
+    );
+  });
+
+  it('strictly validates nested built-in renderer@2 config while renderer@1 stays generic', () => {
+    const current = serializeEffect(representativeEffect());
+    const invalid = structuredClone(current) as unknown as {
+      effect: {
+        elements: {
+          sparks: {
+            render: {
+              config: {
+                alignment?: { axis: [number, number, number]; mode: string };
+                lit: { futureLightingField?: boolean; roughness?: number };
+              };
+              version: number;
+            };
+          };
+        };
+      };
+      version: number;
+    };
+    const render = invalid.effect.elements.sparks.render;
+    render.config.alignment = { axis: [0, 1, 0], mode: 'camera-facing' };
+    render.config.lit.futureLightingField = true;
+    render.config.lit.roughness = 2;
+
+    const diagnostics = validateEffectAsset(invalid);
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_UNKNOWN_FIELD',
+        path: '$.effect.elements.sparks.render.config.alignment.axis',
+      }),
+    );
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_UNKNOWN_FIELD',
+        path: '$.effect.elements.sparks.render.config.lit.futureLightingField',
+      }),
+    );
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_VALUE_INVALID',
+        path: '$.effect.elements.sparks.render.config.lit.roughness',
+      }),
+    );
+
+    invalid.version = 1;
+    render.version = 1;
+    expect(validateEffectAsset(invalid)).not.toContainEqual(
+      expect.objectContaining({
+        path: expect.stringContaining('$.effect.elements.sparks.render.config'),
+      }),
+    );
+  });
+
+  it('strictly validates renderer@2 produced by a custom v1-to-v2 migration', () => {
+    const current = serializeEffect(representativeEffect());
+    const legacy = structuredClone({ ...current, version: 1 }) as unknown as {
+      effect: {
+        elements: {
+          sparks: {
+            render: {
+              config: {
+                futureReaderField?: boolean;
+                lit: { roughness?: number };
+              };
+              version: number;
+            };
+          };
+        };
+      };
+      format: string;
+      version: number;
+    };
+    legacy.effect.elements.sparks.render.version = 1;
+    const migrations = new EffectAssetMigrationRegistry().register(1, 2, (document) => {
+      const migrated = structuredClone(document) as typeof legacy;
+      migrated.version = 2;
+      const render = migrated.effect.elements.sparks.render;
+      render.version = 2;
+      render.config.futureReaderField = true;
+      render.config.lit.roughness = 2;
+      return migrated;
+    });
+
+    const expected = [
+      expect.objectContaining({
+        code: 'NACHI_ASSET_UNKNOWN_FIELD',
+        path: '$.effect.elements.sparks.render.config.futureReaderField',
+      }),
+      expect.objectContaining({
+        code: 'NACHI_ASSET_VALUE_INVALID',
+        path: '$.effect.elements.sparks.render.config.lit.roughness',
+      }),
+    ];
+    expect(validateEffectAsset(legacy, { migrations })).toEqual(expect.arrayContaining(expected));
+    expect(thrownDiagnostics(() => loadEffect(legacy, { migrations }))).toEqual(
+      expect.arrayContaining(expected),
+    );
+  });
+
+  it('checks the v1 reserved renderer version only in actual render slots', () => {
+    const current = serializeEffect(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            integration: 'none',
+            render: { ...billboard({}), version: 1 },
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    const legacy = structuredClone({ ...current, version: 1 }) as unknown as {
+      effect: {
+        elements: {
+          particles: {
+            spawn: { config: Record<string, unknown> };
+          };
+        };
+      };
+      version: number;
+    };
+    legacy.effect.elements.particles.spawn.config.opaquePayload = {
+      config: {},
+      kind: 'module',
+      stage: 'render',
+      type: 'core/billboard',
+      version: 2,
+    };
+
+    expect(validateEffectAsset(legacy)).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ASSET_V1_RENDERER_VERSION_UNSUPPORTED' }),
+    );
+    expect(defaultEffectAssetMigrations.migrate(legacy)).toMatchObject({ version: 2 });
+  });
+
+  it.each([
+    ['billboard', billboard({ blending: 'alpha' })],
+    [
+      'mesh',
+      meshRenderer({
+        blending: 'alpha',
+        geometry: { assetType: 'geometry', kind: 'asset-ref', uri: 'mesh' },
+      }),
+    ],
+    ['decal', decalRenderer({ blending: 'alpha', sorted: true })],
+  ])('rejects reserved renderer@2 in a v1 envelope before migration: %s', (_name, render) => {
+    const current = serializeEffect(
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            integration: 'none',
+            render,
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    const legacyEnvelope = { ...current, version: 1 };
+    expect(validateEffectAsset(legacyEnvelope)).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_ASSET_V1_RENDERER_VERSION_UNSUPPORTED' }),
+    );
+    expect(() => defaultEffectAssetMigrations.migrate(legacyEnvelope)).toThrowError(
+      expect.objectContaining({
+        diagnostics: [
+          expect.objectContaining({ code: 'NACHI_ASSET_V1_RENDERER_VERSION_UNSUPPORTED' }),
+        ],
+      }),
+    );
+    expect(diagnosticCodes(() => loadEffect(legacyEnvelope))).toContain(
+      'NACHI_ASSET_V1_RENDERER_VERSION_UNSUPPORTED',
+    );
   });
 
   it('round-trips emitter offset and strict positionSphere center/arc config', () => {
@@ -499,7 +790,7 @@ describe('effect asset v1', () => {
     ).toEqual(Array.from({ length: 5 }, () => 'world'));
 
     const canonicalLegacy = serializeEffect(loaded);
-    expect(canonicalLegacy.version).toBe(1);
+    expect(canonicalLegacy.version).toBe(2);
     const legacyModules = (
       canonicalLegacy.effect as {
         elements: { particles: { update: Array<{ config: { space?: string } }> } };
@@ -618,7 +909,7 @@ describe('effect asset v1', () => {
               }),
             ],
             integration: 'none',
-            render: billboard({}),
+            render: { ...billboard({}), version: 1 },
             spawn: burst({ count: 1 }),
             update: [linearForce({ force: [0, 1, 0], space: 'emitter' })],
           }),
@@ -678,7 +969,7 @@ describe('effect asset v1', () => {
               }),
             ],
             integration: 'none',
-            render: billboard({}),
+            render: { ...billboard({}), version: 1 },
             spawn: burst({ count: 1 }),
             update: [
               linearForce({ force: [0, 1, 0], space: 'emitter' }),
@@ -854,7 +1145,7 @@ describe('effect asset v1', () => {
           particles: {
             capacity: 1,
             kind: 'emitter',
-            render: billboard({}),
+            render: { ...billboard({}), version: 1 },
             spawn: {
               config: { root },
               kind: 'module',
@@ -952,7 +1243,7 @@ describe('effect asset v1', () => {
             capacity: 1,
             init: sparseInit,
             kind: 'emitter',
-            render: billboard({}),
+            render: { ...billboard({}), version: 1 },
             spawn: burst({ count: 1 }),
           },
         },
@@ -1072,7 +1363,7 @@ describe('asset-reference emitter inheritance', () => {
     const baseElement = {
       capacity: 1,
       kind: 'emitter',
-      render: billboard({}),
+      render: { ...billboard({}), version: 1 },
       spawn: burst({ count: 1 }),
     };
     const invalidKey = {
@@ -1302,7 +1593,7 @@ describe('asset-reference emitter inheritance', () => {
     ).toEqual(document);
   });
 
-  it('round-trips emitter-local NeighborGrid origin in the unchanged v1 envelope/schema', () => {
+  it('round-trips the NeighborGrid v1 payload in the canonical v2 envelope', () => {
     const neighbors = defineNeighborGrid({
       cellCapacity: 24,
       cellSize: 0.5,
@@ -1320,7 +1611,7 @@ describe('asset-reference emitter inheritance', () => {
     });
     const effect = defineEffect({ elements: { flock, neighbors } });
     const document = serializeEffect(effect);
-    expect(document).toMatchObject({ format: 'nachi-effect', version: 1 });
+    expect(document).toMatchObject({ format: 'nachi-effect', version: 2 });
     expect((document.effect as { elements: { neighbors: unknown } }).elements.neighbors).toEqual({
       cellCapacity: 24,
       cellSize: 0.5,

@@ -194,14 +194,36 @@ describe('M10 bitonic particle sort contract', () => {
     );
   });
 
-  it('diagnoses sorted particle blending that cannot benefit from depth order', () => {
+  it.each([
+    ['billboard', 'additive'],
+    ['billboard', 'multiply'],
+    ['mesh', 'additive'],
+    ['mesh', 'multiply'],
+  ] as const)('diagnoses raw v2 sorted particle blending and rejects it in the %s helper: %s', (type, blending) => {
+    const geometry = { assetType: 'geometry', kind: 'asset-ref', uri: 'mesh.glb' } as const;
+    const helper = () =>
+      type === 'billboard'
+        ? billboard({ blending, sorted: true })
+        : meshRenderer({ blending, geometry, sorted: true });
+    let helperError: unknown;
+    try {
+      helper();
+    } catch (error) {
+      helperError = error;
+    }
+    expect(helperError).toBeInstanceOf(VfxDiagnosticError);
+    expect(helperError instanceof VfxDiagnosticError ? helperError.diagnostics : []).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_BLEND_UNSUPPORTED' }),
+    );
+
+    const render =
+      type === 'billboard'
+        ? rawConfig(billboard({ blending }), { blending, sorted: true })
+        : rawConfig(meshRenderer({ blending, geometry }), { blending, geometry, sorted: true });
     const program = compileEmitter(
       defineEmitter({
         capacity: 1,
-        render: rawConfig(billboard({ blending: 'additive' }), {
-          blending: 'additive',
-          sorted: true,
-        }),
+        render,
         spawn: burst({ count: 1 }),
       }),
     );
@@ -1314,7 +1336,7 @@ describe('emitter kernel compiler', () => {
         },
         indirect: expect.objectContaining({
           instanceCount: 'alive-count',
-          physicalIndex: 'alive-indices',
+          physicalIndex: 'sorted-indices',
         }),
         kind: 'billboard',
         vertex: expect.objectContaining({
@@ -1421,6 +1443,22 @@ describe('emitter kernel compiler', () => {
         expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_WEBGL2_UNSUPPORTED' }),
       ]),
     );
+  });
+
+  it('elides depth-sort submissions for a capacity-one sorted draw', () => {
+    const kernels = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: billboard({ blending: 'alpha' }),
+        spawn: burst({ count: 1 }),
+      }),
+    ).buildKernels(fakeAdapter());
+
+    expect(kernels.sortPaddedCapacity).toBe(1);
+    expect(kernels.sortedIndices).toBeDefined();
+    expect(kernels.prepareSort).toBeUndefined();
+    expect(kernels.sortPasses).toEqual([]);
   });
 
   it('compiles flipbook interpolation, motion vectors, cutout, and soft depth fade', () => {
@@ -1553,7 +1591,7 @@ describe('emitter kernel compiler', () => {
     expect(program.draws[0]).toMatchObject({
       fragment: { blending: 'alpha' },
       geometry: { resource: geometry, topology: 'triangle-list' },
-      indirect: { instanceCount: 'alive-count', physicalIndex: 'alive-indices' },
+      indirect: { instanceCount: 'alive-count', physicalIndex: 'sorted-indices' },
       kind: 'mesh',
       vertex: {
         alignment: { mode: 'velocity' },
@@ -1561,6 +1599,140 @@ describe('emitter kernel compiler', () => {
       },
     });
     expect(program.meta.backendBudgets.webgpu.vertexStorageBufferCount).toBeLessThanOrEqual(8);
+  });
+
+  it.each([
+    ['billboard-alpha', () => billboard({ blending: 'alpha' })],
+    ['billboard-premultiplied', () => billboard({ blending: 'premultiplied' })],
+    [
+      'mesh-alpha',
+      () =>
+        meshRenderer({
+          blending: 'alpha',
+          geometry: { assetType: 'geometry', kind: 'asset-ref', uri: 'mesh' },
+        }),
+    ],
+    [
+      'mesh-premultiplied',
+      () =>
+        meshRenderer({
+          blending: 'premultiplied',
+          geometry: { assetType: 'geometry', kind: 'asset-ref', uri: 'mesh' },
+        }),
+    ],
+    ['decal-alpha', () => decalRenderer({ blending: 'alpha' })],
+    ['decal-premultiplied', () => decalRenderer({ blending: 'premultiplied' })],
+  ])('defaults omitted v2 particle sort on for %s', (_name, render) => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        integration: 'none',
+        render: render(),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.draws[0]).toMatchObject({
+      automaticRenderOrder: true,
+      indirect: { physicalIndex: 'sorted-indices', sortedPaddedCapacity: 4 },
+      moduleVersion: 2,
+      renderOrderOffset: 0,
+    });
+  });
+
+  it('preserves v1 renderer omission semantics and ignores v2-only fields', () => {
+    const authored = billboard({ blending: 'alpha' });
+    const legacy = {
+      ...authored,
+      config: {
+        blending: 'alpha',
+        renderOrderOffset: 0.5,
+        sortCenter: [1, 2, 3],
+      },
+      version: 1,
+    } as const;
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        integration: 'none',
+        render: legacy,
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_RENDER_ORDER_OFFSET_INVALID' }),
+    );
+    expect(program.draws[0]).toMatchObject({
+      automaticRenderOrder: true,
+      coarseSortCenter: [1, 2, 3],
+      indirect: { physicalIndex: 'alive-indices' },
+      moduleVersion: 1,
+      renderOrderOffset: 0,
+    });
+  });
+
+  it('rejects unsupported built-in renderer versions without compiling a draw', () => {
+    const authored = billboard({ sorted: false });
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: { ...authored, version: 99 },
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.draws).toEqual([]);
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_MODULE_UNKNOWN', path: 'render[0]' }),
+    );
+  });
+
+  it.each([
+    'core/billboard',
+    'core/mesh-renderer',
+  ] as const)('rejects non-boolean renderer@2 sorted without enabling its sort path: %s', (type) => {
+    const render =
+      type === 'core/billboard'
+        ? billboard({ sorted: false })
+        : meshRenderer({
+            geometry: { assetType: 'geometry', kind: 'asset-ref', uri: 'mesh' },
+            sorted: false,
+          });
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        render: { ...render, config: { ...render.config, sorted: 'yes' } },
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(program.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_PARTICLE_SORT_VALUE_INVALID' }),
+    );
+    expect(program.draws[0]).toMatchObject({ indirect: { physicalIndex: 'alive-indices' } });
+  });
+
+  it('inserts the v2 decal spawn-rotation default after generic defaults and before author Init', () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [lifetime(2)],
+        integration: 'none',
+        render: decalRenderer({ sorted: false }),
+        spawn: burst({ count: 1 }),
+      }),
+    );
+    expect(
+      program.kernels.init.modules.slice(0, 3).map(({ path, type }) => ({ path, type })),
+    ).toEqual([
+      { path: 'init[$defaults]', type: 'core/defaults' },
+      {
+        path: 'init[$decal-spawn-rotation]',
+        type: 'core/decal-spawn-rotation',
+      },
+      { path: 'init[0]', type: 'core/lifetime' },
+    ]);
+    expect(program.kernels.init.modules[1]?.access).toEqual({
+      reads: ['Emitter.spawnInterpolatedRotation'],
+      writes: ['Particles.rotation'],
+    });
   });
 
   it('compiles bounded light selection with orthogonal color/intensity over-life attributes', () => {
@@ -1997,7 +2169,7 @@ describe('emitter kernel compiler', () => {
       defineEmitter({
         capacity: 8,
         integration: 'none',
-        render: billboard({ blending: 'alpha' }),
+        render: billboard({ blending: 'alpha', sorted: false }),
         spawn: burst({ count: 8 }),
       }),
     );

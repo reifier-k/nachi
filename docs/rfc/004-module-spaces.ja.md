@@ -160,11 +160,13 @@ emitter stateを再構築する経路を追加する場合は、history reset規
 4. 現行authoring helperはmodule version 2を出力し、H1-5の5種は`emitter`、
    `velocityCone`/`linearForce`は`world`というmodule別既定を明示具現化する。
 5. 再serializationはmodule versionを保持し、正規かつ明示的で入力objectを変更しない。v1 loadを黙ってv2へ
-   upgradeしない。
+   upgradeしない。すなわちenvelope-v1 assetをloadしてもmodule-v1 recordをmodule v2へ暗黙upgradeしない。
 
-asset envelopeはmodule record自身がversionを持つためversion 1のままである。H2-6前readerは`type@1` registry
-entryしか持たず、新規作成された`type@2`を`NACHI_MODULE_UNKNOWN`で安全に拒否するため、selectorを黙って
-再解釈できない。local cone/thruster方向を望むcode-first定義はv2 helperで`space: 'emitter'`を明示する。
+H2-6時点のasset envelopeは、module record自身がversionを持つためversion 1のままだった。H2-6前readerは
+`type@1` registry entryしか持たず、新規作成された`type@2`を`NACHI_MODULE_UNKNOWN`で安全に拒否したため、
+selectorを黙って再解釈できなかった。H2-7はその後renderer境界のためcanonical envelopeをversion 2へ上げた。
+default envelope-only v1→v2 migrationはmodule payload/versionを変更しないため、module-v1とmodule-v2のspace recordは
+上記H2-6 semanticsを維持する。local cone/thruster方向を望むcode-first定義はv2 helperで`space: 'emitter'`を明示する。
 
 ## 6. 公開API追加・変更チェックリスト
 

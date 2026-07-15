@@ -15,6 +15,7 @@ import {
 } from './compiler.js';
 import { attributeStorageComponentIndex } from './attributes.js';
 import { VfxDiagnosticError } from './diagnostics.js';
+import { MAX_TRANSPARENT_DRAW_ORDER_ENTRIES } from './limits.js';
 import {
   aggregateProfileFrame,
   captureEmitterAttributes,
@@ -113,8 +114,11 @@ export interface VfxRuntimeRenderer {
   setVisibility?(kernels: BuiltEmitterKernels, visible: boolean): void;
   /** Returns the currently materialized indirect draw records owned by these kernels. */
   getRenderableIndirectDrawCount?(kernels: BuiltEmitterKernels): number;
-  /** Applies VFXSystem's stable far-to-near emitter order to backend draw objects. */
-  setRenderOrder?(kernels: BuiltEmitterKernels, order: number): void;
+  /** Applies VFXSystem's stable far-to-near rank independently to each compiled draw. */
+  setRenderOrder?(
+    kernels: BuiltEmitterKernels,
+    assignments: readonly VfxTransparentDrawOrderAssignment[],
+  ): void;
   /** Uploads cache replay bytes into an existing materialized storage resource. */
   writeStorage?(storage: KernelStorageNode, data: ArrayBufferView, byteOffset?: number): void;
   /** Makes preceding writeStorage calls visible to immediate storage readback/compute submission. */
@@ -130,6 +134,11 @@ export interface VfxRuntimeRenderer {
     kernel: KernelComputeNode,
     indirectResource: unknown,
   ): Promise<void> | void;
+}
+
+export interface VfxTransparentDrawOrderAssignment {
+  readonly drawIndex: number;
+  readonly rank: number;
 }
 
 export type VfxPrepareResourceKind = 'emitter' | 'grid' | 'object';
@@ -198,6 +207,8 @@ export interface VfxSystemOptions {
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
   /** Maximum released resource bundles retained per effect definition. Defaults to 16. */
   readonly maxPoolSize?: number;
+  /** Maximum active automatically ranked transparent draws. Defaults to 2^20 - 1. */
+  readonly maxTransparentDrawOrderEntries?: number;
   readonly now?: () => number;
   readonly prewarmStepSeconds?: number;
   /** Defaults to epic for backward compatibility; pass auto to use device heuristics. */
@@ -1136,6 +1147,13 @@ type SpawnBatch = {
   readonly phaseStep?: number;
 };
 
+type RuntimeTransparencyDraw = {
+  readonly drawIndex: number;
+  readonly particleSorted: boolean;
+  readonly path: string;
+  readonly worldPosition: readonly [number, number, number];
+};
+
 class RuntimeEmitter implements VfxEmitterRuntimeView {
   readonly controller: EmitterLifecycleController;
   readonly kernels: BuiltEmitterKernels;
@@ -1311,27 +1329,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     return this.#neighborGrids.entries();
   }
 
-  get alphaBlended(): boolean {
-    return this.program.draws.some(
-      (draw) =>
-        (draw.kind === 'billboard' || draw.kind === 'mesh') &&
-        (draw.fragment.blending === 'alpha' || draw.fragment.blending === 'premultiplied'),
-    );
-  }
-
-  get particleSorted(): boolean {
-    return this.program.draws.some(
-      (draw) =>
-        (draw.kind === 'billboard' || draw.kind === 'mesh') &&
-        draw.indirect.physicalIndex === 'sorted-indices',
-    );
-  }
-
-  get worldPosition(): readonly [number, number, number] {
-    const draw = this.program.draws.find(
-      (candidate) => candidate.kind === 'billboard' || candidate.kind === 'mesh',
-    );
-    const [x, y, z] = draw?.coarseSortCenter ?? [0, 0, 0];
+  #worldPosition(center: readonly [number, number, number]): readonly [number, number, number] {
+    const [x, y, z] = center;
     return [
       this.#transform[0]! * x +
         this.#transform[4]! * y +
@@ -1346,6 +1345,20 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         this.#transform[10]! * z +
         this.#transform[14]!,
     ];
+  }
+
+  transparencyDraws(): readonly RuntimeTransparencyDraw[] {
+    return this.program.draws.flatMap((draw, drawIndex) => {
+      if (!('automaticRenderOrder' in draw) || !draw.automaticRenderOrder) return [];
+      return [
+        {
+          drawIndex,
+          particleSorted: draw.indirect.physicalIndex === 'sorted-indices',
+          path: draw.path,
+          worldPosition: this.#worldPosition(draw.coarseSortCenter),
+        },
+      ];
+    });
   }
 
   get boundingSphere(): BoundingSphere {
@@ -1409,8 +1422,8 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     return captureEmitterAttributes(this.#renderer, this, emitterId, options);
   }
 
-  setRenderOrder(order: number): void {
-    this.#renderer.setRenderOrder?.(this.kernels, order);
+  setRenderOrder(assignments: readonly VfxTransparentDrawOrderAssignment[]): void {
+    this.#renderer.setRenderOrder?.(this.kernels, assignments);
   }
 
   setQualityTier(tier: QualityTier): void {
@@ -2357,9 +2370,15 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
     for (const emitter of this.#emitters.values()) emitter.setQualityTier(tier);
   }
 
-  /** @internal Supplies stable emitter keys to VFXSystem's coarse transparency sort. */
-  transparencyEmitters(): readonly (readonly [string, RuntimeEmitter])[] {
-    return [...this.#emitters.entries()].filter(([, emitter]) => emitter.alphaBlended);
+  /** @internal Supplies draw-granular entries to VFXSystem's coarse transparency sort. */
+  transparencyDraws(): readonly {
+    readonly draw: RuntimeTransparencyDraw;
+    readonly emitter: RuntimeEmitter;
+    readonly emitterKey: string;
+  }[] {
+    return [...this.#emitters.entries()].flatMap(([emitterKey, emitter]) =>
+      emitter.transparencyDraws().map((draw) => ({ draw, emitter, emitterKey })),
+    );
   }
 
   setEventDrainFrames(frames: number): void {
@@ -2756,6 +2775,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #onBuildDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
   readonly #onRuntimeDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
   readonly #maxPoolSize: number;
+  readonly #maxTransparentDrawOrderEntries: number;
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
   readonly #grid2DStageRegistry: Grid2DStageRegistry | undefined;
@@ -2825,6 +2845,17 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     this.#maxPoolSize = options.maxPoolSize ?? DEFAULT_MAX_POOL_SIZE;
     if (!Number.isSafeInteger(this.#maxPoolSize) || this.#maxPoolSize < 0) {
       throw new RangeError('maxPoolSize must be a non-negative safe integer.');
+    }
+    this.#maxTransparentDrawOrderEntries =
+      options.maxTransparentDrawOrderEntries ?? MAX_TRANSPARENT_DRAW_ORDER_ENTRIES;
+    if (
+      !Number.isSafeInteger(this.#maxTransparentDrawOrderEntries) ||
+      this.#maxTransparentDrawOrderEntries <= 0 ||
+      this.#maxTransparentDrawOrderEntries > MAX_TRANSPARENT_DRAW_ORDER_ENTRIES
+    ) {
+      throw new RangeError(
+        `maxTransparentDrawOrderEntries must be a positive safe integer no greater than ${MAX_TRANSPARENT_DRAW_ORDER_ENTRIES}.`,
+      );
     }
     if (
       this.#aliveCountReadbackInterval !== undefined &&
@@ -3001,6 +3032,33 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       const materializationRenderer = runtimeRenderer;
       const compiled = this.#compile(definition, this.#qualitySelection.tier);
       compileDiagnostics = compiled.emitters.flatMap(({ program }) => program.diagnostics);
+      const existingTransparentDraws = preparationSpawn
+        ? 0
+        : [...this.#instances.values()].reduce(
+            (count, activeInstance) => count + activeInstance.transparencyDraws().length,
+            0,
+          );
+      const additionalTransparentDraws = compiled.emitters.reduce(
+        (count, { program }) =>
+          count +
+          program.draws.filter(
+            (draw) => 'automaticRenderOrder' in draw && draw.automaticRenderOrder,
+          ).length,
+        0,
+      );
+      if (
+        existingTransparentDraws + additionalTransparentDraws >
+        this.#maxTransparentDrawOrderEntries
+      ) {
+        if (!preparationSpawn) this.#instances.delete(id);
+        throw new VfxDiagnosticError([
+          runtimeDiagnostic(
+            'NACHI_TRANSPARENT_DRAW_ORDER_CAPACITY_EXCEEDED',
+            `Spawning ${additionalTransparentDraws} automatically ranked transparent draws would exceed the configured limit ${this.#maxTransparentDrawOrderEntries}.`,
+            'VFXSystem.maxTransparentDrawOrderEntries',
+          ),
+        ]);
+      }
       pooled = this.#takePooledResources(definition, poolKey);
       for (const grid of compiled.grids) {
         if (grid.definition.kind === 'grid2d') {
@@ -3402,18 +3460,19 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
   #updateTransparencyOrder(): void {
     const entries = [...this.#instances.values()].flatMap((instance) =>
-      instance.transparencyEmitters().map(([key, emitter]) => ({
+      instance.transparencyDraws().map(({ draw, emitter, emitterKey }) => ({
         instance,
-        stableKey: key,
+        stableKey: `${instance.id}:${emitterKey}:${draw.path}:${draw.drawIndex}`,
         stableSequence: instanceCreationSequence(instance),
-        value: emitter,
-        worldPosition: emitter.worldPosition,
+        value: { draw, emitter },
+        worldPosition: draw.worldPosition,
       })),
     );
-    const needsCamera = entries.length > 1 || entries.some(({ value }) => value.particleSorted);
+    const needsCamera =
+      entries.length > 1 || entries.some(({ value }) => value.draw.particleSorted);
     if (needsCamera && !this.#cameraConfigured) {
       for (const { instance } of entries.filter(
-        ({ value }) => entries.length > 1 || value.particleSorted,
+        ({ value }) => entries.length > 1 || value.draw.particleSorted,
       )) {
         instance.recordDiagnosticOnce(
           runtimeDiagnostic(
@@ -3426,7 +3485,15 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       }
     }
     const ordered = sortEmittersBackToFront(entries, this.#cameraState.viewMatrix);
-    for (const [rank, entry] of ordered.entries()) entry.value.setRenderOrder(1_000 + rank);
+    const assignments = new Map<RuntimeEmitter, VfxTransparentDrawOrderAssignment[]>();
+    for (const [rank, entry] of ordered.entries()) {
+      const emitterAssignments = assignments.get(entry.value.emitter) ?? [];
+      emitterAssignments.push({ drawIndex: entry.value.draw.drawIndex, rank });
+      assignments.set(entry.value.emitter, emitterAssignments);
+    }
+    for (const [emitter, emitterAssignments] of assignments) {
+      emitter.setRenderOrder(emitterAssignments);
+    }
   }
 
   #compile(definition: RuntimeEffectDefinition, tier: QualityTier): CompiledEffect {
