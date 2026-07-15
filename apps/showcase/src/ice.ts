@@ -7,6 +7,7 @@ import {
   curlNoise,
   curve,
   defineEmitter,
+  defineEffect as defineCoreEffect,
   drag,
   gradient,
   gravity,
@@ -18,6 +19,7 @@ import {
   range,
   sizeOverLife,
   tslModule,
+  VFXSystem as CoreVFXSystem,
   velocityCone,
   type TextureRef,
   type TslExpression,
@@ -57,10 +59,19 @@ import {
   createPerformanceMonitor,
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
+  readLogicalAttribute,
   timelineDefinitionElementKeys,
   timelineTrackedKeysMatchDefinition,
 } from './harness';
+import {
+  ICE_SPARKLE_JITTER_ATTRIBUTE,
+  iceSparkleInitModules,
+  iceSparkleJitterAttribute,
+  registerIceSparklePlacement,
+  sampleIceSparkleLocal,
+} from './ice-sparkle-placement';
 import { createShowcaseLoading } from './loading';
+import { updateWorldShockwaves, worldShockwave } from './post-target';
 import { attachShowcaseTuning } from './tuning';
 import './ice.css';
 import './embed.css';
@@ -91,8 +102,10 @@ const CAPTURE_LABELS = [
   'afterglow · snow dust',
 ] as const;
 const root = document.documentElement;
-const headless = new URLSearchParams(location.search).get('headless') === '1';
-if (new URLSearchParams(location.search).get('embed') === '1') root.dataset.embed = '1';
+const query = new URLSearchParams(location.search);
+const headless = query.get('headless') === '1';
+const legacyIceJitter = query.get('forceFailure') === 'ice-world-jitter';
+if (query.get('embed') === '1') root.dataset.embed = '1';
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -491,11 +504,6 @@ function offsetInit(offset: Vec3) {
   );
 }
 
-/**
- * Scatters twinkle particles along the eight pillar axes: spawnOrder picks a
- * pillar slot (7 ring pillars + the center), positionSphere jitter provides
- * the radial offset and the normalized height along that pillar.
- */
 const sparklePlacement = tslModule(
   ({ position, spawnOrder }) => {
     const jitter = vec3(position as never);
@@ -668,8 +676,14 @@ function createGlacialRequiem(textures: EffectTextures, loop: boolean) {
     ],
   });
   const sparkle = defineEmitter({
+    attributes: { [ICE_SPARKLE_JITTER_ATTRIBUTE]: iceSparkleJitterAttribute },
     capacity: 140,
-    init: [positionSphere({ radius: 1 }), sparklePlacement, lifetime(range(0.3, 0.55))],
+    init: [
+      ...(legacyIceJitter
+        ? [positionSphere({ radius: 1 }), sparklePlacement]
+        : iceSparkleInitModules),
+      lifetime(range(0.3, 0.55)),
+    ],
     integration: 'none',
     render: billboard({ blending: 'additive', map: SPARK_REF }),
     spawn: burst({ count: 18, cycles: 9, interval: 0.12 }),
@@ -857,6 +871,104 @@ function createGlacialRequiem(textures: EffectTextures, loop: boolean) {
   });
 }
 
+interface IcePlacementProbe {
+  readonly actualHash: string;
+  readonly aliveCount: number;
+  readonly effectiveEmitterSeed: number;
+  readonly expectedHash: string;
+  readonly finite: boolean;
+  readonly maxError: number;
+  readonly particleCount: number;
+  readonly spawnOrders: readonly number[];
+}
+
+function placementHash(values: Iterable<number>): string {
+  let hash = 0x811c9dc5;
+  for (const value of values) {
+    // GPU transcendental implementations differ slightly; centimeter quantization keeps this
+    // evidence hash backend-stable while maxError below remains the precise comparison.
+    hash = Math.imul(hash ^ (Math.round(value * 1e2) >>> 0), 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+async function probeIceSparklePlacement(
+  renderer: THREE.WebGPURenderer,
+  runtime: ReturnType<typeof createThreeRuntimeRenderer>,
+  registry: ReturnType<typeof createCoreKernelModuleRegistry>,
+): Promise<IcePlacementProbe> {
+  const particleCount = 8;
+  const spawnSeed = 0x1ce0;
+  const probeEmitter = defineEmitter({
+    attributes: { [ICE_SPARKLE_JITTER_ATTRIBUTE]: iceSparkleJitterAttribute },
+    capacity: particleCount,
+    init: [
+      ...(legacyIceJitter
+        ? [positionSphere({ radius: 1 }), sparklePlacement]
+        : iceSparkleInitModules),
+      lifetime(2),
+    ],
+    integration: 'none',
+    render: billboard({ blending: 'additive' }),
+    spawn: burst({ count: particleCount }),
+  });
+  const probeSystem = new CoreVFXSystem(runtime, undefined, { registry });
+  const yaw = 0.73;
+  const position = [2.4, -0.35, 1.7] as const;
+  const rotation = [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)] as const;
+  const probeInstance = probeSystem.spawn(
+    defineCoreEffect({ elements: { particles: probeEmitter } }),
+    { position, rotation, seed: spawnSeed },
+  );
+  await probeSystem.update(STEP);
+  const view = probeInstance.getEmitter('particles');
+  if (!view) throw new Error('Ice placement GPU probe emitter did not materialize.');
+  const effectiveEmitterSeedValue = view.kernels.uniforms['Emitter.seed']?.value;
+  if (typeof effectiveEmitterSeedValue !== 'number') {
+    throw new Error('Ice placement GPU probe seed uniform is unavailable.');
+  }
+  const effectiveEmitterSeed = effectiveEmitterSeedValue >>> 0;
+  const positions = await readLogicalAttribute(renderer, view.program, view.kernels, 'position');
+  const alive = await readLogicalAttribute(renderer, view.program, view.kernels, 'alive');
+  const spawnOrders = await readLogicalAttribute(
+    renderer,
+    view.program,
+    view.kernels,
+    'spawnOrder',
+  );
+  const transform = new THREE.Matrix4().compose(
+    new THREE.Vector3(...position),
+    new THREE.Quaternion(...rotation),
+    new THREE.Vector3(1, 1, 1),
+  );
+  const expected: number[] = [];
+  let finite = true;
+  let maxError = 0;
+  for (let particle = 0; particle < particleCount; particle += 1) {
+    const spawnOrder = spawnOrders[particle] ?? Number.NaN;
+    const point = new THREE.Vector3(
+      ...sampleIceSparkleLocal(spawnOrder, effectiveEmitterSeed),
+    ).applyMatrix4(transform);
+    expected.push(point.x, point.y, point.z);
+    for (let component = 0; component < 3; component += 1) {
+      const actual = positions[particle * 3 + component] ?? Number.NaN;
+      finite &&= Number.isFinite(actual);
+      maxError = Math.max(maxError, Math.abs(actual - expected[particle * 3 + component]!));
+    }
+  }
+  probeInstance.release();
+  return {
+    actualHash: placementHash(positions),
+    aliveCount: Array.from(alive).filter(Boolean).length,
+    effectiveEmitterSeed,
+    expectedHash: placementHash(expected),
+    finite,
+    maxError,
+    particleCount,
+    spawnOrders: Array.from(spawnOrders),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Choreography helpers.
 // ---------------------------------------------------------------------------
@@ -932,10 +1044,20 @@ async function run(): Promise<void> {
   camera.lookAt(0, 0.42, 0);
   const cameraBaseRotation = camera.rotation.clone();
 
-  const projected = new THREE.Vector3(0, 0.15, 0).project(camera);
-  const shockCenter: [number, number] = [0.5 + projected.x * 0.5, 0.5 - projected.y * 0.5];
+  const shockwaves = [
+    worldShockwave(camera, [0, 0.15, 0], {
+      duration: 0.6,
+      enabled: 1,
+      radius: 0.02,
+      ringWidth: 0.13,
+      speed: 0.9,
+      startTime: CENTER_TIME,
+      strength: 0.045,
+    }),
+  ] as const;
 
   const registry = createCoreKernelModuleRegistry();
+  registerIceSparklePlacement(registry);
   const adapter = createThreeKernelAdapter({
     backend: 'webgpu',
     linearFloat32Filtering: backend.device?.features?.has('float32-filterable') === true,
@@ -944,6 +1066,9 @@ async function run(): Promise<void> {
       : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
   });
   const runtime = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
+  const placementProbe = headless
+    ? await probeIceSparklePlacement(renderer, runtime, registry)
+    : undefined;
 
   let latestShake: CameraShakeSample | null = null;
   const system = new VFXSystem(runtime, scene, {
@@ -1007,17 +1132,7 @@ async function run(): Promise<void> {
   const post = createPostPipeline(renderer, scene, camera, {
     bloom: bloomPreset('intense', { radius: 0.62, strength: 0.85, threshold: 0.5 }),
     distortion: screenDistortion({
-      shockwaves: [
-        {
-          center: shockCenter,
-          duration: 0.6,
-          radius: 0.02,
-          ringWidth: 0.13,
-          speed: 0.9,
-          startTime: CENTER_TIME,
-          strength: 0.045,
-        },
-      ],
+      shockwaves: shockwaves.map(({ source }) => source),
     }),
   });
 
@@ -1058,6 +1173,7 @@ async function run(): Promise<void> {
     }
     camera.updateMatrixWorld(true);
     system.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
+    updateWorldShockwaves(camera, post.controls, shockwaves);
     post.controls.setTime(localNow());
   };
 
@@ -1079,7 +1195,7 @@ async function run(): Promise<void> {
       });
       perfTarget.dispose();
     };
-    await runHeadless(renderer, post, step, instance, effect, perfWindow);
+    await runHeadless(renderer, post, step, instance, effect, placementProbe!, perfWindow);
     return;
   }
 
@@ -1159,6 +1275,7 @@ async function runHeadless(
     getElementState(key: string): unknown;
   },
   definition: { readonly elements: Readonly<Record<string, unknown>> },
+  placementProbe: IcePlacementProbe,
   perfWindow: () => Promise<void>,
 ): Promise<void> {
   const labels = required<HTMLElement>('#frame-labels');
@@ -1235,6 +1352,10 @@ async function runHeadless(
     consoleClean: consoleMessages.length === 0,
     eruptionVisible: eruption.foregroundRatio > 0.02 && eruption.saturatedRatio < 0.3,
     forestVisible: forest.foregroundRatio > 0.045 && forest.saturatedRatio < 0.32,
+    localJitterNormalized:
+      placementProbe.aliveCount === placementProbe.particleCount &&
+      placementProbe.finite &&
+      placementProbe.maxError <= 5e-4,
     stateHealthy: instance.state !== 'error',
     tableauVisible: tableau.foregroundRatio > 0.015 && tableau.saturatedRatio < 0.3,
   };
@@ -1251,6 +1372,7 @@ async function runHeadless(
         ({ code, message }) => `${code}: ${message ?? ''}`,
       ),
       panelStats,
+      placementProbe,
     },
     ok: Object.values(checks).every(Boolean),
     schema: 'nachi.ice.v1',

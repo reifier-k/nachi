@@ -66,6 +66,7 @@ import {
   timelineTrackedKeysMatchDefinition,
 } from './harness';
 import { createShowcaseLoading } from './loading';
+import { updateWorldShockwaves, worldShockwave } from './post-target';
 import { attachShowcaseTuning } from './tuning';
 import './slash.css';
 import './embed.css';
@@ -714,8 +715,26 @@ async function run(): Promise<void> {
   camera.lookAt(0.1, -0.05, 0);
   const cameraBaseRotation = camera.rotation.clone();
 
-  const projected = new THREE.Vector3(0, 0, 0).project(camera);
-  const shockCenter: [number, number] = [0.5 + projected.x * 0.5, 0.5 - projected.y * 0.5];
+  const shockwaves = [
+    worldShockwave(camera, [0, 0, 0], {
+      duration: 0.7,
+      enabled: 1,
+      radius: 0.02,
+      ringWidth: 0.14,
+      speed: 0.85,
+      startTime: IMPACT_TIME,
+      strength: 0.05,
+    }),
+    worldShockwave(camera, [0, 0, 0], {
+      duration: 0.5,
+      enabled: 1,
+      radius: 0.02,
+      ringWidth: 0.1,
+      speed: 0.7,
+      startTime: COUNTER_TIME,
+      strength: 0.028,
+    }),
+  ] as const;
 
   const registry = registerTrails(createCoreKernelModuleRegistry());
   const adapter = createThreeKernelAdapter({
@@ -839,26 +858,7 @@ async function run(): Promise<void> {
   const post = createPostPipeline(renderer, scene, camera, {
     bloom: bloomPreset('intense', { radius: 0.62, strength: 0.85, threshold: 0.5 }),
     distortion: screenDistortion({
-      shockwaves: [
-        {
-          center: shockCenter,
-          duration: 0.7,
-          radius: 0.02,
-          ringWidth: 0.14,
-          speed: 0.85,
-          startTime: IMPACT_TIME,
-          strength: 0.05,
-        },
-        {
-          center: shockCenter,
-          duration: 0.5,
-          radius: 0.02,
-          ringWidth: 0.1,
-          speed: 0.7,
-          startTime: COUNTER_TIME,
-          strength: 0.028,
-        },
-      ],
+      shockwaves: shockwaves.map(({ source }) => source),
     }),
   });
 
@@ -910,6 +910,7 @@ async function run(): Promise<void> {
     camera.updateMatrixWorld(true);
     system.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
     trailSystem.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
+    updateWorldShockwaves(camera, post.controls, shockwaves);
     post.controls.setTime(localNow());
   };
 

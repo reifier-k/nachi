@@ -59,6 +59,20 @@ particle/coarse ordering, mesh depth, decal spawn orientation, quality/pool boun
 existing `/m10-sort/` page, all six showcase pages, and the WebGPU/WebGL M11 cache entries described
 below.
 
+For the six interactive showcase pages, supplement the fixed-camera GPU run with this short camera
+follow check when changing camera or post wiring:
+
+1. Open beam, slash, barrier, machina, heal, and ice without `headless=1`; wait for the loop status.
+2. During each impact/shockwave, drag to orbit, right-drag to pan, and scroll/pinch to zoom. The
+   distortion center must stay on its world impact point and must disappear while that point is
+   behind the camera or outside the viewport.
+3. Change FOV in the tuning panel, resize the viewport through narrow and wide aspects, and trigger
+   an impact camera shake. The same center must follow without a one-frame stale position.
+4. Reset the camera and confirm the fixed view is unchanged. For ice placement work, also respawn
+   with a non-zero offset and rotation and compare the GPU position readback with the CPU local
+   distribution after exactly one spawn-transform composition. Also cover a singular/zero scale;
+   positions must stay finite because the placement path contains no matrix inverse.
+
 The `/m2-runtime/?scenario=time` WebGPU result also injects a one-second `now()` gap into real
 systems. It records the default 0.25-second particle advance and 0.75-second measured discard, a
 configured 0.1-second cap, `Infinity`, explicit-delta bypass, and the separate 0.75 measured plus

@@ -58,6 +58,7 @@ import {
   timelineTrackedKeysMatchDefinition,
 } from './harness';
 import { createShowcaseLoading } from './loading';
+import { updateWorldShockwaves, worldShockwave } from './post-target';
 import { attachShowcaseTuning } from './tuning';
 import './machina.css';
 import './embed.css';
@@ -1063,12 +1064,26 @@ async function run(): Promise<void> {
   camera.lookAt(0, 0.3, 0);
   const cameraBaseRotation = camera.rotation.clone();
 
-  const projectPoint = (x: number, y: number, z: number): [number, number] => {
-    const projected = new THREE.Vector3(x, y, z).project(camera);
-    return [0.5 + projected.x * 0.5, 0.5 - projected.y * 0.5];
-  };
-  const firstStrikeCenter = projectPoint(STRIKES[0].x, -0.5, STRIKES[0].z);
-  const finalStrikeCenter = projectPoint(0, 0.4, 0);
+  const shockwaves = [
+    worldShockwave(camera, [STRIKES[0].x, -0.5, STRIKES[0].z], {
+      duration: 0.6,
+      enabled: 1,
+      radius: 0.02,
+      ringWidth: 0.12,
+      speed: 0.8,
+      startTime: BARRAGE_START,
+      strength: 0.045,
+    }),
+    worldShockwave(camera, [0, 0.4, 0], {
+      duration: 0.75,
+      enabled: 1,
+      radius: 0.02,
+      ringWidth: 0.16,
+      speed: 0.9,
+      startTime: FINAL_TIME,
+      strength: 0.065,
+    }),
+  ] as const;
 
   const registry = createCoreKernelModuleRegistry();
   const adapter = createThreeKernelAdapter({
@@ -1205,26 +1220,7 @@ async function run(): Promise<void> {
   const post = createPostPipeline(renderer, scene, camera, {
     bloom: bloomPreset('intense', { radius: 0.62, strength: 0.85, threshold: 0.5 }),
     distortion: screenDistortion({
-      shockwaves: [
-        {
-          center: firstStrikeCenter,
-          duration: 0.6,
-          radius: 0.02,
-          ringWidth: 0.12,
-          speed: 0.8,
-          startTime: BARRAGE_START,
-          strength: 0.045,
-        },
-        {
-          center: finalStrikeCenter,
-          duration: 0.75,
-          radius: 0.02,
-          ringWidth: 0.16,
-          speed: 0.9,
-          startTime: FINAL_TIME,
-          strength: 0.065,
-        },
-      ],
+      shockwaves: shockwaves.map(({ source }) => source),
     }),
   });
 
@@ -1252,6 +1248,7 @@ async function run(): Promise<void> {
     }
     camera.updateMatrixWorld(true);
     system.setCamera(cameraState(camera, [WIDTH, HEIGHT]));
+    updateWorldShockwaves(camera, post.controls, shockwaves);
     post.controls.setTime(localNow());
   };
 
