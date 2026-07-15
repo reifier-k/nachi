@@ -137,6 +137,16 @@ function makeRuntime(renderer: THREE.WebGPURenderer, backend: BackendLike): VfxR
   return createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
 }
 
+const fixtureCameraMatrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
+
+function configureFixtureCamera(system: Pick<VFXSystem, 'setCamera'>): void {
+  system.setCamera({
+    projectionMatrix: fixtureCameraMatrix,
+    viewMatrix: fixtureCameraMatrix,
+    viewportSize: [1, 1],
+  });
+}
+
 async function capture(instance: {
   readonly debug: {
     captureAttributes(
@@ -154,6 +164,7 @@ async function runStatic(
   options: { readonly position?: Vec3; readonly rotation?: Vec3; readonly step?: number } = {},
 ) {
   const system = new VFXSystem(runtime, undefined, { maxPoolSize: 0 });
+  configureFixtureCamera(system);
   const instance = system.spawn(defineEffect({ elements: { particles: emitter } }), {
     ...(options.position === undefined ? {} : { position: options.position }),
     ...(options.rotation === undefined ? {} : { rotation: options.rotation }),
@@ -255,6 +266,7 @@ async function runMovingVolume(
     aliveCountReadbackInterval: 1,
     maxPoolSize: 0,
   });
+  configureFixtureCamera(system);
   const instance = system.spawn(
     defineEffect({
       elements: { particles: fixtureEmitter({ localPosition: [2, 0, 0], update }) },
@@ -360,6 +372,7 @@ async function runMovingColliderResponse(runtime: VfxRuntimeRenderer) {
     maxPoolSize: 0,
     ...(injected === undefined ? {} : { registry: injected.registry }),
   });
+  configureFixtureCamera(system);
   const instance = system.spawn(
     defineEffect({
       elements: {
@@ -393,6 +406,7 @@ async function runMovingForce(runtime: VfxRuntimeRenderer, partitions: 1 | 4, le
     strength: 1,
   });
   const system = new VFXSystem(runtime, undefined, { maxPoolSize: 0 });
+  configureFixtureCamera(system);
   const instance = system.spawn(
     defineEffect({
       elements: {
@@ -499,6 +513,7 @@ async function runNeighborCurrentClassification(runtime: VfxRuntimeRenderer) {
     maxPoolSize: 0,
     onRuntimeDiagnostic: (diagnostic) => runtimeDiagnostics.push(diagnostic),
   });
+  configureFixtureCamera(system);
   const instance = system.spawn(
     defineEffect({
       elements: {
@@ -589,6 +604,7 @@ async function capturePerformance(): Promise<void> {
       page: '/m12-space/',
     });
     const system = new VFXSystem(runtime, undefined, { maxPoolSize: 0 });
+    configureFixtureCamera(system);
     instance = system.spawn(
       defineEffect({
         elements: {

@@ -846,6 +846,118 @@ describe('three kernel adapter', () => {
     expect(stats.selected.map(({ physicalIndex }) => physicalIndex)).toEqual([7, 1]);
   });
 
+  it('rebinds prepared light-limit diagnostics to the live owner without duplicate delivery', async () => {
+    const definition = defineEmitter({
+      capacity: 4,
+      init: [lifetime(10), lightIntensity(4)],
+      integration: 'none',
+      render: lightRenderer({ maxLights: 2 }),
+      spawn: burst({ count: 4 }),
+    });
+    const program = compileEmitter(definition);
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    const buffer = new ArrayBuffer((1 + 2 * 3) * 4 * Float32Array.BYTES_PER_ELEMENT);
+    const values = new Float32Array(buffer);
+    values[0] = 2;
+    values[1] = 4;
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    const renderer = {
+      _attributes: { delete: vi.fn() },
+      async compileAsync() {},
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return buffer.slice(0);
+      },
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      setMRT: vi.fn(),
+      setRenderTarget: vi.fn(),
+    } as unknown as THREE.WebGPURenderer;
+    const preparedOwner = vi.fn();
+    const liveOwner = vi.fn();
+    const emitter = {
+      definition,
+      kernels,
+      program,
+      reportRuntimeDiagnostic: preparedOwner,
+    } as never;
+    const liveEmitter = {
+      definition,
+      kernels,
+      program,
+      reportRuntimeDiagnostic: liveOwner,
+    } as never;
+    const preparer = createThreeEffectPreparer(renderer, scene, camera);
+
+    await preparer.prepareEmitter({ emitter, key: 'lights' });
+    const draw =
+      preparer.takePreparedDraw<ReturnType<typeof materializeThreeLightDraw>>(liveEmitter);
+    expect(draw).toBeDefined();
+    await draw!.update(renderer);
+    await draw!.update(renderer);
+    await draw!.update(renderer);
+
+    expect(preparedOwner).not.toHaveBeenCalled();
+    expect(liveOwner).toHaveBeenCalledTimes(1);
+    expect(liveOwner).toHaveBeenCalledWith({
+      code: 'NACHI_LIGHT_LIMIT_EXCEEDED',
+      message: expect.stringContaining('4 eligible particle lights exceeded maxLights 2'),
+      path: 'elements.lights.render.maxLights',
+      phase: 'runtime',
+      severity: 'warning',
+    });
+    draw!.dispose(renderer);
+    preparer.dispose();
+  });
+
+  it('gives an explicit Three light handler priority over the system runtime owner', async () => {
+    const definition = defineEmitter({
+      capacity: 2,
+      init: [lifetime(10), lightIntensity(4)],
+      integration: 'none',
+      render: lightRenderer({ maxLights: 1 }),
+      spawn: burst({ count: 2 }),
+    });
+    const program = compileEmitter(definition);
+    const kernels = program.buildKernels(createThreeKernelAdapter());
+    const buffer = new ArrayBuffer((1 + 3) * 4 * Float32Array.BYTES_PER_ELEMENT);
+    const values = new Float32Array(buffer);
+    values[0] = 1;
+    values[1] = 2;
+    const explicit = vi.fn();
+    const owner = vi.fn();
+    const renderer = {
+      _attributes: { delete: vi.fn() },
+      async compileAsync() {},
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return buffer.slice(0);
+      },
+      getMRT: () => null,
+      getRenderTarget: () => null,
+      setMRT: vi.fn(),
+      setRenderTarget: vi.fn(),
+    } as unknown as THREE.WebGPURenderer;
+    const emitter = { definition, kernels, program, reportRuntimeDiagnostic: owner } as never;
+    const preparer = createThreeEffectPreparer(
+      renderer,
+      new THREE.Scene(),
+      new THREE.PerspectiveCamera(),
+      { light: { onDiagnostic: explicit } },
+    );
+
+    await preparer.prepareEmitter({ emitter, key: 'lights' });
+    const draw = preparer.takePreparedDraw<ReturnType<typeof materializeThreeLightDraw>>(emitter);
+    await draw!.update(renderer);
+    await draw!.update(renderer);
+
+    expect(explicit).toHaveBeenCalledTimes(1);
+    expect(owner).not.toHaveBeenCalled();
+    draw!.dispose(renderer);
+    preparer.dispose();
+  });
+
   it('materializes an external @nachi-vfx/trails GPU birth-ring draw', async () => {
     const registry = registerTrails(createCoreKernelModuleRegistry());
     const program = compileEmitter(

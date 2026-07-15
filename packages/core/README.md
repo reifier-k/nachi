@@ -24,6 +24,34 @@ quality and significance controls, simulation bake/replay, debug snapshots, Grid
 grids, boids, and PBD constraints. Backend capability failures are explicit diagnostics; core does
 not silently replace WebGPU behavior with CPU simulation.
 
+## Runtime diagnostic delivery
+
+`VFXSystem` reports runtime failures and warnings when they occur. Omit `onRuntimeDiagnostic` for
+one-line `console.error`/`console.warn` output, pass a function to replace that reporter, or pass
+`null` to silence delivery. The diagnostic is still retained on its owning effect instance when
+delivery is replaced or disabled.
+
+```ts
+const system = new VFXSystem(runtimeRenderer, scene, {
+  onRuntimeDiagnostic: (diagnostic) => telemetry.record(diagnostic),
+});
+
+// Explicitly silent delivery; instance.state and instance.diagnostics still update.
+const quietSystem = new VFXSystem(runtimeRenderer, scene, { onRuntimeDiagnostic: null });
+```
+
+The runtime path covers post-spawn GPU submission and attachment failures, device loss, preparation
+failures, runtime camera/quality/capacity warnings, NeighborGrid warnings, and exact spawn/event
+overflow when alive-count readback is enabled. Spawn-time compile, kernel-build, and resource
+materialization failures remain on `onBuildDiagnostic`; this includes
+`NACHI_RUNTIME_MATERIALIZATION_FAILED` despite its historical name. Runtime delivery does not add a
+readback: with `aliveCountReadbackInterval` omitted, exact free-list and event overflow remain
+unreported. Device loss is delivered once per system occurrence while every affected instance
+stores it. A throwing replacement handler is contained, records
+`NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED` on an owning instance, and is retried for later diagnostics.
+An ownerless system source has no instance storage target, so its failure fallback is console-only
+and limited to once per system. Build diagnostics remain exclusively owned by `onBuildDiagnostic`.
+
 ## Measured update deltas
 
 `system.update()` without an argument measures elapsed wall time. The first omitted call advances

@@ -245,6 +245,15 @@ async function run(): Promise<void> {
   const camera = new THREE.OrthographicCamera(-3, 3, 2.25, -2.25, 0.1, 20);
   camera.position.set(0, 0, 5);
   camera.lookAt(0, 0, 0);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const configureSystemCamera = (system: VFXSystem): void => {
+    system.setCamera({
+      projectionMatrix: camera.projectionMatrix.elements,
+      viewMatrix: camera.matrixWorldInverse.elements,
+      viewportSize: [WIDTH, HEIGHT],
+    });
+  };
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   const atlasRef = textureRef('procedural://m3-sprites/flipbook-atlas');
   const atlasTexture = new THREE.DataTexture(
@@ -306,6 +315,7 @@ async function run(): Promise<void> {
       aliveCountReadbackInterval: 1,
       fixedTimeStep: { stepSeconds: STEP },
     });
+    configureSystemCamera(system);
     const instance = system.spawn(spriteEffect(options), { seed: 41 }) as RuntimeInstance;
     const view = emitter(instance);
     const mesh = materializeThreeSpriteDraw(view.program, view.kernels, 0, { resolveTexture });
@@ -468,6 +478,7 @@ async function run(): Promise<void> {
     aliveCountReadbackInterval: 1,
     fixedTimeStep: { stepSeconds: STEP },
   });
+  configureSystemCamera(lifecycleSystem);
   const lifecycleInstance = lifecycleSystem.spawn(
     spriteEffect({
       capacity: 3,
@@ -493,6 +504,7 @@ async function run(): Promise<void> {
     aliveCountReadbackInterval: 1,
     fixedTimeStep: { stepSeconds: STEP },
   });
+  configureSystemCamera(regressionSystem);
   const regressionInstance = regressionSystem.spawn(
     defineEffect({
       elements: {
@@ -531,6 +543,7 @@ async function run(): Promise<void> {
     aliveCountReadbackInterval: 1,
     fixedTimeStep: { stepSeconds: STEP },
   });
+  configureSystemCamera(burstCycleSystem);
   const burstCycleInstance = burstCycleSystem.spawn(
     defineEffect({
       elements: {
@@ -591,6 +604,7 @@ async function run(): Promise<void> {
       aliveCountReadbackInterval: 1,
       fixedTimeStep: { stepSeconds: STEP },
     });
+    configureSystemCamera(system);
     const instance = system.spawn(updateRandomRangeEffect(capacity), {
       seed: 0x51a7_0e11,
     }) as RuntimeInstance;
@@ -723,7 +737,9 @@ async function run(): Promise<void> {
     const routeSystem = new VFXSystem(runtimeRenderer, undefined, {
       aliveCountReadbackInterval: 1,
       maxPoolSize: 0,
+      onRuntimeDiagnostic: null,
     });
+    configureSystemCamera(routeSystem);
     const routeInstance = routeSystem.spawn(defineEffect({ elements }), { seed: 0x2e71 });
     try {
       await routeSystem.update(0);
@@ -882,6 +898,7 @@ async function run(): Promise<void> {
   const performanceSystem = new VFXSystem(performanceRuntimeRenderer, undefined, {
     fixedTimeStep: { stepSeconds: STEP },
   });
+  configureSystemCamera(performanceSystem);
   const performanceInstance = performanceSystem.spawn(updateRandomRangeEffect(32), {
     seed: 0x51a7_0e11,
   }) as RuntimeInstance;

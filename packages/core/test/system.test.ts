@@ -9,6 +9,7 @@ import {
   FixedStepAccumulator,
   SPAWN_ORDER_WRAP_WARNING_THRESHOLD,
   VFXSystem,
+  VfxEffectInstance,
   VfxDiagnosticError,
   TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
   attribute,
@@ -54,6 +55,7 @@ import {
   replaySimulation,
   sortEmittersBackToFront,
   tslModule,
+  type VfxDiagnostic,
 } from '../src/index.js';
 
 describe('M10 coarse transparency order', () => {
@@ -2219,7 +2221,11 @@ describe('VFXSystem runtime scheduler', () => {
 
   it('rejects preparation when pooling is disabled instead of retaining dead draw anchors', async () => {
     const renderer = new FakeRuntimeRenderer();
-    const system = new VFXSystem(renderer, undefined, { maxPoolSize: 0 });
+    const delivered: string[] = [];
+    const system = new VFXSystem(renderer, undefined, {
+      maxPoolSize: 0,
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
 
     await expect(system.prepare(runtimeEffect({ duration: 1 }))).rejects.toMatchObject({
       diagnostics: [expect.objectContaining({ code: 'NACHI_PREPARE_POOLING_DISABLED' })],
@@ -2227,6 +2233,7 @@ describe('VFXSystem runtime scheduler', () => {
 
     expect(renderer.submissions).toEqual([]);
     expect(system.instanceCount).toBe(0);
+    expect(delivered).toEqual(['NACHI_PREPARE_POOLING_DISABLED']);
   });
 
   it('reuses prepared Grid2D kernel nodes on the next live spawn', async () => {
@@ -2286,7 +2293,10 @@ describe('VFXSystem runtime scheduler', () => {
 
   it('aborts preparation cleanly without retaining a partial resource bundle', async () => {
     const renderer = new FakeRuntimeRenderer();
-    const system = new VFXSystem(renderer);
+    const delivered: string[] = [];
+    const system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
     const effect = runtimeEffect({ duration: 1 });
     const controller = new AbortController();
     const discardEmitter = vi.fn();
@@ -2306,6 +2316,7 @@ describe('VFXSystem runtime scheduler', () => {
     expect(system.getPooledInstanceCount(effect)).toBe(0);
     expect(renderer.releaseCount).toBe(1);
     expect(discardEmitter).toHaveBeenCalledTimes(1);
+    expect(delivered).toEqual(['NACHI_PREPARE_FAILED']);
   });
 
   it('initializes the free list, spawns indirectly, and updates on time advances', async () => {
@@ -2728,6 +2739,39 @@ describe('VFXSystem runtime scheduler', () => {
     expect(system.getPooledInstanceCount(stopped.definition)).toBe(1);
   });
 
+  it('delivers release-time pool warnings and retains non-recursive handler failures', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let handlerCalls = 0;
+    try {
+      const definition = runtimeEffect({ duration: 1 });
+      const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+        maxPoolSize: 1,
+        onRuntimeDiagnostic: () => {
+          handlerCalls += 1;
+          throw new Error('release diagnostic handler failed');
+        },
+      });
+      system.spawn(definition).release();
+      const overflow = system.spawn(definition);
+      const fillsPool = system.spawn(definition);
+      fillsPool.release();
+      overflow.release();
+
+      expect(overflow.state).toBe('released');
+      expect(overflow.diagnostics.map(({ code }) => code)).toEqual([
+        'NACHI_EFFECT_POOL_LIMIT_EXCEEDED',
+        'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+      ]);
+      expect(handlerCalls).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('[NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED]'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('retires overflow kernels only after a timeline-style stop/release update and safely reuses the pool', async () => {
     const renderer = new ReleaseOrderingRenderer();
     const definition = runtimeEffect({ duration: 1 });
@@ -2863,6 +2907,96 @@ describe('VFXSystem runtime scheduler', () => {
     expect(renderer.releaseCount).toBe(1);
   });
 
+  it('delivers runtime failures once through default, replacement, and null handlers', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const defaultRenderer = new FakeRuntimeRenderer();
+      defaultRenderer.failNextSubmission = true;
+      const defaultSystem = new VFXSystem(defaultRenderer);
+      const defaultInstance = defaultSystem.spawn(runtimeEffect({ duration: 1 }));
+      await defaultSystem.update(0);
+      expect(defaultInstance.state).toBe('error');
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[NACHI_GPU_SUBMISSION_FAILED\].*elements\.particles/),
+      );
+
+      error.mockClear();
+      const delivered: string[] = [];
+      const replacementRenderer = new FakeRuntimeRenderer();
+      replacementRenderer.failNextSubmission = true;
+      const replacementSystem = new VFXSystem(replacementRenderer, undefined, {
+        onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+      });
+      const replacementInstance = replacementSystem.spawn(runtimeEffect({ duration: 1 }));
+      await replacementSystem.update(0);
+      expect(delivered).toEqual(['NACHI_GPU_SUBMISSION_FAILED']);
+      expect(replacementInstance.diagnostics.map(({ code }) => code)).toContain(
+        'NACHI_GPU_SUBMISSION_FAILED',
+      );
+      expect(error).not.toHaveBeenCalled();
+
+      const nullRenderer = new FakeRuntimeRenderer();
+      nullRenderer.failNextSubmission = true;
+      const nullSystem = new VFXSystem(nullRenderer, undefined, { onRuntimeDiagnostic: null });
+      const nullInstance = nullSystem.spawn(runtimeEffect({ duration: 1 }));
+      await nullSystem.update(0);
+      expect(nullInstance.state).toBe('error');
+      expect(nullInstance.diagnostics.map(({ code }) => code)).toContain(
+        'NACHI_GPU_SUBMISSION_FAILED',
+      );
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('contains a throwing runtime handler, retries later diagnostics, and separates ownerless fallback', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let calls = 0;
+    try {
+      const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+        maxPoolSize: 0,
+        onRuntimeDiagnostic: () => {
+          calls += 1;
+          throw new Error('synthetic runtime handler failure');
+        },
+      });
+      const instance = system.spawn(runtimeEffect({ duration: 1 }));
+      instance.recordDiagnostic({
+        code: 'NACHI_TEST_RUNTIME_WARNING_A',
+        message: 'first warning',
+        phase: 'runtime',
+        severity: 'warning',
+      });
+      instance.recordDiagnostic({
+        code: 'NACHI_TEST_RUNTIME_WARNING_B',
+        message: 'second warning',
+        phase: 'runtime',
+        severity: 'warning',
+      });
+
+      expect(calls).toBe(2);
+      expect(
+        instance.diagnostics.filter(
+          ({ code }) => code === 'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+        ),
+      ).toHaveLength(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('[NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED]'),
+      );
+
+      await expect(system.prepare(runtimeEffect({ duration: 1 }))).rejects.toBeInstanceOf(
+        VfxDiagnosticError,
+      );
+      expect(calls).toBe(3);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it.each([
     'grid2d',
     'grid3d',
@@ -2985,7 +3119,10 @@ describe('VFXSystem runtime scheduler', () => {
   });
 
   it('contains attachment-source failures per instance and tolerates self-release callbacks', async () => {
-    const system = new VFXSystem(new FakeRuntimeRenderer());
+    const delivered: string[] = [];
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
     const broken = system.spawn(runtimeEffect({ duration: 1 }));
     const healthy = system.spawn(runtimeEffect({ duration: 1 }));
     let calls = 0;
@@ -3002,6 +3139,7 @@ describe('VFXSystem runtime scheduler', () => {
     expect(broken.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_ATTACHMENT_SOURCE_FAILED' }),
     );
+    expect(delivered).toEqual(['NACHI_ATTACHMENT_SOURCE_FAILED']);
     expect(healthy.localTime).toBeCloseTo(0.1);
 
     const selfReleasing = system.spawn(runtimeEffect({ duration: 1 }));
@@ -3095,7 +3233,7 @@ describe('VFXSystem runtime scheduler', () => {
     );
   });
 
-  it('propagates device loss to every live instance', async () => {
+  it('stores device loss on every instance but delivers the shared source once per system', async () => {
     let loseDevice!: (info: VfxDeviceLossInfo) => void;
     const deviceLost = new Promise<VfxDeviceLossInfo>((resolve) => {
       loseDevice = resolve;
@@ -3106,13 +3244,130 @@ describe('VFXSystem runtime scheduler', () => {
       kernelAdapter: base.kernelAdapter,
       submitCompute: (kernel) => base.submitCompute(kernel),
     };
-    const system = new VFXSystem(renderer);
-    const instance = system.spawn(runtimeEffect({ duration: 1 }));
+    const delivered: string[] = [];
+    const observations: Array<{
+      readonly instanceCodes: readonly string[];
+      readonly instanceState: string;
+      readonly siblingCodes: readonly string[];
+      readonly siblingState: string;
+    }> = [];
+    let instance!: { readonly diagnostics: readonly VfxDiagnostic[]; readonly state: string };
+    let sibling!: { readonly diagnostics: readonly VfxDiagnostic[]; readonly state: string };
+    const system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: ({ code }) => {
+        delivered.push(code);
+        observations.push({
+          instanceCodes: instance.diagnostics.map((diagnostic) => diagnostic.code),
+          instanceState: instance.state,
+          siblingCodes: sibling.diagnostics.map((diagnostic) => diagnostic.code),
+          siblingState: sibling.state,
+        });
+      },
+    });
+    instance = system.spawn(runtimeEffect({ duration: 1 }));
+    sibling = system.spawn(runtimeEffect({ duration: 1 }));
     loseDevice({ message: 'test loss', reason: 'destroyed' });
     await deviceLost;
     await Promise.resolve();
     expect(instance.state).toBe('error');
     expect(instance.diagnostics.at(-1)).toMatchObject({ code: 'NACHI_DEVICE_LOST' });
+    expect(sibling.state).toBe('error');
+    expect(sibling.diagnostics.at(-1)).toMatchObject({ code: 'NACHI_DEVICE_LOST' });
+    expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
+    expect(observations).toEqual([
+      {
+        instanceCodes: ['NACHI_DEVICE_LOST'],
+        instanceState: 'error',
+        siblingCodes: ['NACHI_DEVICE_LOST'],
+        siblingState: 'error',
+      },
+    ]);
+
+    const late = system.spawn(runtimeEffect({ duration: 1 }));
+    expect(late.state).toBe('error');
+    expect(late.diagnostics.at(-1)).toMatchObject({ code: 'NACHI_DEVICE_LOST' });
+    expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
+  });
+
+  it('latches live-owner device loss before a handler reentrantly spawns an instance', async () => {
+    let loseDevice!: (info: VfxDeviceLossInfo) => void;
+    const deviceLost = new Promise<VfxDeviceLossInfo>((resolve) => {
+      loseDevice = resolve;
+    });
+    const base = new FakeRuntimeRenderer();
+    const renderer: VfxRuntimeRenderer = {
+      deviceLost,
+      kernelAdapter: base.kernelAdapter,
+      submitCompute: (kernel) => base.submitCompute(kernel),
+    };
+    const delivered: string[] = [];
+    let reentrant:
+      | { readonly diagnostics: readonly VfxDiagnostic[]; readonly state: string }
+      | undefined;
+    let system!: VFXSystem;
+    system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: ({ code }) => {
+        delivered.push(code);
+        reentrant = system.spawn(runtimeEffect({ duration: 1 }));
+      },
+    });
+    const owner = system.spawn(runtimeEffect({ duration: 1 }));
+
+    loseDevice({ reason: 'destroyed' });
+    await deviceLost;
+    await Promise.resolve();
+
+    expect(owner.state).toBe('error');
+    expect(owner.diagnostics.map(({ code }) => code)).toEqual(['NACHI_DEVICE_LOST']);
+    expect(reentrant?.state).toBe('error');
+    expect(reentrant?.diagnostics.map(({ code }) => code)).toEqual(['NACHI_DEVICE_LOST']);
+    expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
+  });
+
+  it('stores device loss before containing a throwing shared-source handler', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let loseDevice!: (info: VfxDeviceLossInfo) => void;
+    const deviceLost = new Promise<VfxDeviceLossInfo>((resolve) => {
+      loseDevice = resolve;
+    });
+    const base = new FakeRuntimeRenderer();
+    const renderer: VfxRuntimeRenderer = {
+      deviceLost,
+      kernelAdapter: base.kernelAdapter,
+      submitCompute: (kernel) => base.submitCompute(kernel),
+    };
+    let instance!: { readonly diagnostics: readonly VfxDiagnostic[]; readonly state: string };
+    let sibling!: { readonly diagnostics: readonly VfxDiagnostic[]; readonly state: string };
+    const observations: string[][] = [];
+    try {
+      const system = new VFXSystem(renderer, undefined, {
+        onRuntimeDiagnostic: () => {
+          observations.push([
+            instance.state,
+            instance.diagnostics.at(-1)?.code ?? '',
+            sibling.state,
+            sibling.diagnostics.at(-1)?.code ?? '',
+          ]);
+          throw new Error('device loss handler failed');
+        },
+      });
+      instance = system.spawn(runtimeEffect({ duration: 1 }));
+      sibling = system.spawn(runtimeEffect({ duration: 1 }));
+
+      loseDevice({ reason: 'destroyed' });
+      await deviceLost;
+      await Promise.resolve();
+
+      expect(observations).toEqual([['error', 'NACHI_DEVICE_LOST', 'error', 'NACHI_DEVICE_LOST']]);
+      expect(instance.diagnostics.map(({ code }) => code)).toEqual([
+        'NACHI_DEVICE_LOST',
+        'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+      ]);
+      expect(sibling.diagnostics.map(({ code }) => code)).toEqual(['NACHI_DEVICE_LOST']);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('validates mutable runtime parameters', () => {
@@ -3242,16 +3497,79 @@ describe('VFXSystem runtime scheduler', () => {
       submitCompute: (kernel) => base.submitCompute(kernel),
       submitComputeIndirect: (kernel) => base.submitCompute(kernel),
     };
-    const system = new VFXSystem(renderer);
+    const delivered: string[] = [];
+    const observations: string[][] = [];
+    let storedOwner:
+      | { readonly diagnostics: readonly VfxDiagnostic[]; readonly state: string }
+      | undefined;
+    const originalStore = VfxEffectInstance.prototype.markErrorWithoutRuntimeDelivery;
+    const store = vi
+      .spyOn(VfxEffectInstance.prototype, 'markErrorWithoutRuntimeDelivery')
+      .mockImplementation(function (this: VfxEffectInstance, diagnostic) {
+        originalStore.call(this, diagnostic);
+        storedOwner = this;
+      });
+    const system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: ({ code }) => {
+        delivered.push(code);
+        observations.push([storedOwner?.state ?? '', storedOwner?.diagnostics.at(-1)?.code ?? '']);
+      },
+    });
     loseDevice({ reason: 'destroyed' });
     await deviceLost;
     await Promise.resolve();
+    expect(delivered).toEqual([]);
 
     const instance = system.spawn(runtimeEffect({ duration: 1 }));
     expect(instance.state).toBe('error');
     expect(instance.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_DEVICE_LOST' }),
     );
+    expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
+    expect(observations).toEqual([['error', 'NACHI_DEVICE_LOST']]);
+    const second = system.spawn(runtimeEffect({ duration: 1 }));
+    expect(second.state).toBe('error');
+    expect(second.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_DEVICE_LOST' }),
+    );
+    expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
+    store.mockRestore();
+  });
+
+  it('latches zero-live device loss before the first late-spawn handler reentrantly spawns', async () => {
+    let loseDevice!: (info: VfxDeviceLossInfo) => void;
+    const deviceLost = new Promise<VfxDeviceLossInfo>((resolve) => {
+      loseDevice = resolve;
+    });
+    const base = new FakeRuntimeRenderer();
+    const renderer: VfxRuntimeRenderer = {
+      deviceLost,
+      kernelAdapter: base.kernelAdapter,
+      submitCompute: (kernel) => base.submitCompute(kernel),
+    };
+    const delivered: string[] = [];
+    let reentrant:
+      | { readonly diagnostics: readonly VfxDiagnostic[]; readonly state: string }
+      | undefined;
+    let system!: VFXSystem;
+    system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: ({ code }) => {
+        delivered.push(code);
+        reentrant = system.spawn(runtimeEffect({ duration: 1 }));
+      },
+    });
+
+    loseDevice({ reason: 'destroyed' });
+    await deviceLost;
+    await Promise.resolve();
+    expect(delivered).toEqual([]);
+
+    const firstLate = system.spawn(runtimeEffect({ duration: 1 }));
+    expect(firstLate.state).toBe('error');
+    expect(firstLate.diagnostics.map(({ code }) => code)).toEqual(['NACHI_DEVICE_LOST']);
+    expect(reentrant?.state).toBe('error');
+    expect(reentrant?.diagnostics.map(({ code }) => code)).toEqual(['NACHI_DEVICE_LOST']);
+    expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
   });
 
   it('accumulates fractional rate spawn under fixed timesteps', async () => {
@@ -3389,7 +3707,11 @@ describe('VFXSystem runtime scheduler', () => {
       submitCompute: (kernel) => base.submitCompute(kernel),
       submitComputeIndirect: (kernel) => base.submitCompute(kernel),
     };
-    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 2 });
+    const delivered: string[] = [];
+    const system = new VFXSystem(renderer, undefined, {
+      aliveCountReadbackInterval: 2,
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
     const instance = system.spawn(runtimeEffect({ duration: 1 }));
     const offsets = instance.getEmitter('particles')?.kernels.counterOffsets;
     aliveOffset = offsets?.aliveCount ?? 0;
@@ -3400,6 +3722,7 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_SPAWN_CAPACITY_EXCEEDED' }),
     );
+    expect(delivered).toEqual(['NACHI_SPAWN_CAPACITY_EXCEEDED']);
   });
 
   it('warns once when readback observes spawnOrder at the u32 half-range', async () => {
@@ -4285,7 +4608,11 @@ describe('VFXSystem runtime scheduler', () => {
 
   it('reports append overflow without exposing particle payloads to JavaScript', async () => {
     const renderer = new MappedReadbackRenderer();
-    const system = new VFXSystem(renderer, undefined, { aliveCountReadbackInterval: 1 });
+    const delivered: string[] = [];
+    const system = new VFXSystem(renderer, undefined, {
+      aliveCountReadbackInterval: 1,
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
     const instance = system.spawn(eventEffect());
     await system.update(0);
     const state = instance.getEmitter('sparks')!.kernels.eventOutputs.onDeath!.state;
@@ -4295,6 +4622,7 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'NACHI_EVENT_QUEUE_OVERFLOW', severity: 'warning' }),
     );
+    expect(delivered).toContain('NACHI_EVENT_QUEUE_OVERFLOW');
   });
 
   it('diagnoses inherited payload type mismatches between effect emitters', () => {
@@ -4378,10 +4706,17 @@ describe('VFXSystem runtime scheduler', () => {
 
   it('performs no event counter readback when the interval is omitted', async () => {
     const renderer = new MappedReadbackRenderer();
-    const system = new VFXSystem(renderer);
-    system.spawn(eventEffect());
+    const delivered: string[] = [];
+    const system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
+    const instance = system.spawn(eventEffect());
     await system.update(0.1);
     expect(renderer.readCount).toBe(0);
+    expect(instance.diagnostics.map(({ code }) => code)).not.toContain(
+      'NACHI_EVENT_QUEUE_OVERFLOW',
+    );
+    expect(delivered).not.toContain('NACHI_EVENT_QUEUE_OVERFLOW');
   });
 
   it('surfaces onCustom as an explicit compile diagnostic at spawn', () => {

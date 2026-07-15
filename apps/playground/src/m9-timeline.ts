@@ -873,11 +873,13 @@ async function stressProbe(runtime: ReturnType<typeof createThreeRuntimeRenderer
   });
   const instance = system.spawn(stressEffect, { seed: 99 });
   for (let frame = 0; frame < 600; frame += 1) await system.update(STEP);
-  return {
+  const result = {
     diagnostics: instance.diagnostics.map(({ code }) => code),
     playing: instance.getElementState('particles')?.playing === true,
     worldTime: system.time,
   };
+  instance.release();
+  return result;
 }
 
 async function measurePerformance(): Promise<void> {
@@ -893,7 +895,7 @@ async function measurePerformance(): Promise<void> {
   );
   const scene = new THREE.Scene();
   const system = new VFXSystem(runtime, scene, { aliveCountReadbackInterval: 1 });
-  system.spawn(createSkillSlash(noiseTexture()), { seed: 42 });
+  const instance = system.spawn(createSkillSlash(noiseTexture()), { seed: 42 });
   const monitor = createPerformanceMonitor(renderer, {
     gpuScopes: ['compute', 'render'],
     mode: headless ? 'headless' : 'visual',
@@ -911,6 +913,7 @@ async function measurePerformance(): Promise<void> {
   });
   renderer.setRenderTarget(null);
   target.dispose();
+  instance.release();
   renderer.dispose();
 }
 
@@ -1097,6 +1100,7 @@ async function run(): Promise<void> {
   required<HTMLElement>('#contract-value').textContent = ok ? 'all checks passed' : 'failed';
   target.dispose();
   lightDraw.dispose();
+  instance.release();
   renderer.dispose();
 }
 

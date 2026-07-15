@@ -103,3 +103,10 @@ be false and diagnostics must remain clean. `?backend=webgl` is the explicit neg
 publish both `NACHI_PARTICLE_SORT_WEBGL2_UNSUPPORTED` and `NACHI_WBOIT_WEBGL2_UNSUPPORTED` as
 successful structured checks. Optional `?quality=low` or `?quality=medium` keeps the M10 perf
 fixture's particle count fixed while proving the sorted-off budget path.
+
+The permanent `/m10-lit/` fixture also prepares and transfers a real bounded particle-light draw.
+It requires one live-owner `NACHI_LIGHT_LIMIT_EXCEEDED` callback, no callback on the temporary
+preparation owner, and clean default-console diagnostics. The isolated
+`?forceFailure=runtime-light-diagnostic` fault preserves the measured candidate/selection and
+delivery evidence but makes only `preparedLightDiagnostic=false`; direct `spike-runner.mjs`
+execution must fail.

@@ -86,3 +86,11 @@ instance when changed. Parameter values are retained by the binding only after c
 forwarding succeeds. Keep `definition` at module scope (or otherwise referentially stable), because
 a new reference respawns the instance. `attachTo` owns the complete live transform and overwrites
 position and rotation supplied at spawn or through props on each scheduled step.
+
+Core contains per-instance runtime failures, so the provider's frame update may resolve even when
+an instance transitions to `state === 'error'`. The mounted instance object is mutable: retain it
+from `useEffectInstance()` (or an `onInstance` integration callback) and inspect `state` and
+`diagnostics` after the update. The binding keeps the component mounted, but stops forwarding later
+parameter, transform, time-scale, and attachment writes once the instance is no longer active.
+Configure `onRuntimeDiagnostic` on the system when the error must also reach logging or telemetry;
+the React provider does not turn contained instance errors into render or frame-loop exceptions.

@@ -43,6 +43,7 @@ import {
 } from '../src/index.js';
 import { cloneTimelineFxMaterial } from '../src/authoring.js';
 import { timelineCoreOptions } from '../src/runtime.js';
+import { TimelineEffectInstance } from '../src/runtime.js';
 
 function mesh(duration = 1) {
   return meshFxElement(
@@ -566,7 +567,10 @@ describe('@nachi-vfx/timeline runtime', () => {
       elements: {},
       timeline: timeline([at(0.09, marker('explode'))], { duration: 0.2 }),
     });
-    const system = new VFXSystem({});
+    const delivered: string[] = [];
+    const system = new VFXSystem({}, undefined, {
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
     const instance = system.spawn(effect);
     instance.onAction(() => {
       throw new Error('gameplay callback failed');
@@ -582,6 +586,76 @@ describe('@nachi-vfx/timeline runtime', () => {
         phase: 'runtime',
       }),
     );
+    expect(delivered).toEqual(['NACHI_TIMELINE_ACTION_CALLBACK_FAILED']);
+  });
+
+  it('uses default, null, and throwing runtime delivery for timeline-owned failures', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const effect = defineEffect({
+      elements: {},
+      timeline: timeline([at(0, marker('fail'))], { duration: 0.1 }),
+    });
+    const spawnFailing = (system: VFXSystem<unknown, unknown>) => {
+      const instance = system.spawn(effect);
+      instance.onAction(() => {
+        throw new Error('timeline delivery probe');
+      });
+      return instance;
+    };
+    try {
+      const defaultSystem = new VFXSystem({});
+      const defaultInstance = spawnFailing(defaultSystem);
+      await defaultSystem.update(0);
+      expect(defaultInstance.state).toBe('error');
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining('[NACHI_TIMELINE_ACTION_CALLBACK_FAILED]'),
+      );
+
+      error.mockClear();
+      const nullSystem = new VFXSystem({}, undefined, { onRuntimeDiagnostic: null });
+      const nullInstance = spawnFailing(nullSystem);
+      await nullSystem.update(0);
+      expect(nullInstance.state).toBe('error');
+      expect(error).not.toHaveBeenCalled();
+
+      let calls = 0;
+      const throwingSystem = new VFXSystem({}, undefined, {
+        onRuntimeDiagnostic: () => {
+          calls += 1;
+          throw new Error('timeline runtime handler failed');
+        },
+      });
+      const throwingInstance = spawnFailing(throwingSystem);
+      await throwingSystem.update(0);
+      expect(calls).toBe(1);
+      expect(
+        throwingInstance.diagnostics.filter(
+          ({ code }) => code === 'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+        ),
+      ).toHaveLength(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('[NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED]'),
+      );
+
+      await expect(
+        throwingSystem.prepare(defineEffect({ elements: { prepared: mesh() } }), {
+          preparer: {
+            prepareEmitter: vi.fn(),
+            prepareObject: () => {
+              throw new Error('ownerless timeline prepare failure');
+            },
+          },
+        }),
+      ).rejects.toThrow('ownerless timeline prepare failure');
+      expect(calls).toBe(2);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('contains per-instance integration failures while unrelated instances keep advancing', async () => {
@@ -589,7 +663,10 @@ describe('@nachi-vfx/timeline runtime', () => {
       elements: {},
       timeline: timeline([at(0.2, marker('done'))], { duration: 0.2 }),
     });
-    const system = new VFXSystem({});
+    const delivered: string[] = [];
+    const system = new VFXSystem({}, undefined, {
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
     const failing = system.spawn(effect);
     let attachmentReads = 0;
     failing.attachTo({
@@ -611,6 +688,41 @@ describe('@nachi-vfx/timeline runtime', () => {
       }),
     );
     expect(healthy.localTime).toBeCloseTo(0.12, 10);
+    expect(delivered).toEqual(['NACHI_TIMELINE_INSTANCE_UPDATE_FAILED']);
+  });
+
+  it('copies an already-delivered child diagnostic without timeline redelivery', () => {
+    const childDiagnostic: VfxDiagnostic = {
+      code: 'NACHI_GPU_SUBMISSION_FAILED',
+      message: 'child core already delivered this failure',
+      phase: 'runtime',
+      severity: 'error',
+    };
+    const child = fakeChildInstance('error', [childDiagnostic]).child;
+    const delivered: string[] = [];
+    const instance = new TimelineEffectInstance(
+      defineEffect({
+        elements: {
+          child: defineEmitter({
+            capacity: 1,
+            render: billboard({}),
+            spawn: burst({ count: 0 }),
+          }),
+        },
+      }),
+      'timeline-child-copy',
+      undefined,
+      {},
+      undefined,
+      () => child,
+      (_owner, diagnostic) => delivered.push(diagnostic.code),
+    );
+
+    instance.beginUpdate();
+
+    expect(instance.state).toBe('error');
+    expect(instance.diagnostics).toEqual([childDiagnostic]);
+    expect(delivered).toEqual([]);
   });
 
   it('plays every element for an effect without an authored timeline', async () => {
@@ -1556,7 +1668,10 @@ describe('@nachi-vfx/timeline runtime', () => {
     const sourceGeometryDisposed = vi.fn();
     sourceMaterial.addEventListener('dispose', sourceMaterialDisposed);
     source.geometry.addEventListener('dispose', sourceGeometryDisposed);
-    const system = new VFXSystem({}, new THREE.Scene());
+    const delivered: string[] = [];
+    const system = new VFXSystem({}, new THREE.Scene(), {
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
 
     let ordinaryObject: MeshFxMesh | undefined;
     const ordinaryDisposed = vi.fn();
@@ -1591,6 +1706,7 @@ describe('@nachi-vfx/timeline runtime', () => {
     expect(thrownObject?.geometry).toBe(source.geometry);
     expect(thrownObject?.material).not.toBe(sourceMaterial);
     expect(thrownDisposed).toHaveBeenCalledTimes(1);
+    expect(delivered).toEqual(['NACHI_TIMELINE_PREPARE_FAILED']);
 
     const controller = new AbortController();
     let abortedObject: MeshFxMesh | undefined;
@@ -1612,6 +1728,7 @@ describe('@nachi-vfx/timeline runtime', () => {
     expect(abortedObject?.geometry).toBe(source.geometry);
     expect(abortedObject?.material).not.toBe(sourceMaterial);
     expect(abortedDisposed).toHaveBeenCalledTimes(1);
+    expect(delivered).toEqual(['NACHI_TIMELINE_PREPARE_FAILED', 'NACHI_TIMELINE_PREPARE_FAILED']);
 
     let retainedObject: MeshFxMesh | undefined;
     const retainedDisposed = vi.fn();
@@ -1646,8 +1763,21 @@ describe('@nachi-vfx/timeline runtime', () => {
       elements: {},
       timeline: timeline<never>([], { duration: 0.000001, loop: true }),
     });
-    const system = new VFXSystem({});
-    const instance = system.spawn(effect);
+    const delivered: string[] = [];
+    const observations: string[][] = [];
+    let instance!: { readonly diagnostics: readonly VfxDiagnostic[] };
+    let sibling!: { readonly diagnostics: readonly VfxDiagnostic[] };
+    const system = new VFXSystem({}, undefined, {
+      onRuntimeDiagnostic: ({ code }) => {
+        delivered.push(code);
+        observations.push([
+          instance.diagnostics.at(-1)?.code ?? '',
+          sibling.diagnostics.at(-1)?.code ?? '',
+        ]);
+      },
+    });
+    instance = system.spawn(effect);
+    sibling = system.spawn(effect);
 
     await expect(system.update(0.010001)).resolves.toBeUndefined();
     expect(instance.diagnostics).toContainEqual(
@@ -1656,6 +1786,53 @@ describe('@nachi-vfx/timeline runtime', () => {
         severity: 'warning',
       }),
     );
+    expect(sibling.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_TIMELINE_BOUNDARY_OVERFLOW' }),
+    );
+    expect(delivered).toEqual(['NACHI_TIMELINE_BOUNDARY_OVERFLOW']);
+    expect(observations).toEqual([
+      ['NACHI_TIMELINE_BOUNDARY_OVERFLOW', 'NACHI_TIMELINE_BOUNDARY_OVERFLOW'],
+    ]);
     expect(system.time).toBeLessThan(0.010001);
+  });
+
+  it('stores shared boundary overflow before containing a throwing handler', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const effect = defineEffect({
+      elements: {},
+      timeline: timeline<never>([], { duration: 0.000001, loop: true }),
+    });
+    let instance!: { readonly diagnostics: readonly VfxDiagnostic[] };
+    let sibling!: { readonly diagnostics: readonly VfxDiagnostic[] };
+    const observations: string[][] = [];
+    try {
+      const system = new VFXSystem({}, undefined, {
+        onRuntimeDiagnostic: () => {
+          observations.push([
+            instance.diagnostics.at(-1)?.code ?? '',
+            sibling.diagnostics.at(-1)?.code ?? '',
+          ]);
+          throw new Error('timeline boundary handler failed');
+        },
+      });
+      instance = system.spawn(effect);
+      sibling = system.spawn(effect);
+
+      await expect(system.update(0.010001)).resolves.toBeUndefined();
+
+      expect(observations).toEqual([
+        ['NACHI_TIMELINE_BOUNDARY_OVERFLOW', 'NACHI_TIMELINE_BOUNDARY_OVERFLOW'],
+      ]);
+      expect(instance.diagnostics.map(({ code }) => code)).toEqual([
+        'NACHI_TIMELINE_BOUNDARY_OVERFLOW',
+        'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+      ]);
+      expect(sibling.diagnostics.map(({ code }) => code)).toEqual([
+        'NACHI_TIMELINE_BOUNDARY_OVERFLOW',
+      ]);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -362,6 +362,7 @@ async function run() {
   if (webgpu) {
     root.dataset.expectedDiagnostics = JSON.stringify([
       { text: '[NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT]', type: 'warning' },
+      { text: '[NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED]', type: 'warning' },
     ]);
   }
   required<HTMLElement>('#backend-value').textContent = root.dataset.backend;
@@ -467,6 +468,13 @@ async function run() {
         performanceRenderer.setRenderTarget(performanceTarget);
         const performanceScene = new THREE.Scene();
         const performanceCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+        performanceCamera.updateProjectionMatrix();
+        performanceCamera.updateMatrixWorld(true);
+        performanceSystem.setCamera({
+          projectionMatrix: performanceCamera.projectionMatrix.elements,
+          viewMatrix: performanceCamera.matrixWorldInverse.elements,
+          viewportSize: [1, 1],
+        });
         await performanceMonitor.captureGpuSamples(async () => {
           await performanceSystem.update(1 / 60);
           performanceRenderer.render(performanceScene, performanceCamera);
@@ -485,6 +493,18 @@ async function run() {
   // known WebGL2 rejection diagnostics (correctness + performance systems); every other build
   // diagnostic remains an unexpected console failure.
   const countSystem = new VFXSystem(runtime);
+  const countCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  countCamera.updateProjectionMatrix();
+  countCamera.updateMatrixWorld(true);
+  const testCamera = {
+    projectionMatrix: countCamera.projectionMatrix.elements,
+    viewMatrix: countCamera.matrixWorldInverse.elements,
+    viewportSize: [1, 1],
+  } as const;
+  const configureTestCamera = (system: Pick<typeof countSystem, 'setCamera'>): void => {
+    system.setCamera(testCamera);
+  };
+  configureTestCamera(countSystem);
   const countInstance = webgpu
     ? countSystem.spawn(countEffect)
     : countSystem.spawn(webglRejectionEffect);
@@ -759,10 +779,12 @@ async function run() {
   });
   const controlEffect = defineEffect({ elements: { particles: flockEmitter(false) } });
   const flockSystem = new VFXSystem(runtime);
+  configureTestCamera(flockSystem);
   const flockInstance = flockSystem.spawn(flockEffect);
   await flockSystem.update(0);
   const flockInitial = dispersion(vectors(await capture(flockInstance), 'position'));
   const controlSystem = new VFXSystem(runtime);
+  configureTestCamera(controlSystem);
   const controlInstance = controlSystem.spawn(controlEffect);
   await controlSystem.update(0);
   for (let frame = 0; frame < 100; frame += 1) {
@@ -792,6 +814,7 @@ async function run() {
     ],
   });
   const pbdSystem = new VFXSystem(runtime);
+  configureTestCamera(pbdSystem);
   const pbdInstance = pbdSystem.spawn(
     defineEffect({ elements: { neighbors: pbdGrid, particles: pbdEmitter } }),
   );
@@ -808,6 +831,7 @@ async function run() {
     resolution: [2, 2, 2],
   });
   const denseSystem = new VFXSystem(runtime);
+  configureTestCamera(denseSystem);
   const denseInstance = denseSystem.spawn(
     defineEffect({
       elements: {
@@ -838,6 +862,7 @@ async function run() {
     },
   });
   const dominantSystem = new VFXSystem(runtime, undefined, { maxPoolSize: 0 });
+  configureTestCamera(dominantSystem);
   const dominantInstance = dominantSystem.spawn(dominantEffect);
   await dominantSystem.update(0);
   await dominantSystem.update(1 / 60);
@@ -858,6 +883,7 @@ async function run() {
     maxPoolSize: 0,
     onRuntimeDiagnostic: null,
   });
+  configureTestCamera(exactHalfSystem);
   const exactHalfInstance = exactHalfSystem.spawn(
     defineEffect({
       elements: {
@@ -876,6 +902,7 @@ async function run() {
     maxPoolSize: 0,
     onRuntimeDiagnostic: null,
   });
+  configureTestCamera(emptySystem);
   const emptyInstance = emptySystem.spawn(
     defineEffect({
       elements: {
@@ -905,6 +932,7 @@ async function run() {
   const pooledDiagnosticSystem = new VFXSystem(runtime, undefined, {
     onRuntimeDiagnostic: null,
   });
+  configureTestCamera(pooledDiagnosticSystem);
   const firstPooledDiagnostic = pooledDiagnosticSystem.spawn(dominantEffect);
   await pooledDiagnosticSystem.update(0);
   await pooledDiagnosticSystem.update(1 / 60);
@@ -928,6 +956,7 @@ async function run() {
       throw new Error('intentional m12 runtime diagnostic handler failure');
     },
   });
+  configureTestCamera(throwingDiagnosticSystem);
   const throwingDiagnosticInstance = throwingDiagnosticSystem.spawn(dominantEffect);
   await throwingDiagnosticSystem.update(0);
   await throwingDiagnosticSystem.update(1 / 60);
@@ -945,11 +974,15 @@ async function run() {
   draw(flockPoints, pbdPoints);
   await capturePerformance();
   const countView = countInstance.getNeighborGrid('neighbors')!;
+  const expectedRuntimeDiagnosticCodes = [
+    'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+    'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+  ];
   const expectedRuntimeMessages = messages.filter((message) =>
-    message.includes('[NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT]'),
+    expectedRuntimeDiagnosticCodes.some((code) => message.includes(`[${code}]`)),
   );
-  const unexpectedMessages = messages.filter(
-    (message) => !message.includes('[NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT]'),
+  const unexpectedMessages = messages.filter((message) =>
+    expectedRuntimeDiagnosticCodes.every((code) => !message.includes(`[${code}]`)),
   );
   const allEmitterSpaceChecks = [
     emitterSpaceChecks.identity,
@@ -966,7 +999,7 @@ async function run() {
       [...countSnapshot.counts].every((value, index) => value === cpuBuckets.counts[index]),
     boidsCohesion: flockFinal < flockInitial * 0.9 && flockFinal < controlFinal * 0.9,
     consoleExpectedExactlyOnce:
-      expectedRuntimeMessages.length === 1 && unexpectedMessages.length === 0,
+      expectedRuntimeMessages.length === 2 && unexpectedMessages.length === 0,
     dominantOutOfBoundsDiagnostic:
       dominantFirst.outOfBounds === 6 &&
       dominantFirst.dropped === 1 &&

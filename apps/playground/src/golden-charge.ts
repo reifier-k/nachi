@@ -88,6 +88,7 @@ type BackendLike = {
 
 type RuntimeInstance = {
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+  release(): void;
   readonly state: EffectInstanceState;
 };
 
@@ -305,6 +306,13 @@ async function measurePerformance(): Promise<void> {
   scene.add(materializeThreeSpriteDraw(view.program, view.kernels));
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10);
   camera.position.z = 4;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  system.setCamera({
+    projectionMatrix: camera.projectionMatrix.elements,
+    viewMatrix: camera.matrixWorldInverse.elements,
+    viewportSize: [64, 64],
+  });
   renderer.setRenderTarget(target);
   await system.update(0);
   renderer.render(scene, camera);
@@ -315,6 +323,7 @@ async function measurePerformance(): Promise<void> {
     await system.update(STEP);
     renderer.render(scene, camera);
   });
+  instance.release();
   target.dispose();
   renderer.dispose();
 }

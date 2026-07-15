@@ -15,6 +15,14 @@ loop/mesh/VAT boundary segments to core. Its cumulative `measuredDeltaDroppedSec
 `fixedStepDroppedSeconds`, and `droppedSeconds` getters therefore report each discard once. See
 [RFC 001](../../docs/rfc/001-api.md) for clock mixing and FIFO invocation semantics.
 
+Timeline accepts core's `onRuntimeDiagnostic` option. Omission reports timeline-owned validation,
+action/callback, attachment/update, boundary, companion, cleanup, and mesh-preparation diagnostics
+as one-line console messages; a function replaces delivery and `null` disables it. Diagnostics are
+still retained on the timeline instance. Core emitter children use the same option through the
+inner core system; when timeline copies an already delivered child failure into its own diagnostic
+list, it does not deliver it a second time. A throwing handler is contained and reported as
+`NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED` without rejecting the frame update.
+
 ```ts
 import { curve, defineEmitter } from '@nachi-vfx/core';
 import { slashArc } from '@nachi-vfx/mesh-fx';

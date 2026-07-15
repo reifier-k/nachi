@@ -428,7 +428,10 @@ async function run(): Promise<void> {
     cameraA[center + 2]! > cameraA[center]! &&
     cameraB[center]! > cameraB[center + 2]! &&
     query.get('forceFailure') !== 'coarseReversal';
-  const warningSystem = new VFXSystem(runtime, undefined, { maxPoolSize: 0 });
+  const warningSystem = new VFXSystem(runtime, undefined, {
+    maxPoolSize: 0,
+    onRuntimeDiagnostic: null,
+  });
   const warningInstance = warningSystem.spawn(alphaEffect);
   await warningSystem.update(0);
   const cameraWarning = warningInstance.diagnostics.some(
@@ -1194,6 +1197,7 @@ async function run(): Promise<void> {
   });
   const liveQualitySystem = new VFXSystem(runtime, undefined, {
     maxPoolSize: 0,
+    onRuntimeDiagnostic: null,
     qualityTier: 'low',
   });
   const lowQualityInstance = liveQualitySystem.spawn(sortedDefinition);

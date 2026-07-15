@@ -2,6 +2,7 @@ import {
   DEFAULT_MAX_MEASURED_DELTA_SECONDS,
   VFXSystem as CoreVFXSystem,
   VfxDiagnosticError,
+  defaultDiagnosticHandler,
   hashModuleLabel,
   pcgRandomFloat,
   validateRuntimeParameter,
@@ -113,6 +114,10 @@ type RuntimeDefinition = {
 type SceneTarget = {
   add(object: object): void;
   remove(object: object): void;
+};
+
+type TimelineRuntimeDiagnosticOwner = {
+  recordRuntimeDiagnosticHandlerFailure(diagnostic: VfxDiagnostic): boolean;
 };
 
 type MeshRuntime = {
@@ -385,6 +390,10 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   readonly #meshRuntimes = new Map<string, MeshRuntime>();
   readonly #retiredEmitterStates = new Map<string, TimelineElementState>();
   readonly #parameters: Record<string, unknown>;
+  readonly #onRuntimeDiagnostic: (
+    instance: TimelineRuntimeDiagnosticOwner,
+    diagnostic: VfxDiagnostic,
+  ) => void;
   readonly #scene: SceneTarget | undefined;
   readonly #seed: number;
   readonly #spawnEmitter: (key: string, options: EffectSpawnOptions) => VfxEffectInstance;
@@ -412,6 +421,10 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     options: TimelineEffectSpawnOptions<Definition>,
     defaultCameraShakeTarget: CameraShakeTarget | undefined,
     spawnEmitter: (key: string, options: EffectSpawnOptions) => VfxEffectInstance,
+    onRuntimeDiagnostic: (
+      instance: TimelineRuntimeDiagnosticOwner,
+      diagnostic: VfxDiagnostic,
+    ) => void,
   ) {
     this.definition = definition;
     this.id = id;
@@ -430,10 +443,12 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.#rotation = options.rotation;
     this.#cameraShakeTarget = options.cameraShakeTarget ?? defaultCameraShakeTarget;
     this.#spawnEmitter = spawnEmitter;
+    this.#onRuntimeDiagnostic = onRuntimeDiagnostic;
     this.#parameters = { ...(options.parameters as Record<string, unknown> | undefined) };
     if (timelineDiagnostics.length > 0) {
-      this.diagnostics.push(...timelineDiagnostics);
-      this.#state = 'error';
+      const [first, ...rest] = timelineDiagnostics;
+      if (first) this.markError(first);
+      for (const diagnostic of rest) this.recordRuntimeDiagnostic(diagnostic);
       return;
     }
     try {
@@ -470,7 +485,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
             ];
       const [first, ...rest] = failureDiagnostics;
       if (first) this.markError(first);
-      this.diagnostics.push(...rest);
+      for (const diagnostic of rest) this.recordRuntimeDiagnostic(diagnostic);
     }
   }
 
@@ -687,18 +702,56 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     if (this.#released || this.#state === 'error') return;
     this.diagnostics.push(diagnostic);
     this.#state = 'error';
+    this.#onRuntimeDiagnostic(this, diagnostic);
     try {
       this.#stopAllElements();
     } catch (error) {
-      this.diagnostics.push(
+      this.recordRuntimeDiagnostic(
         runtimeDiagnostic(
           'NACHI_TIMELINE_ERROR_CLEANUP_FAILED',
           error instanceof Error ? error.message : String(error),
+          'TimelineEffectInstance.stopAllElements',
+          'warning',
         ),
       );
     }
-    this.#disposeMeshes();
+    try {
+      this.#disposeMeshes();
+    } catch (error) {
+      this.recordRuntimeDiagnostic(
+        runtimeDiagnostic(
+          'NACHI_TIMELINE_ERROR_CLEANUP_FAILED',
+          error instanceof Error ? error.message : String(error),
+          'TimelineEffectInstance.disposeMeshes',
+          'warning',
+        ),
+      );
+    }
     this.#companions.clear();
+  }
+
+  /** @internal Records and delivers one timeline-owned runtime diagnostic. */
+  recordRuntimeDiagnostic(diagnostic: VfxDiagnostic): void {
+    if (this.#released) return;
+    this.diagnostics.push(diagnostic);
+    this.#onRuntimeDiagnostic(this, diagnostic);
+  }
+
+  /** @internal Stores one shared source diagnostic without N-way delivery. */
+  recordRuntimeDiagnosticWithoutDelivery(diagnostic: VfxDiagnostic): void {
+    if (!this.#released) this.diagnostics.push(diagnostic);
+  }
+
+  /** @internal Delivers one shared source diagnostic without duplicating instance storage. */
+  deliverRuntimeDiagnostic(diagnostic: VfxDiagnostic): void {
+    this.#onRuntimeDiagnostic(this, diagnostic);
+  }
+
+  /** @internal Records a delivery failure without recursively invoking the failed handler. */
+  recordRuntimeDiagnosticHandlerFailure(diagnostic: VfxDiagnostic): boolean {
+    if (this.diagnostics.some(({ code }) => code === diagnostic.code)) return false;
+    this.diagnostics.push(diagnostic);
+    return true;
   }
 
   #disposeMeshes(): void {
@@ -825,7 +878,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     const key = `${companion.id}:${state}`;
     if (this.#companionWarningKeys.has(key)) return;
     this.#companionWarningKeys.add(key);
-    this.diagnostics.push(
+    this.recordRuntimeDiagnostic(
       runtimeDiagnostic(
         'NACHI_TIMELINE_COMPANION_UNAVAILABLE',
         `Companion "${companion.id}" is ${state}; timeline clock controls were not forwarded.`,
@@ -1084,6 +1137,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #instances = new Map<string, TimelineEffectInstance>();
   readonly #maxMeasuredDeltaSeconds: number;
   readonly #now: () => number;
+  readonly #onRuntimeDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
   readonly #subDefinitions = new WeakMap<
     object,
     Map<string, EffectDefinition<EffectElements, ParameterSchema>>
@@ -1091,12 +1145,17 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   #instanceSequence = 0;
   #lastTimestamp: number | undefined;
   #measuredDeltaDroppedSeconds = 0;
+  #runtimeDiagnosticHandlerFailed = false;
   #updateQueue: Promise<void> = Promise.resolve();
 
   constructor(renderer: Renderer, scene?: Scene, options: TimelineSystemOptions = {}) {
     this.renderer = renderer;
     this.scene = scene;
     this.#cameraShakeTarget = options.cameraShakeTarget;
+    this.#onRuntimeDiagnostic =
+      options.onRuntimeDiagnostic === undefined
+        ? defaultDiagnosticHandler
+        : (options.onRuntimeDiagnostic ?? undefined);
     this.#maxMeasuredDeltaSeconds =
       options.maxMeasuredDeltaSeconds === undefined
         ? DEFAULT_MAX_MEASURED_DELTA_SECONDS
@@ -1153,6 +1212,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       options,
       this.#cameraShakeTarget,
       (key, spawnOptions) => this.#spawnEmitter(definition, key, spawnOptions),
+      (owner, diagnostic) => this.#reportRuntimeDiagnostic(owner, diagnostic),
     );
     // The system owns instances through the non-generic runtime surface. The returned instance
     // retains Definition so mesh-only target keys remain precise for callers.
@@ -1185,22 +1245,34 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       }
 
       for (const [key, resource] of meshResources) {
-        options.signal?.throwIfAborted();
-        const { mesh } = cloneMesh(key, resource);
-        // Renderer compilation traverses visible objects; the clone is never attached to a scene.
-        mesh.visible = true;
-        let retained = false;
         try {
-          const result = await options.preparer?.prepareObject?.({
-            key,
-            object: mesh,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          });
-          retained = result?.retained === true;
           options.signal?.throwIfAborted();
-        } finally {
-          mesh.removeFromParent();
-          if (!retained) mesh.material.dispose();
+          const { mesh } = cloneMesh(key, resource);
+          // Renderer compilation traverses visible objects; the clone is never attached to a scene.
+          mesh.visible = true;
+          let retained = false;
+          try {
+            const result = await options.preparer?.prepareObject?.({
+              key,
+              object: mesh,
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+            });
+            retained = result?.retained === true;
+            options.signal?.throwIfAborted();
+          } finally {
+            mesh.removeFromParent();
+            if (!retained) mesh.material.dispose();
+          }
+        } catch (error) {
+          this.#reportRuntimeDiagnostic(
+            undefined,
+            runtimeDiagnostic(
+              'NACHI_TIMELINE_PREPARE_FAILED',
+              error instanceof Error ? error.message : String(error),
+              `elements.${key}`,
+            ),
+          );
+          throw error;
         }
         completed += 1;
         options.onProgress?.({ completed, resource: { key, kind: 'object' }, total });
@@ -1265,9 +1337,15 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           undefined,
           'warning',
         );
-        for (const instance of this.#instances.values()) {
-          if (instance.state === 'active') instance.diagnostics.push(diagnostic);
+        const instances = [...this.#instances.values()].filter(
+          (instance) => instance.state === 'active',
+        );
+        const owner = instances[0];
+        for (const instance of instances) {
+          instance.recordRuntimeDiagnosticWithoutDelivery(diagnostic);
         }
+        if (owner) owner.deliverRuntimeDiagnostic(diagnostic);
+        else this.#reportRuntimeDiagnostic(undefined, diagnostic);
         break;
       }
       const activeInstances = [...this.#instances.values()].filter(
@@ -1301,6 +1379,36 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           error instanceof Error ? error.message : String(error),
         ),
       );
+    }
+  }
+
+  #reportRuntimeDiagnostic(
+    instance: TimelineRuntimeDiagnosticOwner | undefined,
+    diagnostic: VfxDiagnostic,
+  ): void {
+    try {
+      this.#onRuntimeDiagnostic?.(diagnostic);
+    } catch (error) {
+      const failure = runtimeDiagnostic(
+        'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+        `VFXSystem.onRuntimeDiagnostic failed: ${error instanceof Error ? error.message : String(error)}`,
+        'VFXSystem.onRuntimeDiagnostic',
+        'warning',
+      );
+      let shouldReportFailure: boolean;
+      if (instance) {
+        shouldReportFailure = instance.recordRuntimeDiagnosticHandlerFailure(failure);
+      } else {
+        shouldReportFailure = !this.#runtimeDiagnosticHandlerFailed;
+        this.#runtimeDiagnosticHandlerFailed = true;
+      }
+      if (shouldReportFailure) {
+        try {
+          defaultDiagnosticHandler(failure);
+        } catch {
+          // A patched console must not recursively escape diagnostic delivery.
+        }
+      }
     }
   }
 

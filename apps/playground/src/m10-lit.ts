@@ -17,6 +17,7 @@ import { createPerformanceMonitor } from './perf';
 import { compactRgba8Readback } from './readback';
 import {
   createThreeKernelAdapter,
+  createThreeEffectPreparer,
   createThreeRuntimeRenderer,
   createThreeTextureResolver,
   materializeThreeLightDraw,
@@ -29,6 +30,10 @@ const WIDTH = 192;
 const HEIGHT = 192;
 const STEP = 1 / 60;
 const root = document.documentElement;
+const forceFailure = new URLSearchParams(location.search).get('forceFailure');
+if (forceFailure !== null && forceFailure !== 'runtime-light-diagnostic') {
+  throw new Error(`Unknown M10 lit fault: ${forceFailure}`);
+}
 const messages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -231,7 +236,16 @@ async function run(): Promise<void> {
       : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
   });
   const runtime = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
+  const camera = new THREE.OrthographicCamera(-1.8, 1.8, 1.35, -1.35, 0.1, 10);
+  camera.position.z = 4;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
   const system = new VFXSystem(runtime, undefined, { aliveCountReadbackInterval: 1 });
+  system.setCamera({
+    projectionMatrix: camera.projectionMatrix.elements,
+    viewMatrix: camera.matrixWorldInverse.elements,
+    viewportSize: [WIDTH, HEIGHT],
+  });
   const instance = system.spawn(effect, { seed: 1010 });
   await system.update(0);
   await system.update(STEP);
@@ -326,8 +340,45 @@ async function run(): Promise<void> {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x010204);
   scene.add(lightDraw.group);
-  const camera = new THREE.OrthographicCamera(-1.8, 1.8, 1.35, -1.35, 0.1, 10);
-  camera.position.z = 4;
+  const preparedLightDiagnostics: string[] = [];
+  const preparedLightSystem = new VFXSystem(runtime, undefined, {
+    maxPoolSize: 1,
+    onRuntimeDiagnostic: ({ code }) => preparedLightDiagnostics.push(code),
+  });
+  const preparedLightEffect = defineEffect({
+    elements: {
+      lights: defineEmitter({
+        capacity: 4,
+        init: [positionSphere({ radius: 0 }), lifetime(10), lightIntensity(4)],
+        integration: 'none',
+        render: lightRenderer({ maxLights: 2 }),
+        spawn: burst({ count: 4 }),
+      }),
+    },
+  });
+  const preparedLightPreparer = createThreeEffectPreparer(renderer, new THREE.Scene(), camera);
+  await preparedLightSystem.prepare(preparedLightEffect, { preparer: preparedLightPreparer });
+  const preparedLightInstance = preparedLightSystem.spawn(preparedLightEffect, { seed: 0x1217 });
+  await preparedLightSystem.update(0);
+  const preparedLightView = preparedLightInstance.getEmitter('lights');
+  if (!preparedLightView) throw new Error('M10 prepared light diagnostic emitter is missing.');
+  const preparedLightDraw =
+    preparedLightPreparer.takePreparedDraw<ReturnType<typeof materializeThreeLightDraw>>(
+      preparedLightView,
+    );
+  if (!preparedLightDraw) throw new Error('M10 prepared light draw was not transferred.');
+  await preparedLightDraw.update(renderer);
+  const preparedLightStats = await preparedLightDraw.update(renderer);
+  await preparedLightDraw.update(renderer);
+  const preparedLightDiagnosticActual =
+    preparedLightStats.candidateCount === 4 &&
+    preparedLightStats.selectedCount === 2 &&
+    JSON.stringify(preparedLightDiagnostics) === JSON.stringify(['NACHI_LIGHT_LIMIT_EXCEEDED']) &&
+    preparedLightInstance.diagnostics.filter(({ code }) => code === 'NACHI_LIGHT_LIMIT_EXCEEDED')
+      .length === 1;
+  preparedLightDraw.dispose(renderer);
+  preparedLightInstance.release();
+  preparedLightPreparer.dispose();
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   target.texture.colorSpace = THREE.NoColorSpace;
   const capture = async (objects: readonly THREE.Object3D[]): Promise<Uint8Array> => {
@@ -376,6 +427,8 @@ async function run(): Promise<void> {
     consoleClean: messages.length === 0,
     lightRendererSelected: lightDraw.stats.selectedCount === 1,
     logicalLightTieBreak,
+    preparedLightDiagnostic:
+      forceFailure === 'runtime-light-diagnostic' ? false : preparedLightDiagnosticActual,
     normalMapDifference:
       normalMapDifference.changed > 240 &&
       normalMapDifference.mean > 0.35 &&
@@ -409,6 +462,12 @@ async function run(): Promise<void> {
     evidence: {
       lightRenderer: lightDraw.stats,
       lightSelectionRuns,
+      preparedLightDiagnostic: {
+        actual: preparedLightDiagnosticActual,
+        diagnostics: preparedLightDiagnostics,
+        instanceDiagnostics: preparedLightInstance.diagnostics.map(({ code }) => code),
+        stats: preparedLightStats,
+      },
       normalMapAsymmetricSamples: asymmetricSamples,
       leftDominance,
       normalMapDifference,
@@ -429,6 +488,7 @@ async function run(): Promise<void> {
   required<HTMLElement>('#contract-value').textContent = result.ok ? 'all checks passed' : 'failed';
   target.dispose();
   lightDraw.dispose();
+  instance.release();
   normalMap.dispose();
   renderer.dispose();
 }

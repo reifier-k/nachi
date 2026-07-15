@@ -252,12 +252,13 @@ async function measurePerformance(forceWebGL: boolean) {
   });
   if (backend.isWebGPUBackend) {
     const system = new VFXSystem(runtime);
-    system.spawn(fluidEffect([16, 16, 16], 2));
+    const instance = system.spawn(fluidEffect([16, 16, 16], 2));
     await system.update(1 / 30);
     await renderer.resolveTimestampsAsync('compute');
     await monitor.captureGpuSamples(async () => {
       await system.update(1 / 30);
     });
+    instance.release();
   }
   if (!backend.isWebGPUBackend) monitor.publish();
   renderer.dispose();
@@ -322,6 +323,7 @@ async function run() {
     required<HTMLElement>('#status-value').textContent = unsupported
       ? 'Explicitly unsupported'
       : 'Diagnostic missing';
+    instance.release();
     renderer.dispose();
     return;
   }
@@ -399,7 +401,9 @@ async function run() {
     const system = new VFXSystem(runtime);
     const instance = system.spawn(pressureEffect(iterations));
     await system.update(0.2);
-    return grid3DSnapshotChannel(await gridView(instance).capture(), 'pressure');
+    const pressure = grid3DSnapshotChannel(await gridView(instance).capture(), 'pressure');
+    instance.release();
+    return pressure;
   };
   const pressureDifference = maximumDifference(await pressureRun(1), await pressureRun(6));
 
@@ -502,6 +506,10 @@ async function run() {
     schema: 'nachi.golden-fluid.v1',
     validation,
   };
+  mainInstance.release();
+  directionInstance.release();
+  transferInstance.release();
+  stressInstance.release();
   renderer.dispose();
   root.dataset.artifactScreenshots = JSON.stringify([
     { filename: 'golden-fluid.png', selector: '#fluid-visual' },

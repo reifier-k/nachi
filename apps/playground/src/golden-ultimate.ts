@@ -405,6 +405,7 @@ async function measurePerformance(
   });
   post.dispose();
   lightDraw.dispose();
+  instance.release();
   target.dispose();
   renderer.dispose();
 }
@@ -766,6 +767,10 @@ async function run(): Promise<void> {
   required<HTMLElement>('#status-value').textContent = result.ok ? 'all checks passed' : 'failed';
   post.dispose();
   lightDraw.dispose();
+  instance.release();
+  first.release();
+  second.release();
+  stressInstance.release();
   target.dispose();
   normal.dispose();
   noise.dispose();

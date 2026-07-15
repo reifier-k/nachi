@@ -70,9 +70,23 @@ type BackendLike = {
   isWebGPUBackend?: boolean;
 };
 
+function configureSystemCamera(
+  system: Pick<VFXSystem, 'setCamera'>,
+  camera: THREE.OrthographicCamera | THREE.PerspectiveCamera,
+): void {
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  system.setCamera({
+    projectionMatrix: camera.projectionMatrix.elements,
+    viewMatrix: camera.matrixWorldInverse.elements,
+    viewportSize: [WIDTH, HEIGHT],
+  });
+}
+
 type RuntimeInstance = {
   attachTo(source: ReturnType<typeof createThreeTransformSource>): void;
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+  release(): void;
   readonly state: EffectInstanceState;
 };
 
@@ -321,6 +335,7 @@ async function run(): Promise<void> {
     const performanceSystem = new VFXSystem(performanceRuntime, undefined, {
       fixedTimeStep: { stepSeconds: STEP },
     });
+    configureSystemCamera(performanceSystem, camera);
     performanceSystem.spawn(defineEffect({ elements: { flash: lightDefinition } }), {
       seed: 7199,
     });
@@ -353,6 +368,9 @@ async function run(): Promise<void> {
   const sparksSystem = new VFXSystem(runtime, undefined, { fixedTimeStep: { stepSeconds: STEP } });
   const lightSystem = new VFXSystem(runtime, undefined, { fixedTimeStep: { stepSeconds: STEP } });
   const decalSystem = new VFXSystem(runtime, undefined, { fixedTimeStep: { stepSeconds: STEP } });
+  for (const system of [trailSystem, sparksSystem, lightSystem, decalSystem]) {
+    configureSystemCamera(system, camera);
+  }
   const socket = new THREE.Object3D();
   const trailStartAngle = -2.45;
   const trailStart: Vec3 = [
@@ -463,6 +481,7 @@ async function run(): Promise<void> {
     fixedTimeStep: { stepSeconds: STEP },
     registry,
   });
+  configureSystemCamera(stressSystem, camera);
   const stressInstance = stressSystem.spawn(
     defineEffect({ elements: { stress: stressDefinition } }),
     { seed: 7105 },

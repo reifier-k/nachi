@@ -129,6 +129,12 @@ Preparation does not enumerate combinations of independently spawned light draws
 the simultaneous light set should keep that set structurally stable or prepare those variants
 explicitly at the application level.
 
+Prepared light draws automatically report `NACHI_LIGHT_LIMIT_EXCEEDED` through the owning core
+system's `onRuntimeDiagnostic` path. `takePreparedDraw()` rebinds the prepared callback to the live
+emitter, so the temporary preparation owner does not receive the warning and repeated updates of
+the same bounded pool do not duplicate it. Set `light.onDiagnostic` on
+`createThreeEffectPreparer()` when the Three-specific callback should replace system delivery.
+
 ## Draw and pooled-kernel lifetime
 
 Materialized draws are registered against their `BuiltEmitterKernels` so culling, render order, and

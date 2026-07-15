@@ -203,8 +203,8 @@ export interface VfxSystemOptions {
   /** Reports spawn-time compile and kernel-build diagnostics. Null disables reporting. */
   readonly onBuildDiagnostic?: ((diagnostic: VfxDiagnostic) => void) | null;
   /**
-   * Reports runtime diagnostics as their source observes them. Null disables reporting. H2-5
-   * wires NeighborGrid dominant out-of-bounds; H2-12 will connect the remaining runtime sources.
+   * Reports runtime diagnostics as their source observes them. Omission uses the one-line console
+   * reporter, null disables delivery, and a function replaces the reporter.
    */
   readonly onRuntimeDiagnostic?: ((diagnostic: VfxDiagnostic) => void) | null;
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
@@ -236,7 +236,8 @@ export interface VfxSystemOptions {
   readonly grid3DStageRegistry?: Grid3DStageRegistry;
 }
 
-function defaultDiagnosticHandler(diagnostic: VfxDiagnostic): void {
+/** @internal Shared one-line formatter for the default build/runtime diagnostic delivery paths. */
+export function defaultDiagnosticHandler(diagnostic: VfxDiagnostic): void {
   const path = diagnostic.path === undefined ? '' : ` (${diagnostic.path})`;
   const line = `[${diagnostic.code}] ${diagnostic.message}${path}`.replace(/[\r\n]+/g, ' ');
   if (diagnostic.severity === 'error') console.error(line);
@@ -796,6 +797,8 @@ export interface VfxEmitterRuntimeView {
   readonly lifecycleState: EmitterLifecycleState;
   readonly loopIndex: number;
   readonly program: CompiledEmitterProgram;
+  /** Reports an adapter-owned runtime diagnostic through the owning system and instance. */
+  reportRuntimeDiagnostic?(diagnostic: VfxDiagnostic): void;
   readonly spawnGeneration: number;
 }
 
@@ -1422,6 +1425,10 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       instanceId,
       spawnCount: this.#profileSpawnCount,
     };
+  }
+
+  reportRuntimeDiagnostic(diagnostic: VfxDiagnostic): void {
+    this.#onDiagnostic(diagnostic);
   }
 
   captureAttributes(
@@ -2145,6 +2152,7 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
   readonly #neighborGridViews = new Map<string, NeighborGridRuntimeView>();
   readonly #eventListeners = new Map<string, Set<EffectEventCallback>>();
   readonly #onRelease: (instance: ReleasableEffectInstance, poolable: boolean) => void;
+  readonly #onRuntimeDiagnostic: (instance: VfxEffectInstance, diagnostic: VfxDiagnostic) => void;
   readonly #now: () => number;
   readonly #parameterDefinitions: ParameterSchema;
   readonly #priority: number;
@@ -2181,12 +2189,15 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
     priority = 0,
     now: () => number = () => globalThis.performance?.now() ?? Date.now(),
     scheduleCapture: CaptureScheduler = (capture) => Promise.resolve().then(capture),
+    onRuntimeDiagnostic: (instance: VfxEffectInstance, diagnostic: VfxDiagnostic) => void = () =>
+      undefined,
   ) {
     this.clock = new EffectClock(timeScale);
     this.#parameterDefinitions = parameterDefinitions;
     this.#onRelease = onRelease;
     this.#priority = priority;
     this.#scheduleCapture = scheduleCapture;
+    this.#onRuntimeDiagnostic = onRuntimeDiagnostic;
     this.#now = now;
     this.debug = {
       captureAttributes: (emitterId, options) => this.#captureAttributes(emitterId, options),
@@ -2656,21 +2667,66 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
     if (this.#state === 'released') return;
     this.#diagnostics.push(diagnostic);
     this.#state = 'error';
+    this.#onRuntimeDiagnostic(this, diagnostic);
+  }
+
+  /** @internal Stores one broadcast failure without redelivering its shared source diagnostic. */
+  markErrorWithoutRuntimeDelivery(diagnostic: VfxDiagnostic): void {
+    if (this.#state === 'released') return;
+    this.#diagnostics.push(diagnostic);
+    this.#state = 'error';
+  }
+
+  /** @internal Delivers a shared source diagnostic exactly once without duplicating storage. */
+  deliverRuntimeDiagnostic(diagnostic: VfxDiagnostic): void {
+    this.#onRuntimeDiagnostic(this, diagnostic);
   }
 
   recordDiagnostic(diagnostic: VfxDiagnostic): void {
-    if (this.#state !== 'released') this.#diagnostics.push(diagnostic);
+    if (this.#state === 'released') return;
+    this.#diagnostics.push(diagnostic);
+    this.#onRuntimeDiagnostic(this, diagnostic);
   }
 
   /** @internal Pool-limit diagnostics may be finalized after an in-flight update becomes safe. */
   recordReleaseDiagnostic(diagnostic: VfxDiagnostic): void {
     this.#diagnostics.push(diagnostic);
+    this.#onRuntimeDiagnostic(this, diagnostic);
   }
 
   recordDiagnosticOnce(diagnostic: VfxDiagnostic, key = diagnostic.code): void {
     if (this.#state === 'released' || this.#diagnosticKeys.has(key)) return;
     this.#diagnosticKeys.add(key);
     this.#diagnostics.push(diagnostic);
+    this.#onRuntimeDiagnostic(this, diagnostic);
+  }
+
+  /** @internal Records a build diagnostic without crossing the runtime delivery seam. */
+  recordBuildDiagnostic(diagnostic: VfxDiagnostic): void {
+    if (this.#state !== 'released') this.#diagnostics.push(diagnostic);
+  }
+
+  /** @internal Deduplicates a build-delivery failure without crossing the runtime seam. */
+  recordBuildDiagnosticOnce(diagnostic: VfxDiagnostic, key = diagnostic.code): void {
+    if (this.#state === 'released' || this.#diagnosticKeys.has(key)) return;
+    this.#diagnosticKeys.add(key);
+    this.#diagnostics.push(diagnostic);
+  }
+
+  /** @internal Transitions for a build failure without crossing the runtime delivery seam. */
+  markBuildError(diagnostic: VfxDiagnostic): void {
+    if (this.#state === 'released') return;
+    this.#diagnostics.push(diagnostic);
+    this.#state = 'error';
+  }
+
+  /** @internal Prevents a failed runtime handler from recursively calling itself. */
+  recordRuntimeDiagnosticHandlerFailure(diagnostic: VfxDiagnostic): boolean {
+    const key = diagnostic.code;
+    if (this.#diagnosticKeys.has(key)) return false;
+    this.#diagnosticKeys.add(key);
+    this.#diagnostics.push(diagnostic);
+    return true;
   }
 
   async initialize(systemTime: number, prewarmStepSeconds: number): Promise<void> {
@@ -2811,12 +2867,14 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   #cameraConfigured = false;
   #compilationCount = 0;
   #deviceLossDiagnostic?: VfxDiagnostic;
+  #deviceLossReported = false;
   #instanceSequence = 0;
   #lastTimestamp?: number;
   #measuredDeltaDroppedSeconds = 0;
   #qualitySelection: QualityTierSelection;
   #profileFrame = 0;
   #preparationSpawn = false;
+  #runtimeDiagnosticHandlerFailed = false;
   #systemTime = 0;
   #updateQueue: Promise<void> = Promise.resolve();
   #updateInFlight = false;
@@ -3050,6 +3108,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       options.priority ?? 0,
       undefined,
       (capture) => this.#scheduleCapture(capture),
+      (owner, diagnostic) => this.#reportRuntimeDiagnostic(owner, diagnostic),
     );
     INSTANCE_CREATION_SEQUENCE.set(
       instance as VfxEffectInstance<RuntimeEffectDefinition>,
@@ -3058,7 +3117,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     if (!preparationSpawn) this.#instances.set(id, instance);
 
     if (this.#deviceLossDiagnostic) {
-      instance.markError(this.#deviceLossDiagnostic);
+      instance.markErrorWithoutRuntimeDelivery(this.#deviceLossDiagnostic);
+      if (!this.#deviceLossReported) {
+        this.#deviceLossReported = true;
+        instance.deliverRuntimeDiagnostic(this.#deviceLossDiagnostic);
+      }
       return instance;
     }
 
@@ -3182,10 +3245,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           entry.maxLifetime,
           this.#aliveCountReadbackInterval,
           (diagnostic) => instance.recordDiagnostic(diagnostic),
-          (diagnostic) => {
-            instance.recordDiagnostic(diagnostic);
-            this.#reportRuntimeDiagnostic(instance, diagnostic);
-          },
+          (diagnostic) => instance.recordDiagnostic(diagnostic),
           pooled ? {} : eventResources.get(entry.key),
           pooled
             ? []
@@ -3262,15 +3322,15 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
             ];
       const diagnostics = uniqueDiagnostics([...compileDiagnostics, ...failureDiagnostics]);
       for (const diagnostic of diagnostics) {
-        if (diagnostic.severity === 'error') instance.markError(diagnostic);
-        else instance.recordDiagnostic(diagnostic);
+        if (diagnostic.severity === 'error') instance.markBuildError(diagnostic);
+        else instance.recordBuildDiagnostic(diagnostic);
         this.#reportBuildDiagnostic(instance, diagnostic);
       }
       buildDiagnosticsReported = true;
     }
     if (!buildDiagnosticsReported) {
       for (const diagnostic of uniqueDiagnostics(compileDiagnostics)) {
-        instance.recordDiagnostic(diagnostic);
+        instance.recordBuildDiagnostic(diagnostic);
         this.#reportBuildDiagnostic(instance, diagnostic);
       }
     }
@@ -3289,13 +3349,13 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const run = async () => {
       throwIfPreparationAborted(options.signal);
       if (this.#maxPoolSize === 0) {
-        throw new VfxDiagnosticError([
-          runtimeDiagnostic(
-            'NACHI_PREPARE_POOLING_DISABLED',
-            'VFXSystem.prepare requires maxPoolSize to be greater than zero so prepared resources can be transferred to the next spawn.',
-            'VFXSystem.maxPoolSize',
-          ),
-        ]);
+        const diagnostic = runtimeDiagnostic(
+          'NACHI_PREPARE_POOLING_DISABLED',
+          'VFXSystem.prepare requires maxPoolSize to be greater than zero so prepared resources can be transferred to the next spawn.',
+          'VFXSystem.maxPoolSize',
+        );
+        this.#reportRuntimeDiagnostic(undefined, diagnostic);
+        throw new VfxDiagnosticError([diagnostic]);
       }
       let instance: VfxEffectInstance<EffectDefinition<Elements, Parameters>>;
       this.#preparationSpawn = true;
@@ -3966,7 +4026,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     try {
       this.#onBuildDiagnostic?.(diagnostic);
     } catch (error) {
-      instance.recordDiagnosticOnce({
+      instance.recordBuildDiagnosticOnce({
         code: 'NACHI_BUILD_DIAGNOSTIC_HANDLER_FAILED',
         message: `VFXSystem.onBuildDiagnostic failed: ${error instanceof Error ? error.message : String(error)}`,
         path: 'VFXSystem.onBuildDiagnostic',
@@ -3976,17 +4036,34 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     }
   }
 
-  #reportRuntimeDiagnostic(instance: VfxEffectInstance, diagnostic: VfxDiagnostic): void {
+  #reportRuntimeDiagnostic(
+    instance: VfxEffectInstance | undefined,
+    diagnostic: VfxDiagnostic,
+  ): void {
     try {
       this.#onRuntimeDiagnostic?.(diagnostic);
     } catch (error) {
-      instance.recordDiagnosticOnce({
+      const failure = {
         code: 'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
         message: `VFXSystem.onRuntimeDiagnostic failed: ${error instanceof Error ? error.message : String(error)}`,
         path: 'VFXSystem.onRuntimeDiagnostic',
         phase: 'runtime',
         severity: 'warning',
-      });
+      } as const satisfies VfxDiagnostic;
+      let shouldReportFailure: boolean;
+      if (instance) {
+        shouldReportFailure = instance.recordRuntimeDiagnosticHandlerFailure(failure);
+      } else {
+        shouldReportFailure = !this.#runtimeDiagnosticHandlerFailed;
+        this.#runtimeDiagnosticHandlerFailed = true;
+      }
+      if (shouldReportFailure) {
+        try {
+          defaultDiagnosticHandler(failure);
+        } catch {
+          // A patched console must not turn diagnostic delivery into a recursive runtime failure.
+        }
+      }
     }
   }
 
@@ -4013,6 +4090,12 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       `GPU device was lost (${reason})${message}`,
     );
     this.#deviceLossDiagnostic = diagnostic;
-    for (const instance of this.#instances.values()) instance.markError(diagnostic);
+    const instances = [...this.#instances.values()];
+    const owner = instances[0];
+    for (const instance of instances) instance.markErrorWithoutRuntimeDelivery(diagnostic);
+    if (owner) {
+      this.#deviceLossReported = true;
+      owner.deliverRuntimeDiagnostic(diagnostic);
+    }
   }
 }

@@ -434,7 +434,10 @@ async function runLifecycleScenario(
   // 6. GPU free-list saturation must retain the leading phases of the CPU-clamped rate batch.
   // Eight existing particles leave two slots; a ten-birth request therefore keeps phases 0.05
   // and 0.15 rather than redistributing the two successful births across the segment.
-  const partialOccupancySystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const partialOccupancySystem = new VFXSystem(runtimeRenderer, undefined, {
+    ...systemOptions,
+    onRuntimeDiagnostic: null,
+  });
   const partialOccupancy = partialOccupancySystem.spawn(
     placementEffect([burst({ count: 8 }), rate(600)], 0, 10),
     { seed: 25 },
@@ -509,7 +512,10 @@ async function runLifecycleScenario(
   const indirectAlive = await indirectInstanceCount(renderer, distanceInstance);
 
   // 11. Exhaustion clamps safely and publishes a stable warning diagnostic.
-  const overflowSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const overflowSystem = new VFXSystem(runtimeRenderer, undefined, {
+    ...systemOptions,
+    onRuntimeDiagnostic: null,
+  });
   const overflowed = overflowSystem.spawn(
     smokeEffect({ capacity: 2, duration: 0, spawn: burst({ count: 5 }) }),
     { seed: 29 },

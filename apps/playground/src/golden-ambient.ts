@@ -66,6 +66,7 @@ const sceneHost = requireElement<HTMLDivElement>('#scene');
 
 type RuntimeInstance = {
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+  release(): void;
   setTimeScale(timeScale: number): void;
 };
 
@@ -77,6 +78,19 @@ type BackendLike = {
   };
   isWebGPUBackend?: boolean;
 };
+
+function configureSystemCamera(
+  system: Pick<VFXSystem, 'setCamera'>,
+  camera: THREE.OrthographicCamera | THREE.PerspectiveCamera,
+): void {
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  system.setCamera({
+    projectionMatrix: camera.projectionMatrix.elements,
+    viewMatrix: camera.matrixWorldInverse.elements,
+    viewportSize: [1, 1],
+  });
+}
 
 function requireElement<ElementType extends Element>(selector: string): ElementType {
   const element = document.querySelector<ElementType>(selector);
@@ -258,6 +272,7 @@ async function measurePerformance(): Promise<void> {
   const camera = new THREE.OrthographicCamera(-3.4, 3.4, 2.55, -2.55, 0.1, 20);
   camera.position.set(0, 0.55, 6);
   camera.lookAt(0, 0.45, 0);
+  configureSystemCamera(system, camera);
   const target = new THREE.RenderTarget(64, 64, { depthBuffer: true });
   const monitor = createPerformanceMonitor(renderer, {
     gpuScopes: ['compute', 'render'],
@@ -273,6 +288,7 @@ async function measurePerformance(): Promise<void> {
     await system.update(STEP);
     renderer.render(scene, camera);
   });
+  instance.release();
   target.dispose();
   glow.dispose();
   leaf.dispose();
@@ -328,6 +344,7 @@ async function run(): Promise<void> {
       aliveCountReadbackInterval: 15,
       fixedTimeStep: { maxSubSteps: 32, stepSeconds: STEP },
     });
+    configureSystemCamera(system, camera);
     const instance = system.spawn(goldenAmbient, {
       position: [0, 1.15, 0],
       seed,
@@ -491,6 +508,7 @@ async function run(): Promise<void> {
   const stressSystem = new VFXSystem(runtimeRenderer, undefined, {
     significanceBudget: { maxActiveInstances: 12, maxParticles: 3 * (128 + 160) },
   });
+  configureSystemCamera(stressSystem, camera);
   const stressInstances = Array.from({ length: 24 }, (_, index) =>
     stressSystem.spawn(goldenAmbient, {
       position: [(index % 6) * 0.15, Math.floor(index / 6) * 0.1, 0],

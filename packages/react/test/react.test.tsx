@@ -1,4 +1,5 @@
 import type {
+  EffectInstance,
   KernelComputeBuilder,
   KernelComputeNode,
   KernelNode,
@@ -220,6 +221,7 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
   readonly kernelAdapter = fakeAdapter();
   readonly submissions: string[] = [];
   readonly uniformWrites: { path: ParameterPath; value: unknown }[] = [];
+  failNextSubmission = false;
   releaseCount = 0;
   releaseKernels(): void {
     this.releaseCount += 1;
@@ -228,6 +230,10 @@ class FakeRuntimeRenderer implements VfxRuntimeRenderer {
     this.uniformWrites.push({ path, value });
   }
   submitCompute(kernel: KernelComputeNode): void {
+    if (this.failNextSubmission) {
+      this.failNextSubmission = false;
+      throw new Error('synthetic React runtime submission failure');
+    }
     this.submissions.push((kernel as FakeCompute).name);
   }
   submitComputeIndirect(kernel: KernelComputeNode): void {
@@ -415,6 +421,55 @@ describe('@nachi-vfx/react lifecycle', () => {
       root.update(<Tree changed />);
     });
     expect(root!.toJSON()).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it('keeps a resolved frame update observable through the mutable instance error surface', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const delivered: string[] = [];
+    const options = {
+      ...SYSTEM_OPTIONS,
+      onRuntimeDiagnostic: ({ code }: { readonly code: string }) => delivered.push(code),
+    };
+    const observed: { current: EffectInstance<typeof definition> | null } = { current: null };
+    let root: ReactTestRenderer;
+
+    function Tree({ intensityValue = 1 }: { intensityValue?: number }) {
+      return (
+        <VFXSystemProvider renderer={renderer} options={options}>
+          <VFXEffect
+            definition={definition}
+            onInstance={(instance) => {
+              if (instance) observed.current = instance;
+            }}
+            parameters={{ 'User.intensity': intensityValue }}
+          />
+        </VFXSystemProvider>
+      );
+    }
+
+    await act(async () => {
+      root = create(<Tree />);
+    });
+    renderer.failNextSubmission = true;
+    await act(async () => {
+      for (const frame of r3f.frames) frame(IDENTITY_FRAME_STATE, 1 / 60);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(observed.current?.state).toBe('error');
+    expect(observed.current?.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'NACHI_GPU_SUBMISSION_FAILED' }),
+    );
+    expect(delivered).toEqual(['NACHI_GPU_SUBMISSION_FAILED']);
+    expect(root!.toJSON()).toBeNull();
+
+    renderer.uniformWrites.length = 0;
+    await act(async () => {
+      root.update(<Tree intensityValue={2} />);
+    });
+    expect(renderer.uniformWrites).toEqual([]);
     await act(async () => root.unmount());
   });
 

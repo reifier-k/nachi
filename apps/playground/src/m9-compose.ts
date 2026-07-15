@@ -254,7 +254,16 @@ async function measurePerformance(): Promise<void> {
       : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
   });
   const runtime = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  camera.position.z = 3;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
   const system = new VFXSystem(runtime, undefined, { maxPoolSize: 1 });
+  system.setCamera({
+    projectionMatrix: camera.projectionMatrix.elements,
+    viewMatrix: camera.matrixWorldInverse.elements,
+    viewportSize: [64, 64],
+  });
   const instance = system.spawn(childEffect, { seed: 91 });
   const monitor = createPerformanceMonitor(renderer, {
     gpuScopes: ['compute', 'render'],
@@ -268,8 +277,6 @@ async function measurePerformance(): Promise<void> {
   const scene = new THREE.Scene();
   const view = emitter(instance);
   scene.add(materializeThreeSpriteDraw(view.program, view.kernels));
-  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
-  camera.position.z = 3;
   renderer.setRenderTarget(target);
   await monitor.captureGpuSamples(async () => {
     await system.update(1 / 120);
@@ -278,6 +285,7 @@ async function measurePerformance(): Promise<void> {
   });
   renderer.setRenderTarget(null);
   target.dispose();
+  instance.release();
   renderer.dispose();
 }
 
@@ -303,7 +311,19 @@ async function run(): Promise<void> {
       : { maxStorageBuffersPerShaderStage: backend.device.limits.maxStorageBuffersPerShaderStage }),
   });
   const runtime = createThreeRuntimeRenderer(renderer, adapter, backend.device?.lost);
+  const camera = new THREE.OrthographicCamera(-2, 2, 1, -1, 0.1, 10);
+  camera.position.z = 3;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const configureSystemCamera = (targetSystem: VFXSystem): void => {
+    targetSystem.setCamera({
+      projectionMatrix: camera.projectionMatrix.elements,
+      viewMatrix: camera.matrixWorldInverse.elements,
+      viewportSize: [WIDTH, HEIGHT],
+    });
+  };
   const system = new VFXSystem(runtime, undefined, { maxPoolSize: 1 });
+  configureSystemCamera(system);
   const parent = system.spawn(parentEffect, {
     position: [-0.8, 0.35, 0],
     seed: 73,
@@ -347,6 +367,7 @@ async function run(): Promise<void> {
   const secondLifecycle = await lifecycle(renderer, second);
 
   const dirtySystem = new VFXSystem(runtime, undefined, { maxPoolSize: 1 });
+  configureSystemCamera(dirtySystem);
   const dirtyFirst = dirtySystem.spawn(dirtyLaneEffect);
   await dirtySystem.update(0);
   await dirtySystem.update(0.05);
@@ -362,6 +383,7 @@ async function run(): Promise<void> {
   const respawnedFlags = await uints(renderer, dirtySecond, 'alive');
 
   const eventSystem = new VFXSystem(runtime, undefined, { maxPoolSize: 1 });
+  configureSystemCamera(eventSystem);
   const eventFirst = eventSystem.spawn(pooledEventEffect);
   await eventSystem.update(0);
   await eventSystem.update(0.1);
@@ -379,7 +401,11 @@ async function run(): Promise<void> {
   await eventSystem.update(0);
   const secondEventTarget = await lifecycle(renderer, eventSecond, 'smoke');
 
-  const capSystem = new VFXSystem(runtime, undefined, { maxPoolSize: 1 });
+  const capSystem = new VFXSystem(runtime, undefined, {
+    maxPoolSize: 1,
+    onRuntimeDiagnostic: null,
+  });
+  configureSystemCamera(capSystem);
   const capA = capSystem.spawn(childEffect);
   const capB = capSystem.spawn(childEffect);
   capA.release();
@@ -394,8 +420,6 @@ async function run(): Promise<void> {
   const secondView = emitter(second);
   scene.add(materializeThreeSpriteDraw(parentView.program, parentView.kernels));
   scene.add(materializeThreeSpriteDraw(secondView.program, secondView.kernels));
-  const camera = new THREE.OrthographicCamera(-2, 2, 1, -1, 0.1, 10);
-  camera.position.z = 3;
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   renderer.setRenderTarget(target);
   renderer.clear();

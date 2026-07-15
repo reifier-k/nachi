@@ -2115,6 +2115,8 @@ export function materializeThreeDecalDraw(
 }
 
 export interface ThreePreparedDraw {
+  /** @internal Rebinds adapter-owned callbacks when a prepared draw changes runtime owner. */
+  activate?(emitter: VfxEmitterRuntimeView): void;
   /** Compile the target scene too because this draw changes its lighting configuration. */
   readonly affectsLighting?: boolean;
   dispose(): void;
@@ -2157,7 +2159,7 @@ export function createThreeEffectPreparer(
   options: ThreeEffectPreparerOptions = {},
 ): ThreeEffectPreparer {
   const retained: Array<{
-    activate?(): void;
+    activate?(emitter: VfxEmitterRuntimeView): void;
     dispose(): void;
     readonly drawIndex?: number;
     readonly kernels?: BuiltEmitterKernels;
@@ -2234,13 +2236,24 @@ export function createThreeEffectPreparer(
       };
     }
     if (context.draw.kind === 'light') {
-      const draw = materializeThreeLightDraw(
-        emitter.program,
-        emitter.kernels,
-        drawIndex,
-        options.light,
-      );
+      let diagnosticEmitter = emitter;
+      const explicitLightDiagnostic = options.light?.onDiagnostic;
+      const draw = materializeThreeLightDraw(emitter.program, emitter.kernels, drawIndex, {
+        ...options.light,
+        onDiagnostic:
+          explicitLightDiagnostic ??
+          ((diagnostic) =>
+            diagnosticEmitter.reportRuntimeDiagnostic?.({
+              ...diagnostic,
+              path: `elements.${context.key}.render.maxLights`,
+              phase: 'runtime',
+              severity: 'warning',
+            })),
+      });
       return {
+        activate: (owner) => {
+          diagnosticEmitter = owner;
+        },
         affectsLighting: true,
         dispose: () => draw.dispose(renderer),
         object: draw.group,
@@ -2289,7 +2302,7 @@ export function createThreeEffectPreparer(
       );
       if (index < 0) return undefined;
       const [resource] = retained.splice(index, 1);
-      resource!.activate?.();
+      resource!.activate?.(emitter);
       return resource!.value as Value;
     },
     async prepareEmitter(context): Promise<void> {
@@ -2337,7 +2350,14 @@ export function createThreeEffectPreparer(
             renderer,
           );
           retained.push({
-            ...(registration === undefined ? {} : { activate: registration.activate }),
+            ...(registration === undefined && resource.activate === undefined
+              ? {}
+              : {
+                  activate: (emitter: VfxEmitterRuntimeView) => {
+                    registration?.activate();
+                    resource.activate?.(emitter);
+                  },
+                }),
             dispose: registration?.dispose ?? resource.dispose,
             drawIndex,
             kernels: context.emitter.kernels,

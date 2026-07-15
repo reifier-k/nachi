@@ -72,6 +72,7 @@ type BackendLike = {
 
 type RuntimeInstance = {
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
+  release(): void;
   setTimeScale(timeScale: number): void;
 };
 
@@ -377,6 +378,7 @@ async function measurePerformance(): Promise<void> {
     await system.update(STEP);
     renderer.render(scene, camera);
   });
+  instance.release();
   target.dispose();
   atlas.dispose();
   motion.dispose();
