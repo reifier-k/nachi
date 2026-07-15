@@ -42,6 +42,7 @@ export {
   type TimelineElementState,
   type TimelineEffectInstance,
   type TimelineEffectSpawnOptions,
+  type TimelineMeshFxElementKey,
   type TimelinePrepareOptions,
   type TimelineSystemOptions,
 } from './runtime.js';

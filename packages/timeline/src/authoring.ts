@@ -22,6 +22,7 @@ import {
   type OverLifeCurve,
   type OverLifeInput,
 } from '@nachi-vfx/mesh-fx';
+import { MeshBasicMaterial } from 'three';
 
 export type TimelineAuthoringElement = EffectElementDefinition | MeshFxElement | MeshFxMesh;
 export type TimelineAuthoringElements = Readonly<Record<string, TimelineAuthoringElement>>;
@@ -32,10 +33,16 @@ export interface MeshFxElement {
   readonly mesh: MeshFxMesh;
 }
 
-type MeshFxPlaceholder = VisualElementDefinition<{
-  readonly duration: number;
-  readonly resource: string;
-}>;
+type MeshFxPlaceholder = Omit<
+  VisualElementDefinition<{
+    readonly duration: number;
+    readonly resource: string;
+  }>,
+  'type' | 'version'
+> & {
+  readonly type: 'timeline/mesh-fx';
+  readonly version: 1;
+};
 
 type NormalizedElements<Elements extends TimelineAuthoringElements> = Readonly<{
   [Key in keyof Elements]: Elements[Key] extends MeshFxMesh | MeshFxElement
@@ -315,7 +322,25 @@ export function cloneTimelineFxMaterial(
   path = 'material',
 ): FxNodeMaterial {
   const config = materialConfigs.get(material);
-  if (config) return fxMaterial(config);
+  if (config) {
+    const clone = fxMaterial(config);
+    // Use Three's ordinary MeshBasicMaterial clone contract for render state without copying the
+    // source NodeMaterial graph. The graph must be regenerated above so package-owned uniforms stay
+    // independent between the source and every timeline instance.
+    MeshBasicMaterial.prototype.copy.call(
+      clone as unknown as MeshBasicMaterial,
+      material as unknown as MeshBasicMaterial,
+    );
+    clone.lights = material.lights;
+    if (material.fx.opacity && clone.fx.opacity) {
+      clone.fx.setOpacity(material.fx.opacity.value);
+    }
+    if (material.fx.time && clone.fx.time) clone.fx.setTime(material.fx.time.value);
+    if (material.fx.normalizedLife && clone.fx.normalizedLife) {
+      clone.fx.setNormalizedLife(material.fx.normalizedLife.value);
+    }
+    return clone;
+  }
   throw new VfxDiagnosticError([
     diagnostic(
       'NACHI_MESH_FX_MATERIAL_CLONE_UNSUPPORTED',

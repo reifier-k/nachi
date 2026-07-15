@@ -8,6 +8,8 @@ const suites = [
     pages: [
       'm2-runtime',
       'm3-sprites',
+      'm9-compose',
+      'm9-timeline',
       'm12-grid',
       'm10-sort',
       'm10-lit',

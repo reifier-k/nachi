@@ -51,12 +51,23 @@ and 5174:
 pnpm verify:gpu
 ```
 
-The 17-entry suite covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope and canonical
-event routing, Grid2D, WBOIT, logical light top-N selection, VAT, textured ribbons, NeighborGrid,
+The 19-entry suite covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope and canonical
+event routing, M9 inheritance/pooling plus timeline mesh-fx state ownership, Grid2D, WBOIT,
+logical light top-N selection, VAT, textured ribbons, NeighborGrid,
 H2-6 world/emitter selectors plus shared Update-midpoint collision response, H2-7 renderer-v2
 particle/coarse ordering, mesh depth, decal spawn orientation, quality/pool boundaries on the
 existing `/m10-sort/` page, all six showcase pages, and the WebGPU/WebGL M11 cache entries described
 below.
+
+The permanent `/m9-timeline/` entry renders a back-facing DoubleSide mesh, compares current opacity
+0.2 against an otherwise identical authoring-opacity 0.8 control, and mutates the source after the
+clone to prove causally that spawn-time state reaches the GPU and remains independent. It also checks
+node/uniform graph independence, shared geometry identity, and pixel readbacks around a stop/replay
+while user visibility remains false. `?forceFailure=timeline-user-visible` releases only that user override before the replay
+readback; direct `spike-runner.mjs` execution must fail with exactly
+`meshFxStateOwnershipGpu=false`. `/m9-compose/` remains the independent inheritance, pooling, and
+dirty-lane M9 regression. Headless M9 runs publish readback contracts without adding screenshot
+baselines.
 
 The existing `/m11-cache/` page also verifies simulation-cache v2 lineage. Its WebGPU fixture bakes
 a capacity-one emitter whose physical slot is reused by a different `spawnOrder` between two cache
@@ -65,7 +76,7 @@ attributes and pixels instead of morphing unrelated particles. WebGL2 keeps the 
 unsupported bake/replay diagnostics. The isolated `?forceFailure=lineage-alias` fault aliases the
 two recorded lineage values; run it directly with `spike-runner.mjs` and require only
 `slotReuseLineageNearest` to fail. This adds two permanent backend entries to the former 15-entry
-suite.
+suite; H2-9 subsequently adds the two M9 entries described above.
 
 Simulation-cache assets now require metadata/payload version 2. Version 1 or missing-version caches
 fail with `NACHI_SIM_CACHE_VERSION_UNSUPPORTED` and must be re-baked. The mandatory lossless lineage

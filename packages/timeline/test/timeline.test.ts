@@ -19,10 +19,10 @@ import {
   type VfxEffectInstance,
   VfxDiagnosticError,
 } from '@nachi-vfx/core';
-import { fxMaterial as meshFxMaterial, ring, slashArc } from '@nachi-vfx/mesh-fx';
+import { fxMaterial as meshFxMaterial, ring, slashArc, type MeshFxMesh } from '@nachi-vfx/mesh-fx';
 import * as THREE from 'three';
 import { float } from 'three/tsl';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import {
   VFXSystem,
@@ -39,6 +39,7 @@ import {
   play,
   stop,
   timeline,
+  type TimelineMeshFxElementKey,
 } from '../src/index.js';
 import { cloneTimelineFxMaterial } from '../src/authoring.js';
 import { timelineCoreOptions } from '../src/runtime.js';
@@ -175,6 +176,139 @@ describe('@nachi-vfx/timeline authoring', () => {
     expect(clone.fx.time).not.toBeNull();
   });
 
+  it('snapshots current fx controls and Three material state into independent timeline clones', () => {
+    const texture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    const authoredMaterial = fxMaterial({ map: texture, opacity: 0.8 });
+    authoredMaterial.map = texture;
+    authoredMaterial.fx.setOpacity(0.2);
+    authoredMaterial.fx.setTime(0.4);
+    authoredMaterial.fx.setNormalizedLife(0.3);
+    authoredMaterial.name = 'current-source-material';
+    authoredMaterial.userData = { ownership: { source: 9 } };
+    authoredMaterial.side = THREE.DoubleSide;
+    authoredMaterial.shadowSide = THREE.BackSide;
+    authoredMaterial.depthTest = false;
+    authoredMaterial.depthWrite = true;
+    authoredMaterial.colorWrite = false;
+    authoredMaterial.transparent = false;
+    authoredMaterial.blending = THREE.AdditiveBlending;
+    authoredMaterial.polygonOffset = true;
+    authoredMaterial.polygonOffsetFactor = 2;
+    authoredMaterial.polygonOffsetUnits = 3;
+    authoredMaterial.wireframe = true;
+    authoredMaterial.wireframeLinewidth = 2;
+    authoredMaterial.lights = false;
+    authoredMaterial.stencilWrite = true;
+    authoredMaterial.stencilWriteMask = 0x3f;
+    authoredMaterial.stencilFunc = THREE.EqualStencilFunc;
+    authoredMaterial.stencilRef = 7;
+    authoredMaterial.stencilFuncMask = 0x7f;
+    authoredMaterial.stencilFail = THREE.ReplaceStencilOp;
+    authoredMaterial.stencilZFail = THREE.IncrementWrapStencilOp;
+    authoredMaterial.stencilZPass = THREE.DecrementWrapStencilOp;
+    authoredMaterial.toneMapped = false;
+    authoredMaterial.visible = false;
+    authoredMaterial.clippingPlanes = [new THREE.Plane(new THREE.Vector3(1, 0, 0), 2)];
+    const authoredMesh = ring({ material: authoredMaterial });
+    authoredMesh.name = 'material-state-snapshot';
+    const effect = defineEffect({
+      elements: { ring: meshFxElement(authoredMesh) },
+      timeline: timeline([at(0.5, play('ring'))], { duration: 1 }),
+    });
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const first = system.spawn(effect);
+    const second = system.spawn(effect);
+    const [firstMesh, secondMesh] = scene.children.filter(
+      ({ name }) => name === 'material-state-snapshot',
+    ) as THREE.Mesh[];
+    const firstMaterial = firstMesh!.material as ReturnType<typeof fxMaterial>;
+    const secondMaterial = secondMesh!.material as ReturnType<typeof fxMaterial>;
+
+    for (const clone of [firstMaterial, secondMaterial]) {
+      expect(clone.fx.opacity?.value).toBe(0.2);
+      expect(clone.fx.time?.value).toBe(0.4);
+      expect(clone.fx.normalizedLife?.value).toBe(0.3);
+      expect(clone.name).toBe('current-source-material');
+      expect(clone.userData).toEqual({ ownership: { source: 9 } });
+      expect(clone.side).toBe(THREE.DoubleSide);
+      expect(clone.shadowSide).toBe(THREE.BackSide);
+      expect(clone.depthTest).toBe(false);
+      expect(clone.depthWrite).toBe(true);
+      expect(clone.colorWrite).toBe(false);
+      expect(clone.transparent).toBe(false);
+      expect(clone.blending).toBe(THREE.AdditiveBlending);
+      expect(clone.polygonOffset).toBe(true);
+      expect(clone.polygonOffsetFactor).toBe(2);
+      expect(clone.polygonOffsetUnits).toBe(3);
+      expect(clone.wireframe).toBe(true);
+      expect(clone.wireframeLinewidth).toBe(2);
+      expect(clone.lights).toBe(false);
+      expect(clone.stencilWrite).toBe(true);
+      expect(clone.stencilWriteMask).toBe(0x3f);
+      expect(clone.stencilFunc).toBe(THREE.EqualStencilFunc);
+      expect(clone.stencilRef).toBe(7);
+      expect(clone.stencilFuncMask).toBe(0x7f);
+      expect(clone.stencilFail).toBe(THREE.ReplaceStencilOp);
+      expect(clone.stencilZFail).toBe(THREE.IncrementWrapStencilOp);
+      expect(clone.stencilZPass).toBe(THREE.DecrementWrapStencilOp);
+      expect(clone.map).toBe(texture);
+      expect(clone.toneMapped).toBe(false);
+      expect(clone.visible).toBe(false);
+      expect(clone.clippingPlanes?.[0]).toEqual(
+        expect.objectContaining({ constant: 2, normal: expect.objectContaining({ x: 1 }) }),
+      );
+    }
+    expect(firstMaterial).not.toBe(authoredMaterial);
+    expect(secondMaterial).not.toBe(authoredMaterial);
+    expect(secondMaterial).not.toBe(firstMaterial);
+    expect(firstMaterial.fx.opacity).not.toBe(secondMaterial.fx.opacity);
+    expect(firstMaterial.fx.opacity).not.toBe(authoredMaterial.fx.opacity);
+    expect(firstMaterial.fx.time).not.toBe(secondMaterial.fx.time);
+    expect(firstMaterial.fx.time).not.toBe(authoredMaterial.fx.time);
+    expect(firstMaterial.fx.normalizedLife).not.toBe(secondMaterial.fx.normalizedLife);
+    expect(firstMaterial.fx.normalizedLife).not.toBe(authoredMaterial.fx.normalizedLife);
+    expect(firstMaterial.opacityNode).not.toBe(secondMaterial.opacityNode);
+    expect(firstMaterial.opacityNode).not.toBe(authoredMaterial.opacityNode);
+    expect(firstMaterial.colorNode).not.toBe(secondMaterial.colorNode);
+    expect(firstMaterial.colorNode).not.toBe(authoredMaterial.colorNode);
+    expect(firstMaterial.map).toBe(authoredMaterial.map);
+    expect(secondMaterial.map).toBe(authoredMaterial.map);
+    expect(firstMaterial.userData).not.toBe(secondMaterial.userData);
+    expect(firstMaterial.userData.ownership).not.toBe(secondMaterial.userData.ownership);
+    expect(firstMaterial.clippingPlanes?.[0]).not.toBe(secondMaterial.clippingPlanes?.[0]);
+
+    firstMaterial.fx.setOpacity(0.6);
+    firstMaterial.side = THREE.FrontSide;
+    firstMaterial.name = 'first-only';
+    firstMaterial.userData.ownership.source = 1;
+    firstMaterial.clippingPlanes![0]!.constant = 10;
+    firstMaterial.stencilRef = 2;
+    authoredMaterial.fx.setOpacity(0.9);
+    authoredMaterial.depthTest = true;
+    authoredMaterial.stencilFunc = THREE.NeverStencilFunc;
+    authoredMaterial.userData.ownership.source = 0;
+
+    expect(secondMaterial.fx.opacity?.value).toBe(0.2);
+    expect(secondMaterial.side).toBe(THREE.DoubleSide);
+    expect(secondMaterial.name).toBe('current-source-material');
+    expect(secondMaterial.depthTest).toBe(false);
+    expect(secondMaterial.userData).toEqual({ ownership: { source: 9 } });
+    expect(secondMaterial.clippingPlanes?.[0]?.constant).toBe(2);
+    expect(secondMaterial.stencilRef).toBe(7);
+    expect(secondMaterial.stencilFunc).toBe(THREE.EqualStencilFunc);
+    expect(authoredMaterial.fx.opacity?.value).toBe(0.9);
+    expect(authoredMaterial.side).toBe(THREE.DoubleSide);
+    expect(authoredMaterial.name).toBe('current-source-material');
+    expect(authoredMaterial.userData).toEqual({ ownership: { source: 0 } });
+
+    first.release();
+    second.release();
+    authoredMaterial.dispose();
+    authoredMesh.geometry.dispose();
+    texture.dispose();
+  });
+
   it('lowers opacityOverLife curves through the writable opacity control', async () => {
     const authoredMaterial = fxMaterial({
       opacityOverLife: curve([0, 0.5], [0.2, 0.5], [1, 0]),
@@ -209,15 +343,17 @@ describe('@nachi-vfx/timeline authoring', () => {
   });
 
   it('returns an error instance and removes already-added meshes when construction fails', () => {
+    const addedFirst = mesh();
+    const invalid = slashArc({ angle: 90, material: meshFxMaterial() });
     const effect = defineEffect({
-      elements: {
-        addedFirst: mesh(),
-        invalid: slashArc({ angle: 90, material: meshFxMaterial() }),
-      },
+      elements: { addedFirst, invalid },
       timeline: [at(0, play('addedFirst'))],
     });
     const scene = new THREE.Scene();
     const dispose = vi.spyOn(THREE.Material.prototype, 'dispose');
+    const geometryDispose = vi.spyOn(addedFirst.mesh.geometry, 'dispose');
+    const sourceMaterial = addedFirst.mesh.material;
+    const invalidSourceMaterial = invalid.material;
 
     const instance = new VFXSystem({}, scene).spawn(effect);
 
@@ -226,8 +362,19 @@ describe('@nachi-vfx/timeline authoring', () => {
       expect.objectContaining({ code: 'NACHI_MESH_FX_MATERIAL_CLONE_UNSUPPORTED' }),
     );
     expect(scene.children).toHaveLength(0);
-    expect(dispose).toHaveBeenCalled();
+    expect(() => instance.setUserVisible('addedFirst', false)).toThrow(
+      'is not an adapted mesh-fx element',
+    );
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(dispose.mock.contexts[0]).not.toBe(sourceMaterial);
+    expect(dispose.mock.contexts[0]).not.toBe(invalidSourceMaterial);
+    expect(geometryDispose).not.toHaveBeenCalled();
     dispose.mockRestore();
+    geometryDispose.mockRestore();
+    sourceMaterial.dispose();
+    invalidSourceMaterial.dispose();
+    addedFirst.mesh.geometry.dispose();
+    invalid.geometry.dispose();
   });
 
   it('rejects externally bound mesh-fx time during timeline authoring', () => {
@@ -536,6 +683,118 @@ describe('@nachi-vfx/timeline runtime', () => {
 
     instance.setTransform([1, 2, 3], [0.1, 0.2, 0.3]);
     expect(clone?.scale.toArray()).toEqual([2, 3, 4]);
+  });
+
+  it('shares borrowed geometry without disposing it when timeline clones release', () => {
+    const sourceMaterial = fxMaterial();
+    const authored = ring({ material: sourceMaterial, segments: 8 });
+    authored.name = 'borrowed-geometry-ring';
+    const position = authored.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const geometryDispose = vi.spyOn(authored.geometry, 'dispose');
+    const sourceMaterialDispose = vi.spyOn(sourceMaterial, 'dispose');
+    const effect = defineEffect({ elements: { ring: authored } });
+    const scene = new THREE.Scene();
+    const instance = new VFXSystem({}, scene).spawn(effect);
+    const clone = scene.getObjectByName('borrowed-geometry-ring') as THREE.Mesh;
+    const clonePosition = clone.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const cloneMaterialDispose = vi.spyOn(clone.material as THREE.Material, 'dispose');
+
+    expect(clone.geometry).toBe(authored.geometry);
+    expect(clonePosition).toBe(position);
+    clone.geometry.setDrawRange(3, 6);
+    clonePosition.setX(0, 123);
+    expect(authored.geometry.drawRange).toEqual({ count: 6, start: 3 });
+    expect(position.getX(0)).toBe(123);
+
+    instance.release();
+    expect(cloneMaterialDispose).toHaveBeenCalledTimes(1);
+    expect(sourceMaterialDispose).not.toHaveBeenCalled();
+    expect(geometryDispose).not.toHaveBeenCalled();
+    cloneMaterialDispose.mockRestore();
+    sourceMaterialDispose.mockRestore();
+    geometryDispose.mockRestore();
+    sourceMaterial.dispose();
+    authored.geometry.dispose();
+  });
+
+  it('composes persistent mesh user visibility through play, expiry, stop, loop, and reuse', async () => {
+    const child = defineEmitter({
+      capacity: 1,
+      render: billboard({}),
+      spawn: burst({ count: 0 }),
+    });
+    const authored = ring({ material: fxMaterial() });
+    authored.name = 'user-visible-ring';
+    const effect = defineEffect({
+      elements: { child, ring: meshFxElement(authored, { duration: 0.03 }) },
+      timeline: timeline(
+        [
+          at(0, play('ring')),
+          at(0.06, play('ring')),
+          at(0.08, stop('ring')),
+          at(0.1, play('ring')),
+        ],
+        { duration: 0.12, loop: 2 },
+      ),
+    });
+    const scene = new THREE.Scene();
+    const system = new VFXSystem({}, scene);
+    const instance = system.spawn(effect);
+    const clone = scene.getObjectByName('user-visible-ring') as THREE.Mesh;
+    const unsafeSet = instance.setUserVisible.bind(instance) as (
+      key: string,
+      visible: unknown,
+    ) => void;
+
+    expectTypeOf<TimelineMeshFxElementKey<typeof effect>>().toEqualTypeOf<'ring'>();
+    expect(() => unsafeSet('missing', true)).toThrow('is not an adapted mesh-fx element');
+    expect(() => unsafeSet('child', true)).toThrow('is not an adapted mesh-fx element');
+    expect(() => unsafeSet('ring', 1)).toThrow('must be a boolean');
+
+    instance.setUserVisible('ring', false);
+    instance.setTransform([1, 2, 3], [0.1, 0.2, 0.3]);
+    expect(instance.getElementState('ring')?.visible).toBe(false);
+    await system.update(0);
+    expect(instance.getElementState('ring')).toMatchObject({ playing: true, visible: false });
+    expect(clone.visible).toBe(false);
+    instance.setUserVisible('ring', true);
+    expect(instance.getElementState('ring')?.visible).toBe(true);
+
+    await system.update(0.03);
+    expect(instance.getElementState('ring')).toMatchObject({ playing: false, visible: false });
+    instance.setUserVisible('ring', false);
+    await system.update(0.03);
+    expect(instance.getElementState('ring')).toMatchObject({ playing: true, visible: false });
+    instance.setUserVisible('ring', true);
+    expect(instance.getElementState('ring')?.visible).toBe(true);
+
+    instance.setUserVisible('ring', false);
+    await system.update(0.02);
+    expect(instance.getElementState('ring')).toMatchObject({ playing: false, visible: false });
+    instance.setUserVisible('ring', true);
+    expect(instance.getElementState('ring')?.visible).toBe(false);
+    await system.update(0.02);
+    expect(instance.getElementState('ring')).toMatchObject({ playing: true, visible: true });
+
+    instance.setUserVisible('ring', false);
+    await system.update(0.02);
+    expect(instance.cycle).toBe(1);
+    expect(instance.getElementState('ring')).toMatchObject({ playing: true, visible: false });
+    instance.setUserVisible('ring', true);
+    expect(instance.getElementState('ring')?.visible).toBe(true);
+    instance.stop();
+    expect(instance.getElementState('ring')).toMatchObject({ playing: false, visible: false });
+    instance.setUserVisible('ring', false);
+    expect(instance.getElementState('ring')?.visible).toBe(false);
+    instance.release();
+    expect(() => instance.setUserVisible('ring', true)).toThrow('has been released');
+
+    const replay = system.spawn(effect);
+    await system.update(0);
+    expect(replay.getElementState('ring')).toMatchObject({ playing: true, visible: true });
+    await system.update(0.24);
+    expect(replay.state).toBe('complete');
+    expect(replay.getElementState('ring')).toMatchObject({ playing: false, visible: false });
   });
 
   it('matches the previous effect transform when authored local is identity', () => {
@@ -1093,6 +1352,99 @@ describe('@nachi-vfx/timeline runtime', () => {
     } finally {
       corePrepare.mockRestore();
     }
+  });
+
+  it('keeps borrowed geometry and source materials while disposing or transferring prepared clones', async () => {
+    const sourceMaterial = fxMaterial();
+    const source = ring({ material: sourceMaterial });
+    const effect = defineEffect({ elements: { ring: source } });
+    const sourceMaterialDisposed = vi.fn();
+    const sourceGeometryDisposed = vi.fn();
+    sourceMaterial.addEventListener('dispose', sourceMaterialDisposed);
+    source.geometry.addEventListener('dispose', sourceGeometryDisposed);
+    const system = new VFXSystem({}, new THREE.Scene());
+
+    let ordinaryObject: MeshFxMesh | undefined;
+    const ordinaryDisposed = vi.fn();
+    await system.prepare(effect, {
+      preparer: {
+        prepareEmitter: vi.fn(),
+        prepareObject: ({ object }) => {
+          ordinaryObject = object;
+          object.material.addEventListener('dispose', ordinaryDisposed);
+          return undefined;
+        },
+      },
+    });
+    expect(ordinaryObject?.geometry).toBe(source.geometry);
+    expect(ordinaryObject?.material).not.toBe(sourceMaterial);
+    expect(ordinaryDisposed).toHaveBeenCalledTimes(1);
+
+    let thrownObject: MeshFxMesh | undefined;
+    const thrownDisposed = vi.fn();
+    await expect(
+      system.prepare(effect, {
+        preparer: {
+          prepareEmitter: vi.fn(),
+          prepareObject: ({ object }) => {
+            thrownObject = object;
+            object.material.addEventListener('dispose', thrownDisposed);
+            throw new Error('prepare object failed');
+          },
+        },
+      }),
+    ).rejects.toThrow('prepare object failed');
+    expect(thrownObject?.geometry).toBe(source.geometry);
+    expect(thrownObject?.material).not.toBe(sourceMaterial);
+    expect(thrownDisposed).toHaveBeenCalledTimes(1);
+
+    const controller = new AbortController();
+    let abortedObject: MeshFxMesh | undefined;
+    const abortedDisposed = vi.fn();
+    await expect(
+      system.prepare(effect, {
+        preparer: {
+          prepareEmitter: vi.fn(),
+          prepareObject: ({ object }) => {
+            abortedObject = object;
+            object.material.addEventListener('dispose', abortedDisposed);
+            controller.abort();
+            return undefined;
+          },
+        },
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(abortedObject?.geometry).toBe(source.geometry);
+    expect(abortedObject?.material).not.toBe(sourceMaterial);
+    expect(abortedDisposed).toHaveBeenCalledTimes(1);
+
+    let retainedObject: MeshFxMesh | undefined;
+    const retainedDisposed = vi.fn();
+    await system.prepare(effect, {
+      preparer: {
+        prepareEmitter: vi.fn(),
+        prepareObject: ({ object }) => {
+          retainedObject = object;
+          object.material.addEventListener('dispose', retainedDisposed);
+          return { retained: true };
+        },
+      },
+    });
+    expect(retainedObject?.geometry).toBe(source.geometry);
+    expect(retainedObject?.material).not.toBe(sourceMaterial);
+    expect(retainedDisposed).not.toHaveBeenCalled();
+    expect(sourceMaterialDisposed).not.toHaveBeenCalled();
+    expect(sourceGeometryDisposed).not.toHaveBeenCalled();
+
+    // retained:true transfers the cloned material to the preparer; geometry remains source-owned.
+    retainedObject!.material.dispose();
+    expect(retainedDisposed).toHaveBeenCalledTimes(1);
+    expect(sourceGeometryDisposed).not.toHaveBeenCalled();
+    sourceMaterial.dispose();
+    source.geometry.dispose();
+    expect(sourceMaterialDisposed).toHaveBeenCalledTimes(1);
+    expect(sourceGeometryDisposed).toHaveBeenCalledTimes(1);
   });
 
   it('diagnoses and clamps pathological boundary overflow without rejecting', async () => {

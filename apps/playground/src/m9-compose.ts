@@ -271,10 +271,12 @@ async function measurePerformance(): Promise<void> {
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
   camera.position.z = 3;
   renderer.setRenderTarget(target);
-  renderer.render(scene, camera);
-  await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  await monitor.captureGpuSamples(async () => {
+    await system.update(1 / 120);
+    renderer.render(scene, camera);
+    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+  });
+  renderer.setRenderTarget(null);
   target.dispose();
   renderer.dispose();
 }
@@ -494,9 +496,9 @@ async function run(): Promise<void> {
     validation,
     visual,
   };
-  root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'm9-compose.png', selector: '#compose-visual' },
-  ]);
+  root.dataset.artifactScreenshots = JSON.stringify(
+    headless ? [] : [{ filename: 'm9-compose.png', selector: '#compose-visual' }],
+  );
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.spikeStatus = ok ? 'complete' : 'error';
   root.dataset.sceneReady = 'true';

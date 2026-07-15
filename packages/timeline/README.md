@@ -32,7 +32,8 @@ const skill = defineEffect({
   timeline: [at(0.05, play('arc'), cameraShake({ strength: 0.3 }), hitStop(40))],
 });
 
-new VFXSystem(renderer, scene).spawn(skill);
+const instance = new VFXSystem(renderer, scene).spawn(skill);
+instance.setUserVisible('arc', false);
 ```
 
 Timeline entries and actions are plain serializable data. Raw Three meshes are stored as ephemeral
@@ -42,6 +43,23 @@ Use `meshFxElement(mesh, { duration })` to override the automatic one-second mes
 authoring. Timeline evaluates numeric/curve inputs from normalized mesh life and writes the result
 through `material.fx.setOpacity()`; a TSL node remains a compile-time binding. Because both own the
 same channel, `opacity` and `opacityOverLife` cannot be specified together.
+
+At `spawn()`, each timeline mesh receives an independent material graph and package-owned uniforms,
+then snapshots the source material's current Three.js `MeshBasicMaterial` state. This includes the
+current value written through `fx.setOpacity()` plus ordinary render state such as `side`, depth and
+stencil controls, blending, `colorWrite`, clipping planes, `name`, and a deep copy of `userData`.
+Later changes to the source or another instance do not change that snapshot. Textures and other
+externally owned resources retain Three's normal shared-reference clone semantics.
+
+`instance.setUserVisible(meshKey, visible)` controls an adapted mesh-fx element without competing
+with timeline lifecycle writes. Final visibility is `runtimeVisible && userVisible`; the user value
+defaults to `true` and persists through play, stop, natural expiry, loop replay, and transform
+updates. Setting it back to `true` returns control to the current runtime state. A non-mesh/unknown
+key throws `RangeError`, a non-boolean value throws `TypeError`, and released instances retain the
+usual released-instance guard. Each newly spawned instance starts again with `userVisible=true`.
+Direct assignment to the cloned `Object3D.visible` field is not a persistent override: the next
+visibility publication from `setUserVisible()`, play, stop, expiry, or loop replay may overwrite it.
+Always use `setUserVisible()` for user-owned visibility.
 
 Each emitter `play()` action spawns an independent single-element core instance. Renderer
 integrations can capture the exact `VfxEmitterRuntimeView` from `event.emitter` in
@@ -54,6 +72,14 @@ without walking timeline entries or advancing local/world time. It uses the same
 single-element core definitions as later `play()` actions, so prepared kernels are checked out by
 the first real play. Timeline duration, delayed entries, and loop count do not increase preparation
 work. Pass a Three effect preparer to include mesh-fx and renderer draw compilation.
+
+Preparation uses the same geometry borrow and cloned-material boundary as playback. A non-retained
+success, preparer throw, or abort disposes the temporary cloned material while preserving the source
+material and shared geometry. Returning `{ retained: true }` transfers the detached clone and its
+material to the preparer; that owner must dispose the cloned material when its retained pipeline is
+released. The retained consumer must not dispose the borrowed geometry—the application/resource
+owner keeps it alive until the definition, every playback clone, and every retained prepared object
+are finished, then disposes the geometry once.
 
 Timeline-external core effects such as socket-following trails can subscribe to the same controls:
 

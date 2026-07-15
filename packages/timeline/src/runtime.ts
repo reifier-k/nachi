@@ -111,7 +111,24 @@ type MeshRuntime = {
   readonly duration: number;
   readonly mesh: MeshFxMesh;
   playing: boolean;
+  runtimeVisible: boolean;
+  userVisible: boolean;
 };
+
+export type TimelineMeshFxElementKey<Definition extends RuntimeDefinition> =
+  string extends keyof Definition['elements']
+    ? string
+    : Extract<
+        {
+          [Key in keyof Definition['elements']]: Definition['elements'][Key] extends {
+            readonly kind: 'visual-element';
+            readonly type: 'timeline/mesh-fx';
+          }
+            ? Key
+            : never;
+        }[keyof Definition['elements']],
+        string
+      >;
 
 type AuthoredLocalTransform = {
   readonly position: readonly [number, number, number];
@@ -284,7 +301,6 @@ function cloneMesh(
   });
   const mesh = resource.mesh.clone() as MeshFxMesh;
   mesh.material = cloneMaterial(resource.mesh.material, `elements.${key}.material`);
-  mesh.visible = false;
   return { authoredLocal, mesh };
 }
 
@@ -317,6 +333,15 @@ function setMeshTransform(
 
 function fxMaterials(mesh: MeshFxMesh): FxNodeMaterial[] {
   return 'fx' in mesh.material ? [mesh.material as FxNodeMaterial] : [];
+}
+
+function publishMeshVisibility(runtime: MeshRuntime): void {
+  runtime.mesh.visible = runtime.runtimeVisible && runtime.userVisible;
+}
+
+function setMeshRuntimeVisible(runtime: MeshRuntime, visible: boolean): void {
+  runtime.runtimeVisible = visible;
+  publishMeshVisibility(runtime);
 }
 
 export class TimelineEffectInstance<Definition extends RuntimeDefinition = RuntimeDefinition> {
@@ -387,15 +412,19 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     try {
       for (const [key, resource] of getMeshFxResources(definition)) {
         const { authoredLocal, mesh } = cloneMesh(key, resource);
-        setMeshTransform(mesh, authoredLocal, this.#position, this.#rotation);
-        this.#scene?.add(mesh);
-        this.#meshRuntimes.set(key, {
+        const runtime: MeshRuntime = {
           authoredLocal,
           duration: resource.duration,
           elapsed: 0,
           mesh,
           playing: false,
-        });
+          runtimeVisible: false,
+          userVisible: true,
+        };
+        publishMeshVisibility(runtime);
+        setMeshTransform(mesh, authoredLocal, this.#position, this.#rotation);
+        this.#meshRuntimes.set(key, runtime);
+        this.#scene?.add(mesh);
       }
       if (definition.timeline === undefined) {
         for (const key of Object.keys(definition.elements)) this.#playElement(key);
@@ -585,6 +614,20 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     this.#visitCompanions((companion) => companion.setTimeScale(this.#effectiveTimeScale()));
   }
 
+  /** Persists a user visibility override across mesh-fx lifecycle and replay transitions. */
+  setUserVisible(key: TimelineMeshFxElementKey<Definition>, visible: boolean): void {
+    this.#assertNotReleased();
+    if (typeof visible !== 'boolean') {
+      throw new TypeError('Timeline mesh-fx visibility must be a boolean.');
+    }
+    const runtime = this.#meshRuntimes.get(key);
+    if (!runtime) {
+      throw new RangeError(`Timeline element "${key}" is not an adapted mesh-fx element.`);
+    }
+    runtime.userVisible = visible;
+    publishMeshVisibility(runtime);
+  }
+
   setTransform(position: PositionInput, rotation?: RotationInput): void {
     this.#assertNotReleased();
     this.#position = position;
@@ -694,7 +737,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
       }
       if (runtime.elapsed + EPSILON >= runtime.duration) {
         runtime.playing = false;
-        runtime.mesh.visible = false;
+        setMeshRuntimeVisible(runtime, false);
       }
     }
     for (const shake of this.#activeShakes) shake.elapsed += localDelta;
@@ -814,7 +857,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     if (mesh) {
       mesh.elapsed = 0;
       mesh.playing = true;
-      mesh.mesh.visible = true;
+      setMeshRuntimeVisible(mesh, true);
       for (const material of fxMaterials(mesh.mesh)) {
         material.fx.setTime(this.#localTime);
         setTimelineFxMaterialLife(material, 0);
@@ -850,7 +893,7 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     const mesh = this.#meshRuntimes.get(key);
     if (mesh) {
       mesh.playing = false;
-      mesh.mesh.visible = false;
+      setMeshRuntimeVisible(mesh, false);
     }
     const emitter = this.#activeEmitters.get(key);
     if (emitter) {
@@ -1048,7 +1091,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       this.#cameraShakeTarget,
       (key, spawnOptions) => this.#spawnEmitter(definition, key, spawnOptions),
     );
-    this.#instances.set(id, instance);
+    // The system owns instances through the non-generic runtime surface. The returned instance
+    // retains Definition so mesh-only target keys remain precise for callers.
+    this.#instances.set(id, instance as unknown as TimelineEffectInstance);
     return instance;
   }
 

@@ -66,6 +66,21 @@ the same apparent feature size.
 Three.js is an exact `three@0.185.1` peer. The package is ESM-only and declares
 `sideEffects: false`.
 
+## Geometry ownership with timeline clones
+
+Procedural mesh factories return an application-owned mesh, geometry, and material. When that mesh
+is adapted by `@nachi-vfx/timeline`, timeline clones the mesh object and material controls but keeps
+the exact same `BufferGeometry` reference. Geometry is therefore an immutable borrowed resource:
+attribute, index, group, bounding-volume, or `drawRange` mutation through either the source or any
+clone is immediately visible to every other clone.
+
+The application/resource owner must keep the geometry alive while the source definition or any
+timeline instance can use it, and call `geometry.dispose()` only after all such instances and any
+retained prepared object have been released. Timeline release/error cleanup disposes each cloned
+material, but never the borrowed geometry or the source mesh/material. Do not dispose geometry from
+an instance lifecycle callback; if mutable per-instance geometry is required, manage separate
+application-owned resources outside this shared timeline adapter contract.
+
 ## Blender VAT runtime
 
 `applyVat()` applies a one-frame-per-row Vertex Animation Texture to any single Three.js

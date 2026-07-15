@@ -56,6 +56,7 @@ const query = new URLSearchParams(location.search);
 const headless = query.get('headless') === '1';
 const disableOverLifeProbe = query.get('disableOverLife') === '1';
 const disableOpacityOverLifeProbe = query.get('disableOpacityOverLife') === '1';
+const forceFailure = query.get('forceFailure');
 const consoleMessages: string[] = [];
 const originalWarn = console.warn.bind(console);
 const originalError = console.error.bind(console);
@@ -210,6 +211,155 @@ function changedPixels(left: Uint8Array, right: Uint8Array): number {
       count += 1;
   }
   return count;
+}
+
+async function meshFxStateOwnershipGpuProbe(renderer: THREE.WebGPURenderer) {
+  const material = fxMaterial({ blending: 'additive', color: '#ffffff', opacity: 0.8 });
+  material.fx.setOpacity(0.2);
+  material.side = THREE.DoubleSide;
+  material.depthTest = false;
+  material.colorWrite = true;
+  material.name = 'm9-current-state';
+  material.userData = { ownership: { source: 9 } };
+  const source = ring({ innerRadius: 0.35, material, outerRadius: 0.75, segments: 48 });
+  source.name = 'm9-state-ownership';
+  const effect = defineEffect({
+    elements: { ring: meshFxElement(source, { duration: 0.04 }) },
+    timeline: timeline([at(0, play('ring')), at(0.04, stop('ring')), at(0.06, play('ring'))], {
+      duration: 0.1,
+    }),
+  });
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0);
+  const system = new VFXSystem({}, scene);
+  const instance = system.spawn(effect);
+  const clone = scene.getObjectByName('m9-state-ownership') as THREE.Mesh;
+  const cloneMaterial = clone.material as ReturnType<typeof fxMaterial>;
+  const authoringMaterial = fxMaterial({
+    blending: 'additive',
+    color: '#ffffff',
+    opacity: 0.8,
+  });
+  authoringMaterial.side = THREE.DoubleSide;
+  const authoringSource = ring({
+    innerRadius: 0.35,
+    material: authoringMaterial,
+    outerRadius: 0.75,
+    segments: 48,
+  });
+  const authoringEffect = defineEffect({ elements: { ring: authoringSource } });
+  const authoringScene = new THREE.Scene();
+  authoringScene.background = new THREE.Color(0);
+  const authoringSystem = new VFXSystem({}, authoringScene);
+  const authoringInstance = authoringSystem.spawn(authoringEffect);
+  const target = new THREE.RenderTarget(64, 64, { depthBuffer: true });
+  target.texture.colorSpace = THREE.NoColorSpace;
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  camera.position.z = -3;
+  camera.lookAt(0, 0, 0);
+  const captureMaximumEnergy = async (captureScene: THREE.Scene) => {
+    renderer.setRenderTarget(target);
+    renderer.render(captureScene, camera);
+    const pixels = compactRgba8Readback(
+      new Uint8Array(await renderer.readRenderTargetPixelsAsync(target, 0, 0, 64, 64)),
+      64,
+      64,
+      true,
+    );
+    let maximum = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      maximum = Math.max(
+        maximum,
+        (pixels[offset] ?? 0) + (pixels[offset + 1] ?? 0) + (pixels[offset + 2] ?? 0),
+      );
+    }
+    return maximum;
+  };
+
+  await system.update(0);
+  await authoringSystem.update(0);
+  const currentOpacityEnergy = await captureMaximumEnergy(scene);
+  const authoringOpacityEnergy = await captureMaximumEnergy(authoringScene);
+  material.fx.setOpacity(0.9);
+  material.side = THREE.FrontSide;
+  material.userData.ownership.source = 0;
+  const afterSourceMutationEnergy = await captureMaximumEnergy(scene);
+  instance.setUserVisible('ring', false);
+  await system.update(0.06);
+  if (forceFailure === 'timeline-user-visible') instance.setUserVisible('ring', true);
+  const replayHiddenEnergy = await captureMaximumEnergy(scene);
+  const replayState = instance.getElementState('ring');
+  instance.setUserVisible('ring', true);
+  const restoredEnergy = await captureMaximumEnergy(scene);
+
+  const stateSnapshot =
+    cloneMaterial.fx.opacity?.value === 0.2 &&
+    cloneMaterial.side === THREE.DoubleSide &&
+    cloneMaterial.depthTest === false &&
+    cloneMaterial.colorWrite === true &&
+    cloneMaterial.name === 'm9-current-state' &&
+    cloneMaterial.userData.ownership?.source === 9;
+  const graphIndependent =
+    cloneMaterial.opacityNode !== material.opacityNode &&
+    cloneMaterial.colorNode !== material.colorNode &&
+    cloneMaterial.fx.opacity !== material.fx.opacity &&
+    cloneMaterial.fx.time !== material.fx.time &&
+    cloneMaterial.fx.normalizedLife !== material.fx.normalizedLife;
+  const stateIndependent =
+    cloneMaterial.fx.opacity?.value === 0.2 &&
+    cloneMaterial.side === THREE.DoubleSide &&
+    cloneMaterial.userData.ownership?.source === 9 &&
+    cloneMaterial.userData.ownership !== material.userData.ownership;
+  const opacityRatio = currentOpacityEnergy / authoringOpacityEnergy;
+  const opacityCausal =
+    currentOpacityEnergy >= 140 &&
+    currentOpacityEnergy <= 170 &&
+    authoringOpacityEnergy >= 590 &&
+    authoringOpacityEnergy <= 630 &&
+    opacityRatio >= 0.22 &&
+    opacityRatio <= 0.28 &&
+    afterSourceMutationEnergy === currentOpacityEnergy;
+  const geometryBorrowed =
+    clone.geometry === source.geometry &&
+    clone.geometry.getAttribute('position') === source.geometry.getAttribute('position');
+  const visibilityComposed =
+    replayState?.playing === true &&
+    replayState.visible === false &&
+    replayHiddenEnergy === 0 &&
+    restoredEnergy === currentOpacityEnergy;
+  const ok =
+    stateSnapshot &&
+    stateIndependent &&
+    graphIndependent &&
+    opacityCausal &&
+    geometryBorrowed &&
+    visibilityComposed;
+  instance.release();
+  authoringInstance.release();
+  renderer.setRenderTarget(null);
+  material.dispose();
+  source.geometry.dispose();
+  authoringMaterial.dispose();
+  authoringSource.geometry.dispose();
+  target.dispose();
+  return {
+    fault: forceFailure,
+    geometryBorrowed,
+    graphIndependent,
+    ok,
+    opacityCausal,
+    pixels: {
+      afterSourceMutationEnergy,
+      authoringOpacityEnergy,
+      currentOpacityEnergy,
+      opacityRatio,
+      replayHiddenEnergy,
+      restoredEnergy,
+    },
+    stateIndependent,
+    stateSnapshot,
+    visibilityComposed,
+  };
 }
 
 type Rgb = readonly [number, number, number];
@@ -537,17 +687,24 @@ async function measurePerformance(): Promise<void> {
     page: 'm9-timeline',
   });
   await system.update(0.12);
-  renderer.setRenderTarget(new THREE.RenderTarget(64, 64));
+  const target = new THREE.RenderTarget(64, 64);
+  renderer.setRenderTarget(target);
   const camera = new THREE.OrthographicCamera(-2, 2, 2, -2, 0.1, 10);
   camera.position.z = 5;
-  renderer.render(scene, camera);
-  await renderer.resolveTimestampsAsync('render');
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  await monitor.captureGpuSamples(async () => {
+    await system.update(1 / 120);
+    renderer.render(scene, camera);
+    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+  });
+  renderer.setRenderTarget(null);
+  target.dispose();
   renderer.dispose();
 }
 
 async function run(): Promise<void> {
+  if (forceFailure !== null && forceFailure !== 'timeline-user-visible') {
+    throw new Error(`Unknown M9 timeline fault: ${forceFailure}`);
+  }
   root.dataset.rendererStatus = 'initializing';
   root.dataset.spikeStatus = 'running';
   const renderer = await createPlaygroundRenderer({ antialias: false, trackTimestamp: false });
@@ -638,6 +795,7 @@ async function run(): Promise<void> {
   const curveChanged = changedPixels(arcFirst, arcSecond);
   const overLifeGpu = await meshFxOverLifeGpuProbe(renderer, runtime);
   const opacityOverLifeGpu = await meshFxOpacityOverLifeGpuProbe(renderer, runtime);
+  const stateOwnershipGpu = await meshFxStateOwnershipGpuProbe(renderer);
   await system.update(0.15);
   const stopEffects = {
     arcHidden: instance.getElementState('arc')?.visible === false,
@@ -676,6 +834,7 @@ async function run(): Promise<void> {
     markerCallback: markerCount === 1,
     meshFxOverLifeGpu: overLifeGpu.ok,
     meshFxOpacityOverLifeGpu: opacityOverLifeGpu.ok,
+    meshFxStateOwnershipGpu: stateOwnershipGpu.ok,
     playEffects: flashDeferredUntilUpdate && arcVisibleAtPlay && shockwaveVisible,
     stopEffects: Object.values(stopEffects).every(Boolean),
     stress600:
@@ -698,6 +857,7 @@ async function run(): Promise<void> {
         opacityFadeSample: opacityOverLifeGpu,
         times: [0.05, 0.3],
       },
+      stateOwnershipGpu,
       hitStopSeparation,
       linearReadbackThreshold: 24,
       loop,
@@ -708,9 +868,9 @@ async function run(): Promise<void> {
     schema: 'nachi.m9-timeline-smoke.v1',
   };
   await measurePerformance();
-  root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'm9-timeline.png', selector: '#timeline-visual' },
-  ]);
+  root.dataset.artifactScreenshots = JSON.stringify(
+    headless ? [] : [{ filename: 'm9-timeline.png', selector: '#timeline-visual' }],
+  );
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = 'complete';
