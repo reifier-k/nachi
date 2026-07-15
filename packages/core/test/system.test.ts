@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { nextEffectInstanceIdentity } from '../src/internal-instance-identity.js';
+import { setSimulationCacheSpawnOrderRequestTotal } from '../src/internal-sim-cache-lineage.js';
 
 import {
   EffectClock,
@@ -1459,10 +1460,12 @@ class SequenceCacheRuntimeRenderer extends CacheRuntimeRenderer {
 class MappedReadbackRenderer extends FakeRuntimeRenderer {
   readonly storageValues = new Map<KernelStorageNode, Uint32Array>();
   readonly storageSequences = new Map<KernelStorageNode, Uint32Array[]>();
+  readonly readStorages: KernelStorageNode[] = [];
   readCount = 0;
 
   readStorage(storage: KernelStorageNode): Promise<ArrayBuffer> {
     this.readCount += 1;
+    this.readStorages.push(storage);
     const sequence = this.storageSequences.get(storage);
     const values = sequence?.shift() ?? this.storageValues.get(storage) ?? new Uint32Array(32);
     return Promise.resolve(values.slice().buffer);
@@ -4731,6 +4734,12 @@ describe('M11 VFXSystem scalability scheduling', () => {
     const emitter = defineEmitter({
       attributes: { booleanValue, quantizedVector, signedValue, unsignedValue },
       capacity: 3,
+      init: [
+        tslModule(() => ({}), {
+          access: { reads: ['Particles.spawnOrder'], writes: [] },
+          stage: 'init',
+        }),
+      ],
       render,
       spawn: burst({ count: 0 }),
     });
@@ -4744,6 +4753,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
       ],
       ['booleanValue', new Uint32Array([0, 1, 1])],
       ['signedValue', new Int32Array([-2_147_483_648, -17, 2_147_483_647])],
+      ['spawnOrder', new Uint32Array([0, 1, 2])],
       ['unsignedValue', new Uint32Array([0, 0x89ab_cdef, 0xffff_ffff])],
     ]);
     const physical = schema.storageArrays.map((storage) => {
@@ -4776,6 +4786,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
     const lifecycle = new Uint32Array(program.meta.lifecycleStorage.buffers.state.wordCount);
     const lifecycleFields = program.meta.lifecycleStorage.buffers.state.fields;
     lifecycle[lifecycleFields.aliveCount.offsetWords] = schema.capacity;
+    lifecycle[lifecycleFields.nextSpawnOrder.offsetWords] = schema.capacity;
     for (let particle = 0; particle < schema.capacity; particle += 1) {
       lifecycle[lifecycleFields.aliveIndices.offsetWords + particle] = particle;
     }
@@ -4843,6 +4854,123 @@ describe('M11 VFXSystem scalability scheduling', () => {
     });
   });
 
+  const bakeSyntheticLineageLoop = async (
+    endpoint: {
+      readonly alive: readonly number[];
+      readonly lineages: readonly number[];
+      readonly positions: readonly number[];
+    },
+    options: { readonly compression?: 'float32' | 'quantized-u16'; readonly loop?: boolean } = {},
+  ) => {
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      ...computeRender,
+      access: { reads: ['Particles.position'], writes: [] },
+    };
+    const emitter = defineEmitter({
+      capacity: 2,
+      init: [
+        tslModule(() => ({}), {
+          access: { reads: ['Particles.spawnOrder'], writes: [] },
+          stage: 'init',
+        }),
+      ],
+      render,
+      spawn: burst({ count: 0 }),
+    });
+    const definition = defineEffect({ elements: { particles: emitter } });
+    const program = compileEmitter(emitter);
+    const schema = program.attributeSchema;
+    const position = schema.byName.position!;
+    const lineage = schema.byName.spawnOrder!;
+    const selectedStorageIndexes = [
+      ...new Set([position.physical.bufferIndex, lineage.physical.bufferIndex]),
+    ];
+    const frame = (
+      alive: readonly number[],
+      lineages: readonly number[],
+      positions: readonly number[],
+    ): ArrayBuffer[] => {
+      const lifecycle = new Uint32Array(program.meta.lifecycleStorage.buffers.state.wordCount);
+      const fields = program.meta.lifecycleStorage.buffers.state.fields;
+      lifecycle[fields.aliveCount.offsetWords] = alive.length;
+      lifecycle[fields.nextSpawnOrder.offsetWords] = 12;
+      lifecycle.set(alive, fields.aliveIndices.offsetWords);
+      const physical = schema.storageArrays.map((storage) => {
+        const length = storage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type];
+        return storage.componentType === 'uint'
+          ? new Uint32Array(length)
+          : storage.componentType === 'int'
+            ? new Int32Array(length)
+            : new Float32Array(length);
+      });
+      for (let particle = 0; particle < schema.capacity; particle += 1) {
+        const positionStorage = schema.storageArrays[position.physical.bufferIndex]!;
+        const lineageStorage = schema.storageArrays[lineage.physical.bufferIndex]!;
+        physical[position.physical.bufferIndex]![
+          attributeStorageComponentIndex(position, positionStorage, 'webgpu', particle, 0)
+        ] = positions[particle] ?? 0;
+        physical[lineage.physical.bufferIndex]![
+          attributeStorageComponentIndex(lineage, lineageStorage, 'webgpu', particle, 0)
+        ] = lineages[particle] ?? 0;
+      }
+      return [lifecycle.buffer, ...selectedStorageIndexes.map((index) => physical[index]!.buffer)];
+    };
+    const readbacks = [
+      ...frame([0, 1], [10, 11], [1, 2]),
+      ...frame(endpoint.alive, endpoint.lineages, endpoint.positions),
+    ];
+    return bakeSimulation(new VFXSystem(new SequenceCacheRuntimeRenderer(readbacks)), definition, {
+      compression: options.compression ?? 'float32',
+      frames: 2,
+      loop: options.loop ?? true,
+    });
+  };
+
+  it('accepts loop endpoints matched by lineage despite alive compaction order', async () => {
+    const cache = await bakeSyntheticLineageLoop(
+      { alive: [1, 0], lineages: [11, 10], positions: [2, 1] },
+      { compression: 'quantized-u16' },
+    );
+
+    expect(cache.metadata.loop).toMatchObject({
+      continuous: true,
+      integerAttributesMatch: true,
+      lineageMatch: true,
+      maximumAttributeError: 0,
+    });
+    const emitter = cache.metadata.emitters[0]!;
+    expect(
+      [0, 1].map((frame) => [
+        ...new Uint32Array(
+          cache.data,
+          emitter.lineageOffsetBytes + frame * emitter.lineageFrameStrideBytes,
+          emitter.capacity,
+        ),
+      ]),
+    ).toEqual([
+      [10, 11],
+      [11, 10],
+    ]);
+  });
+
+  it('rejects loop lineage set, individual value, and duplicate-lineage differences', async () => {
+    await expect(
+      bakeSyntheticLineageLoop({ alive: [1, 0], lineages: [10, 12], positions: [1, 2] }),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_LOOP_DISCONTINUITY' })],
+    });
+    await expect(
+      bakeSyntheticLineageLoop({ alive: [1, 0], lineages: [10, 11], positions: [1, 3] }),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_LOOP_DISCONTINUITY' })],
+    });
+    await expect(
+      bakeSyntheticLineageLoop({ alive: [1, 0], lineages: [10, 10], positions: [1, 2] }),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_LINEAGE_DUPLICATE' })],
+    });
+  });
+
   it('bakes render reads into quantized binary metadata and replays without simulation submits', async () => {
     const definition = defineEffect({
       elements: {
@@ -4866,10 +4994,10 @@ describe('M11 VFXSystem scalability scheduling', () => {
       expect.objectContaining({ encoding: 'quantized-u16', name: 'spriteRotation' }),
     ]);
     expect(cache.metadata.loop).toMatchObject({
-      aliveIndicesMatch: true,
       continuous: true,
       enabled: true,
       integerAttributesMatch: true,
+      lineageMatch: true,
       maximumAttributeError: 0,
     });
     expect(cache.metadata.sourceBackend).toBe('webgpu');
@@ -4915,6 +5043,127 @@ describe('M11 VFXSystem scalability scheduling', () => {
     });
   });
 
+  it('keeps cache-only lineage out of the ordinary schema, birth ring, and replay upload budget', async () => {
+    const category = attribute('category', { default: 7, type: 'u32' });
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      ...computeRender,
+      access: { reads: ['Particles.category'], writes: [] },
+    };
+    const emitter = defineEmitter({
+      attributes: { category },
+      capacity: 4,
+      render,
+      spawn: burst({ count: 0 }),
+    });
+    const definition = defineEffect({ elements: { particles: emitter } });
+    const serializedBeforeBake = JSON.stringify(definition);
+    const ordinaryProgram = compileEmitter(emitter);
+    expect(ordinaryProgram.attributeSchema.byName.spawnOrder).toBeUndefined();
+    const categoryAttribute = ordinaryProgram.attributeSchema.byName.category!;
+    const categoryStorage =
+      ordinaryProgram.attributeSchema.storageArrays[categoryAttribute.physical.bufferIndex]!;
+    const expectedUploadBytes =
+      categoryStorage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[categoryStorage.type] * 4 +
+      ordinaryProgram.meta.lifecycleStorage.buffers.state.wordCount * 4 +
+      4;
+    const system = new VFXSystem(new CacheRuntimeRenderer());
+    const cache = await bakeSimulation(system, definition, { frames: 2 });
+    const metadata = cache.metadata.emitters[0]!;
+
+    expect(JSON.stringify(definition)).toBe(serializedBeforeBake);
+    expect(emitter.init).toBeUndefined();
+    expect(metadata.attributes.map(({ name }) => name)).toEqual(['category']);
+    expect(metadata.birthIndicesOffsetBytes).toBeUndefined();
+    expect(metadata.nextSpawnOrders).toBeUndefined();
+    expect(metadata.lineageFrameStrideBytes).toBe(16);
+    expect(cache.metadata.uploadBytesPerFrame).toBe(expectedUploadBytes);
+    expect(system.compilationCount).toBe(2);
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
+  });
+
+  it('uses the compiled original schema as truth for implicit range and optional spawnOrder reads', async () => {
+    const randomized = attribute('randomized', { default: range(1, 2), type: 'f32' });
+    const render: ModuleDefinition<'render', Record<string, never>> = {
+      ...computeRender,
+      access: { reads: ['Particles.randomized'], writes: [] },
+    };
+    const optionalOrder = tslModule(() => ({}), {
+      access: { optionalReads: ['Particles.spawnOrder'], reads: [], writes: [] },
+      stage: 'update',
+    });
+    const emitter = defineEmitter({
+      attributes: { randomized },
+      capacity: 2,
+      integration: 'none',
+      render,
+      spawn: burst({ count: 0 }),
+      update: [optionalOrder],
+    });
+    expect(compileEmitter(emitter).attributeSchema.byName.spawnOrder).toBeDefined();
+    const definition = defineEffect({ elements: { particles: emitter } });
+    const system = new VFXSystem(new CacheRuntimeRenderer());
+    const cache = await bakeSimulation(system, definition, { frames: 1 });
+
+    expect(system.compilationCount).toBe(1);
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
+    expect(cache.metadata.emitters[0]?.birthIndicesOffsetBytes).toBeUndefined();
+    expect(cache.metadata.emitters[0]?.lineageFrameStrideBytes).toBe(8);
+  });
+
+  it('records present optional render attributes and skips absent optional fallbacks', async () => {
+    const optionalSpawnOrderRender: ModuleDefinition<'render', Record<string, never>> = {
+      ...computeRender,
+      access: { optionalReads: ['Particles.spawnOrder'], reads: [], writes: [] },
+    };
+    const presentDefinition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 2,
+          render: optionalSpawnOrderRender,
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    expect(
+      compileEmitter(presentDefinition.elements.particles).attributeSchema.byName.spawnOrder,
+    ).toBeDefined();
+    const present = await bakeSimulation(
+      new VFXSystem(new CacheRuntimeRenderer()),
+      presentDefinition,
+      { frames: 1 },
+    );
+    expect(present.metadata.emitters[0]).toMatchObject({
+      attributes: [expect.objectContaining({ encoding: 'uint32', name: 'spawnOrder' })],
+      birthIndicesFrameStrideBytes: 8,
+      nextSpawnOrders: [0],
+    });
+
+    const absentOptionalRender: ModuleDefinition<'render', Record<string, never>> = {
+      ...computeRender,
+      access: { optionalReads: ['Particles.absentCustom'], reads: [], writes: [] },
+    };
+    const absentDefinition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 2,
+          render: absentOptionalRender,
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const absentOriginal = compileEmitter(absentDefinition.elements.particles).attributeSchema;
+    expect(absentOriginal.byName.absentCustom).toBeUndefined();
+    expect(absentOriginal.byName.spawnOrder).toBeUndefined();
+    const absent = await bakeSimulation(
+      new VFXSystem(new CacheRuntimeRenderer()),
+      absentDefinition,
+      { frames: 1 },
+    );
+    expect(absent.metadata.emitters[0]).toMatchObject({ attributes: [] });
+    expect(absent.metadata.emitters[0]?.birthIndicesOffsetBytes).toBeUndefined();
+    expect(absent.metadata.emitters[0]?.nextSpawnOrders).toBeUndefined();
+  });
+
   it('flushes replay uploads before immediate debug readback and resumes from a completed seek', async () => {
     const definition = defineEffect({
       elements: {
@@ -4946,6 +5195,8 @@ describe('M11 VFXSystem scalability scheduling', () => {
     expect(player.localTime).toBe(seekTime);
     await player.update(player.duration / 4);
     expect(player.localTime).toBeCloseTo((player.duration * 3) / 4);
+    player.release();
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
   });
 
   it('rejects hostile cache layouts and indices with structured metadata diagnostics', async () => {
@@ -4986,6 +5237,22 @@ describe('M11 VFXSystem scalability scheduling', () => {
         const emitter = metadata.emitters[0]!;
         new Uint32Array(data, emitter.aliveIndicesOffsetBytes, 1)[0] = emitter.capacity;
       }),
+      corrupt(floatCache, (metadata, data) => {
+        Object.assign(metadata.emitters[0]!, { aliveCounts: [2] });
+        const emitter = metadata.emitters[0]!;
+        new Uint32Array(data, emitter.aliveIndicesOffsetBytes, 2).set([0, 1]);
+        new Uint32Array(data, emitter.lineageOffsetBytes, 2).set([7, 7]);
+      }),
+      corrupt(floatCache, (metadata) => {
+        const emitter = metadata.emitters[0]!;
+        Object.assign(emitter, { lineageOffsetBytes: emitter.aliveIndicesOffsetBytes });
+      }),
+      corrupt(floatCache, (metadata) => {
+        Object.assign(metadata.emitters[0]!, { lineageFrameStrideBytes: 2 });
+      }),
+      corrupt(floatCache, (metadata) => {
+        Object.assign(metadata.emitters[0]!, { lineageOffsetBytes: undefined });
+      }),
       corrupt(floatCache, (metadata) => {
         Object.assign(metadata.emitters[0]!.attributes[0]!, { offsetBytes: 1 });
       }),
@@ -5019,6 +5286,48 @@ describe('M11 VFXSystem scalability scheduling', () => {
     }
   });
 
+  it('rejects v1 and missing cache metadata before reading v2 lineage fields', async () => {
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 1,
+          render: computeRender,
+          spawn: burst({ count: 0 }),
+        }),
+      },
+    });
+    const current = await bakeSimulation(new VFXSystem(new CacheRuntimeRenderer()), definition, {
+      frames: 1,
+    });
+    const legacyMetadata = JSON.parse(JSON.stringify(current.metadata)) as Record<string, unknown>;
+    legacyMetadata.version = 1;
+    const legacyEmitter = (legacyMetadata.emitters as Array<Record<string, unknown>>)[0]!;
+    delete legacyEmitter.lineageOffsetBytes;
+    delete legacyEmitter.lineageFrameStrideBytes;
+
+    for (const fixture of [
+      { ...current, metadata: legacyMetadata },
+      { ...current, metadata: undefined },
+    ]) {
+      expect(() => estimateSimulationCacheMemory(fixture as never)).toThrowError(
+        expect.objectContaining({
+          diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_VERSION_UNSUPPORTED' })],
+        }),
+      );
+    }
+
+    const replaySystem = new VFXSystem(new CacheRuntimeRenderer());
+    await expect(
+      replaySimulation(replaySystem, definition, {
+        ...current,
+        metadata: legacyMetadata,
+      } as never),
+    ).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_VERSION_UNSUPPORTED' })],
+    });
+    expect(replaySystem.instanceCount).toBe(0);
+  });
+
   it('warms up by sampleStartFrame fixed steps before recording cache frames', async () => {
     const definition = defineEffect({
       elements: {
@@ -5038,6 +5347,65 @@ describe('M11 VFXSystem scalability scheduling', () => {
 
     expect(cache.metadata.sampleStartFrame).toBe(2);
     expect(renderer.submissions.filter((name) => name === 'NachiEmitterUpdate')).toHaveLength(3);
+  });
+
+  it('uses the conservative request total only to trigger an exact warmup lineage readback', async () => {
+    const bake = async (requestTotal: number, gpuNextSpawnOrder: number) => {
+      const definition = defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 1,
+            render: billboard({ blending: 'additive' }),
+            spawn: burst({ count: 0 }),
+          }),
+        },
+      });
+      const renderer = new MappedReadbackRenderer();
+      const system = new VFXSystem(renderer);
+      const spawn = system.spawn.bind(system);
+      let bakeLifecycle: KernelStorageNode | undefined;
+      vi.spyOn(system, 'spawn').mockImplementation(((candidate, options) => {
+        const instance = spawn(candidate, options);
+        const emitter = instance.getEmitter('particles');
+        if (emitter?.program.attributeSchema.byName.spawnOrder !== undefined) {
+          setSimulationCacheSpawnOrderRequestTotal(emitter, requestTotal);
+          const lifecycle = new Uint32Array(emitter.kernels.nextSpawnOrderOffset + 1);
+          lifecycle[emitter.kernels.nextSpawnOrderOffset] = gpuNextSpawnOrder;
+          renderer.storageValues.set(emitter.kernels.aliveCount, lifecycle);
+          bakeLifecycle = emitter.kernels.aliveCount;
+        }
+        return instance;
+      }) as typeof system.spawn);
+      const result = bakeSimulation(system, definition, { frames: 1, sampleStartFrame: 1 });
+      return { bakeLifecycle: () => bakeLifecycle, renderer, result };
+    };
+
+    const below = await bake(SPAWN_ORDER_WRAP_WARNING_THRESHOLD - 1, 0);
+    await expect(below.result).resolves.toBeDefined();
+    expect(
+      below.renderer.readStorages.filter((storage) => storage === below.bakeLifecycle()),
+    ).toHaveLength(1);
+
+    const conservativeFalsePositive = await bake(SPAWN_ORDER_WRAP_WARNING_THRESHOLD, 0);
+    await expect(conservativeFalsePositive.result).resolves.toBeDefined();
+    expect(
+      conservativeFalsePositive.renderer.readStorages.filter(
+        (storage) => storage === conservativeFalsePositive.bakeLifecycle(),
+      ),
+    ).toHaveLength(3);
+
+    const exactThreshold = await bake(
+      SPAWN_ORDER_WRAP_WARNING_THRESHOLD,
+      SPAWN_ORDER_WRAP_WARNING_THRESHOLD,
+    );
+    await expect(exactThreshold.result).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_LINEAGE_WRAP_RISK' })],
+    });
+    expect(
+      exactThreshold.renderer.readStorages.filter(
+        (storage) => storage === exactThreshold.bakeLifecycle(),
+      ),
+    ).toHaveLength(1);
   });
 
   it('rejects baking through a system configured with a fixed timestep', async () => {
@@ -5076,7 +5444,8 @@ describe('M11 VFXSystem scalability scheduling', () => {
       },
       scalability: { culling: { frustum: true } },
     });
-    const culledSystem = new VFXSystem(new CacheRuntimeRenderer());
+    const culledRenderer = new CacheRuntimeRenderer();
+    const culledSystem = new VFXSystem(culledRenderer);
     culledSystem.setCamera({ ...camera, coordinateSystem: 'webgl' });
     await expect(
       bakeSimulation(culledSystem, definition, {
@@ -5086,8 +5455,12 @@ describe('M11 VFXSystem scalability scheduling', () => {
     ).rejects.toMatchObject({
       diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED' })],
     });
+    expect(culledSystem.instanceCount).toBe(0);
+    expect(culledSystem.getPooledInstanceCount(definition)).toBe(1);
+    expect(culledRenderer.releaseCount).toBe(1);
 
-    const suppressedSystem = new VFXSystem(new CacheRuntimeRenderer(), undefined, {
+    const suppressedRenderer = new CacheRuntimeRenderer();
+    const suppressedSystem = new VFXSystem(suppressedRenderer, undefined, {
       significanceBudget: { maxParticles: 0 },
     });
     await expect(bakeSimulation(suppressedSystem, definition, { frames: 1 })).rejects.toMatchObject(
@@ -5095,6 +5468,9 @@ describe('M11 VFXSystem scalability scheduling', () => {
         diagnostics: [expect.objectContaining({ code: 'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED' })],
       },
     );
+    expect(suppressedSystem.instanceCount).toBe(0);
+    expect(suppressedSystem.getPooledInstanceCount(definition)).toBe(1);
+    expect(suppressedRenderer.releaseCount).toBe(1);
   });
 
   it('rebuilds valid sorted draw indirection during cache replay', async () => {
@@ -5150,13 +5526,16 @@ describe('M11 VFXSystem scalability scheduling', () => {
         }),
       },
     });
-    await expect(
-      bakeSimulation(new VFXSystem(new CacheRuntimeRenderer()), definition, { frames: 1 }),
-    ).rejects.toMatchObject({
+    const renderer = new CacheRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    await expect(bakeSimulation(system, definition, { frames: 1 })).rejects.toMatchObject({
       diagnostics: [
         expect.objectContaining({ code: 'NACHI_SIM_CACHE_TRANSIENT_RENDER_ATTRIBUTE' }),
       ],
     });
+    expect(system.instanceCount).toBe(0);
+    expect(system.getPooledInstanceCount(definition)).toBe(1);
+    expect(renderer.releaseCount).toBe(1);
   });
 
   it('records birth-ring lifecycle data when a render path reads spawnOrder', async () => {
@@ -5187,18 +5566,18 @@ describe('M11 VFXSystem scalability scheduling', () => {
   });
 
   it('diagnoses birth-order schema drift in both replay directions', async () => {
-    const initializeFromOrder = tslModule(
-      ({ spawnOrder }) => ({ lifetime: spawnOrder.toFloat() }),
-      { stage: 'init' },
-    );
     const definition = (withBirthOrder: boolean) =>
       defineEffect({
         elements: {
           particles: defineEmitter({
             capacity: 2,
-            ...(withBirthOrder ? { init: [initializeFromOrder] } : {}),
             integration: 'none',
-            render: computeRender,
+            render: withBirthOrder
+              ? {
+                  ...computeRender,
+                  access: { reads: ['Particles.spawnOrder'], writes: [] },
+                }
+              : computeRender,
             spawn: burst({ count: 0 }),
           }),
         },

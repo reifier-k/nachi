@@ -15,6 +15,8 @@ const suites = [
       'm7-ribbons',
       'm12-neighbors',
       'm12-space',
+      { name: 'm11-cache-webgpu', path: 'm11-cache', search: 'backend=webgpu' },
+      { name: 'm11-cache-webgl', path: 'm11-cache', search: 'backend=webgl' },
     ],
   },
   {
@@ -30,7 +32,9 @@ if (process.argv.length > (updateScreenshots ? 3 : 2)) {
 }
 
 function run(page, baseUrl) {
-  const url = new URL(`${page}/`, baseUrl);
+  const path = typeof page === 'string' ? page : page.path;
+  const url = new URL(`${path}/`, baseUrl);
+  if (typeof page !== 'string') url.search = page.search;
   return new Promise((resolve) => {
     const arguments_ = [fileURLToPath(runner), url.toString(), '--adapter', 'swiftshader'];
     if (updateScreenshots) arguments_.push('--update-screenshots');
@@ -81,9 +85,10 @@ function run(page, baseUrl) {
 
 const results = [];
 for (const suite of suites) {
-  for (const page of suite.pages) {
+  for (const entry of suite.pages) {
+    const page = typeof entry === 'string' ? entry : entry.name;
     process.stdout.write(`[verification:${suite.name}] ${page} ... `);
-    const result = await run(page, suite.baseUrl);
+    const result = await run(entry, suite.baseUrl);
     results.push({ ...result, page, suite: suite.name });
     console.log(
       result.ok

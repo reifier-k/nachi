@@ -27,6 +27,7 @@ import { collectEmitterModules } from './emitter-modules.js';
 import { Grid2DRuntime, type Grid2DStageRegistry } from './grid2d.js';
 import { Grid3DRuntime, type Grid3DStageRegistry } from './grid3d.js';
 import { nextEffectInstanceIdentity } from './internal-instance-identity.js';
+import { setSimulationCacheSpawnOrderRequestTotal } from './internal-sim-cache-lineage.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
 import {
   applyEmitterQualityTier,
@@ -1678,6 +1679,9 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       );
       await this.#submitCompute(input.finalize, 'event');
       this.#pendingGpuSpawnRequested += input.binding.queue.capacity;
+      if (this.program.attributeSchema.byName.spawnOrder !== undefined) {
+        this.#trackSpawnOrderRequests(input.binding.queue.capacity);
+      }
     }
     if (this.kernels.eventInputs.length > 0) await this.#compactAlive();
   }
@@ -1911,11 +1915,11 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       );
       await this.#submitCompute(finalizeSpawn, 'spawn');
       this.#pendingGpuSpawnRequested += dispatchCount;
-      if (this.program.attributeSchema.byName.spawnOrder !== undefined) {
-        this.#trackSpawnOrderRequests(dispatchCount);
-      }
     } else {
       await this.#submitCompute(this.kernels.spawn, 'spawn');
+    }
+    if (this.program.attributeSchema.byName.spawnOrder !== undefined) {
+      this.#trackSpawnOrderRequests(dispatchCount);
     }
   }
 
@@ -2085,6 +2089,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #trackSpawnOrderRequests(requested: number): void {
     const previous = this.#spawnOrderRequestTotal;
     this.#spawnOrderRequestTotal = Math.min(Number.MAX_SAFE_INTEGER, previous + requested);
+    setSimulationCacheSpawnOrderRequestTotal(this, this.#spawnOrderRequestTotal);
     if (crossesSpawnOrderWarningThreshold(previous, requested)) this.#warnSpawnOrderWrapRisk();
   }
 
@@ -2531,8 +2536,16 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
   }
 
   release(): void {
+    this.#release(this.#state !== 'error');
+  }
+
+  /** @internal Releases materialized resources without admitting them to the reusable pool. */
+  releaseUnpooled(): void {
+    this.#release(false);
+  }
+
+  #release(poolable: boolean): void {
     if (this.#state === 'released') return;
-    const poolable = this.#state !== 'error';
     // Commit the terminal transition before invoking renderer-owned cleanup. Cleanup may throw,
     // but a failed release must never make the instance releasable a second time.
     this.#state = 'released';

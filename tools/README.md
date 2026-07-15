@@ -51,11 +51,26 @@ and 5174:
 pnpm verify:gpu
 ```
 
-The 15-page suite covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope and canonical
+The 17-entry suite covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope and canonical
 event routing, Grid2D, WBOIT, logical light top-N selection, VAT, textured ribbons, NeighborGrid,
 H2-6 world/emitter selectors plus shared Update-midpoint collision response, H2-7 renderer-v2
 particle/coarse ordering, mesh depth, decal spawn orientation, quality/pool boundaries on the
-existing `/m10-sort/` page, and all six showcase pages. H2-7 does not increase the page count.
+existing `/m10-sort/` page, all six showcase pages, and the WebGPU/WebGL M11 cache entries described
+below.
+
+The existing `/m11-cache/` page also verifies simulation-cache v2 lineage. Its WebGPU fixture bakes
+a capacity-one emitter whose physical slot is reused by a different `spawnOrder` between two cache
+frames, then proves that a linear sample at fraction 0.25 chooses the left/nearest frame in both GPU
+attributes and pixels instead of morphing unrelated particles. WebGL2 keeps the structured
+unsupported bake/replay diagnostics. The isolated `?forceFailure=lineage-alias` fault aliases the
+two recorded lineage values; run it directly with `spike-runner.mjs` and require only
+`slotReuseLineageNearest` to fail. This adds two permanent backend entries to the former 15-entry
+suite.
+
+Simulation-cache assets now require metadata/payload version 2. Version 1 or missing-version caches
+fail with `NACHI_SIM_CACHE_VERSION_UNSUPPORTED` and must be re-baked. The mandatory lossless lineage
+stream adds `4 * capacity * frameCount` binary bytes per emitter before alignment, but is not an
+additional ordinary per-frame replay upload.
 
 The M10 fixture accepts five isolated fault names through `forceFailure`:
 `default-unsorted`, `mesh-depth-write`, `rank-overwrite`, `decal-no-spawn-rotation`, and

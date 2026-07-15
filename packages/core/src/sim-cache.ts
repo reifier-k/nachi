@@ -1,13 +1,22 @@
-import { TSL_STORAGE_TYPE_PHYSICAL_LENGTHS, attributeStorageComponentIndex } from './attributes.js';
+import {
+  TSL_STORAGE_TYPE_PHYSICAL_LENGTHS,
+  attributeStorageComponentIndex,
+  resolveAttributeSchema,
+} from './attributes.js';
+import { tslModule } from './api.js';
 import { VfxDiagnosticError } from './diagnostics.js';
+import { applyEmitterQualityTier } from './scalability.js';
+import { simulationCacheSpawnOrderRequestTotal } from './internal-sim-cache-lineage.js';
 import type { VfxRuntimeRenderer } from './system.js';
 import type {
   AttributeType,
+  AttributeSchema,
   EffectDefinition,
   EffectElements,
   EffectInstance,
   EffectSpawnOptions,
   EmptyParameterSchema,
+  EmitterDefinition,
   ParameterSchema,
   QualityTier,
   ResolvedAttribute,
@@ -19,6 +28,7 @@ import type { VFXSystem, VfxEmitterRuntimeView } from './system.js';
 
 export type SimulationCacheCompression = 'float32' | 'quantized-u16';
 export type SimulationCacheInterpolation = 'linear' | 'nearest';
+export const SIMULATION_CACHE_VERSION = 2 as const;
 
 type CacheAttributeEncoding = 'float32' | 'int32' | 'quantized-u16' | 'uint32';
 
@@ -44,6 +54,9 @@ export interface SimulationCacheEmitterMetadata {
   readonly birthIndicesOffsetBytes?: number;
   readonly capacity: number;
   readonly key: string;
+  /** Per-physical-slot logical birth identity for every cache frame. */
+  readonly lineageFrameStrideBytes: number;
+  readonly lineageOffsetBytes: number;
   readonly nextSpawnOrders?: readonly number[];
 }
 
@@ -56,10 +69,10 @@ export interface SimulationCacheMetadata {
   readonly interpolation: SimulationCacheInterpolation;
   readonly kind: 'nachi-simulation-cache-metadata';
   readonly loop: {
-    readonly aliveIndicesMatch: boolean;
     readonly continuous: boolean;
     readonly enabled: boolean;
     readonly integerAttributesMatch: boolean;
+    readonly lineageMatch: boolean;
     readonly maximumAttributeError: number;
     readonly tolerance: number;
   };
@@ -67,7 +80,7 @@ export interface SimulationCacheMetadata {
   readonly sampleStartFrame: number;
   readonly sourceBackend: 'webgl2' | 'webgpu';
   readonly uploadBytesPerFrame: number;
-  readonly version: 1;
+  readonly version: 2;
 }
 
 export interface SimulationCache {
@@ -113,6 +126,7 @@ type RecordedEmitterFrame = {
   readonly aliveIndices: Uint32Array;
   readonly attributes: ReadonlyMap<string, LogicalArray>;
   readonly birthIndices?: Uint32Array;
+  readonly lineage: Uint32Array;
   readonly nextSpawnOrder?: number;
 };
 
@@ -120,9 +134,9 @@ type RecordedEmitter = {
   readonly capacity: number;
   readonly frames: RecordedEmitterFrame[];
   readonly key: string;
-  readonly lifecycleWordCount: number;
-  readonly schema: ResolvedAttributeSchema;
+  readonly rendererUsesSpawnOrder: boolean;
   readonly selected: readonly ResolvedAttribute[];
+  uploadBytesPerFrame: number;
 };
 
 function runtimeRenderer(system: VFXSystem): VfxRuntimeRenderer {
@@ -227,17 +241,42 @@ const ATTRIBUTE_COMPONENTS: Readonly<Record<AttributeType, number>> = {
 };
 
 function validateCacheStructureUnchecked(cache: SimulationCache): void {
+  const untrusted = cache as unknown as {
+    readonly kind?: unknown;
+    readonly metadata?: { readonly kind?: unknown; readonly version?: unknown };
+  };
+  if (untrusted.metadata?.version !== SIMULATION_CACHE_VERSION) {
+    const found =
+      typeof untrusted.metadata?.version === 'number'
+        ? String(untrusted.metadata.version)
+        : 'missing';
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_VERSION_UNSUPPORTED',
+      `Simulation cache format version ${found} is unsupported; expected ${SIMULATION_CACHE_VERSION}. Re-bake the cache with this runtime.`,
+      'metadata.version',
+    );
+  }
   if (
-    cache.kind !== 'simulation-cache' ||
-    cache.metadata.kind !== 'nachi-simulation-cache-metadata' ||
-    cache.metadata.version !== 1
+    untrusted.kind !== 'simulation-cache' ||
+    untrusted.metadata.kind !== 'nachi-simulation-cache-metadata'
   ) {
-    throw cacheDiagnostic('NACHI_SIM_CACHE_VERSION_UNSUPPORTED', 'Unsupported simulation cache.');
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_METADATA_INVALID',
+      'Simulation cache kind metadata is invalid.',
+      'metadata.kind',
+    );
   }
   if (!(cache.data instanceof ArrayBuffer)) {
     throw cacheDiagnostic(
       'NACHI_SIM_CACHE_METADATA_INVALID',
       'Simulation cache data must be an ArrayBuffer.',
+      'data',
+    );
+  }
+  if (cache.data.byteLength % Uint32Array.BYTES_PER_ELEMENT !== 0) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_METADATA_INVALID',
+      'Simulation cache payload length must be aligned to four bytes.',
       'data',
     );
   }
@@ -257,16 +296,16 @@ function validateCacheStructureUnchecked(cache: SimulationCache): void {
     !Number.isSafeInteger(cache.metadata.uploadBytesPerFrame) ||
     cache.metadata.uploadBytesPerFrame < 0 ||
     !Array.isArray(cache.metadata.emitters) ||
-    typeof cache.metadata.loop.aliveIndicesMatch !== 'boolean' ||
     typeof cache.metadata.loop.continuous !== 'boolean' ||
     typeof cache.metadata.loop.enabled !== 'boolean' ||
     typeof cache.metadata.loop.integerAttributesMatch !== 'boolean' ||
+    typeof cache.metadata.loop.lineageMatch !== 'boolean' ||
     !Number.isFinite(cache.metadata.loop.maximumAttributeError) ||
     cache.metadata.loop.maximumAttributeError < 0 ||
     !Number.isFinite(cache.metadata.loop.tolerance) ||
     cache.metadata.loop.tolerance < 0 ||
     cache.metadata.loop.continuous !==
-      (cache.metadata.loop.aliveIndicesMatch &&
+      (cache.metadata.loop.lineageMatch &&
         cache.metadata.loop.integerAttributesMatch &&
         cache.metadata.loop.maximumAttributeError <= cache.metadata.loop.tolerance)
   ) {
@@ -317,6 +356,22 @@ function validateCacheStructureUnchecked(cache: SimulationCache): void {
       cache.data.byteLength,
       `metadata.emitters.${emitter.key}.aliveIndicesOffsetBytes`,
     );
+    if (emitter.lineageFrameStrideBytes !== emitter.capacity * 4) {
+      throw cacheDiagnostic(
+        'NACHI_SIM_CACHE_METADATA_INVALID',
+        `Emitter ${emitter.key} lineage metadata is invalid.`,
+        `metadata.emitters.${emitter.key}.lineageOffsetBytes`,
+      );
+    }
+    payloadRegion(
+      regions,
+      emitter.lineageOffsetBytes,
+      emitter.lineageFrameStrideBytes,
+      frameCount,
+      Uint32Array.BYTES_PER_ELEMENT,
+      cache.data.byteLength,
+      `metadata.emitters.${emitter.key}.lineageOffsetBytes`,
+    );
     for (let frame = 0; frame < frameCount; frame += 1) {
       const count = emitter.aliveCounts[frame]!;
       const alive = new Uint32Array(
@@ -324,13 +379,31 @@ function validateCacheStructureUnchecked(cache: SimulationCache): void {
         emitter.aliveIndicesOffsetBytes + frame * emitter.aliveIndicesFrameStrideBytes,
         count,
       );
-      const seen = new Set<number>();
-      if (alive.some((index) => index >= emitter.capacity || seen.size === seen.add(index).size)) {
-        throw cacheDiagnostic(
-          'NACHI_SIM_CACHE_METADATA_INVALID',
-          `Emitter ${emitter.key} frame ${frame} has an out-of-capacity or duplicate alive index.`,
-          `metadata.emitters.${emitter.key}.aliveIndices`,
-        );
+      const lineage = new Uint32Array(
+        cache.data,
+        emitter.lineageOffsetBytes + frame * emitter.lineageFrameStrideBytes,
+        emitter.capacity,
+      );
+      const seenPhysicalIndices = new Set<number>();
+      const seenLineage = new Set<number>();
+      for (const physicalIndex of alive) {
+        if (physicalIndex >= emitter.capacity || seenPhysicalIndices.has(physicalIndex)) {
+          throw cacheDiagnostic(
+            'NACHI_SIM_CACHE_METADATA_INVALID',
+            `Emitter ${emitter.key} frame ${frame} has an out-of-capacity or duplicate alive index.`,
+            `metadata.emitters.${emitter.key}.aliveIndices`,
+          );
+        }
+        seenPhysicalIndices.add(physicalIndex);
+        const logicalLineage = lineage[physicalIndex]!;
+        if (seenLineage.has(logicalLineage)) {
+          throw cacheDiagnostic(
+            'NACHI_SIM_CACHE_METADATA_INVALID',
+            `Emitter ${emitter.key} frame ${frame} has duplicate alive lineage values.`,
+            `metadata.emitters.${emitter.key}.lineageOffsetBytes`,
+          );
+        }
+        seenLineage.add(logicalLineage);
       }
     }
     const hasBirthOrder = emitter.birthIndicesOffsetBytes !== undefined;
@@ -437,6 +510,14 @@ function validateCacheStructureUnchecked(cache: SimulationCache): void {
       );
     }
   }
+  const encodedEnd = align(regions.at(-1)?.end ?? 0, Uint32Array.BYTES_PER_ELEMENT);
+  if (encodedEnd !== cache.data.byteLength) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_METADATA_INVALID',
+      'Simulation cache payload length does not match its declared binary regions.',
+      'data',
+    );
+  }
 }
 
 function validateCacheStructure(cache: SimulationCache): void {
@@ -453,7 +534,10 @@ function validateCacheStructure(cache: SimulationCache): void {
   }
 }
 
-function renderAttributeNames(view: VfxEmitterRuntimeView): readonly string[] {
+function renderAttributeNames(
+  view: VfxEmitterRuntimeView,
+  replaySchema: ResolvedAttributeSchema,
+): readonly string[] {
   const names = new Set<string>();
   const renderModules = Array.isArray(view.definition.render)
     ? view.definition.render
@@ -462,15 +546,25 @@ function renderAttributeNames(view: VfxEmitterRuntimeView): readonly string[] {
     for (const path of module.access?.reads ?? []) {
       if (path.startsWith('Particles.')) names.add(path.slice('Particles.'.length));
     }
+    for (const path of module.access?.optionalReads ?? []) {
+      if (!path.startsWith('Particles.')) continue;
+      const name = path.slice('Particles.'.length);
+      if (replaySchema.byName[name] !== undefined) names.add(name);
+    }
   }
   for (const draw of view.program.draws) {
-    for (const name of draw.vertex.attributes) names.add(name);
+    for (const name of draw.vertex.attributes) {
+      if (replaySchema.byName[name] !== undefined) names.add(name);
+    }
   }
   return [...names].sort();
 }
 
-function selectedAttributes(view: VfxEmitterRuntimeView): readonly ResolvedAttribute[] {
-  return renderAttributeNames(view).map((name) => {
+function selectedAttributes(
+  view: VfxEmitterRuntimeView,
+  replaySchema = view.program.attributeSchema,
+): readonly ResolvedAttribute[] {
+  return renderAttributeNames(view, replaySchema).map((name) => {
     const attribute = view.program.attributeSchema.byName[name];
     if (!attribute) {
       throw cacheDiagnostic(
@@ -488,6 +582,56 @@ function selectedAttributes(view: VfxEmitterRuntimeView): readonly ResolvedAttri
     }
     return attribute;
   });
+}
+
+function replayUploadBytesPerFrame(
+  schema: ResolvedAttributeSchema,
+  selectedNames: ReadonlySet<string>,
+): number {
+  const selectedStorageIndexes = new Set(
+    [...selectedNames].map((name) => {
+      const attribute = schema.byName[name];
+      if (!attribute) {
+        throw cacheDiagnostic(
+          'NACHI_SIM_CACHE_SCHEMA_MISMATCH',
+          `Replay schema is missing cached render attribute Particles.${name}.`,
+          `attributes.${name}`,
+        );
+      }
+      return attribute.physical.bufferIndex;
+    }),
+  );
+  return (
+    [...selectedStorageIndexes].reduce((total, storageIndex) => {
+      const storage = schema.storageArrays[storageIndex]!;
+      return total + storage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] * 4;
+    }, 0) +
+    (4 +
+      (schema.byName.spawnOrder === undefined ? 0 : 2) +
+      2 * schema.capacity +
+      (schema.byName.spawnOrder === undefined ? 0 : schema.capacity)) *
+      4 +
+    4
+  );
+}
+
+const CACHE_LINEAGE_INIT_MODULE = tslModule(() => ({}), {
+  access: { reads: ['Particles.spawnOrder'], writes: [] },
+  stage: 'init',
+});
+
+function withSimulationCacheLineage(
+  definition: AnyEffectDefinition,
+  missingLineage: ReadonlySet<string>,
+): AnyEffectDefinition {
+  if (missingLineage.size === 0) return definition;
+  const elements = Object.fromEntries(
+    Object.entries(definition.elements).map(([key, element]) => {
+      if (element.kind !== 'emitter' || !missingLineage.has(key)) return [key, element];
+      return [key, { ...element, init: [...(element.init ?? []), CACHE_LINEAGE_INIT_MODULE] }];
+    }),
+  );
+  return { ...definition, elements };
 }
 
 function typedPhysicalArray(storage: ResolvedAttributeStorage, buffer: ArrayBuffer): LogicalArray {
@@ -528,6 +672,7 @@ async function recordEmitterFrame(
   renderer: VfxRuntimeRenderer,
   view: VfxEmitterRuntimeView,
   selected: readonly ResolvedAttribute[],
+  rendererUsesSpawnOrder: boolean,
 ): Promise<RecordedEmitterFrame> {
   if (!view.initialized) {
     throw cacheDiagnostic(
@@ -542,7 +687,20 @@ async function recordEmitterFrame(
     );
   }
   const schema = view.program.attributeSchema;
-  const storageIndexes = [...new Set(selected.map(({ physical }) => physical.bufferIndex))];
+  const lineageAttribute = schema.byName.spawnOrder;
+  if (!lineageAttribute) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_LINEAGE_UNAVAILABLE',
+      'The simulation-cache bake variant did not materialize Particles.spawnOrder lineage.',
+      'Particles.spawnOrder',
+    );
+  }
+  const storageIndexes = [
+    ...new Set([
+      ...selected.map(({ physical }) => physical.bufferIndex),
+      lineageAttribute.physical.bufferIndex,
+    ]),
+  ];
   const [lifecycleBuffer, ...storageBuffers] = await Promise.all([
     renderer.readStorage(view.kernels.aliveCount),
     ...storageIndexes.map((index) => {
@@ -559,7 +717,6 @@ async function recordEmitterFrame(
   for (let index = 0; index < Math.min(aliveCount, schema.capacity); index += 1) {
     aliveIndices[index] = lifecycle[view.kernels.aliveIndicesOffset + index] ?? 0;
   }
-  const hasBirthOrder = schema.byName.spawnOrder !== undefined;
   const physicalByIndex = new Map<number, LogicalArray>();
   for (const [bufferIndex, buffer] of storageIndexes.map(
     (storageIndex, index) => [storageIndex, storageBuffers[index]!] as const,
@@ -567,6 +724,21 @@ async function recordEmitterFrame(
     physicalByIndex.set(
       bufferIndex,
       typedPhysicalArray(schema.storageArrays[bufferIndex]!, buffer),
+    );
+  }
+  const lineagePhysical = physicalByIndex.get(lineageAttribute.physical.bufferIndex);
+  if (!lineagePhysical) throw new Error('Readback for cache lineage is missing.');
+  const lineage = extractLogicalAttribute(
+    lineageAttribute,
+    schema,
+    lineagePhysical,
+    renderer.kernelAdapter.capabilities.backend,
+  );
+  if (!(lineage instanceof Uint32Array)) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_LINEAGE_UNAVAILABLE',
+      'Particles.spawnOrder lineage must use lossless u32 storage.',
+      'Particles.spawnOrder',
     );
   }
   return {
@@ -586,7 +758,7 @@ async function recordEmitterFrame(
         ] as const;
       }),
     ),
-    ...(hasBirthOrder
+    ...(rendererUsesSpawnOrder
       ? {
           birthIndices: lifecycle
             .subarray(
@@ -594,10 +766,40 @@ async function recordEmitterFrame(
               view.kernels.birthIndicesOffset + schema.capacity,
             )
             .slice(),
-          nextSpawnOrder: lifecycle[view.kernels.nextSpawnOrderOffset] ?? 0,
         }
       : {}),
+    lineage,
+    nextSpawnOrder: lifecycle[view.kernels.nextSpawnOrderOffset] ?? 0,
   };
+}
+
+const CACHE_LINEAGE_SAFETY_LIMIT = 0x8000_0000;
+
+function validateRecordedFrameLineage(
+  emitterKey: string,
+  frame: RecordedEmitterFrame,
+  frameIndex: number,
+): Map<number, number> {
+  if ((frame.nextSpawnOrder ?? 0) >= CACHE_LINEAGE_SAFETY_LIMIT) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_LINEAGE_WRAP_RISK',
+      `Emitter ${emitterKey} reached the spawnOrder half-range safety limit while baking frame ${frameIndex}. Restart and bake a shorter window before u32 lineage can wrap.`,
+      `metadata.emitters.${emitterKey}.lineageOffsetBytes`,
+    );
+  }
+  const physicalByLineage = new Map<number, number>();
+  for (const physicalIndex of frame.aliveIndices) {
+    const lineage = frame.lineage[physicalIndex];
+    if (lineage === undefined || physicalByLineage.has(lineage)) {
+      throw cacheDiagnostic(
+        'NACHI_SIM_CACHE_LINEAGE_DUPLICATE',
+        `Emitter ${emitterKey} frame ${frameIndex} contains missing or duplicate alive spawnOrder lineage.`,
+        `metadata.emitters.${emitterKey}.lineageOffsetBytes`,
+      );
+    }
+    physicalByLineage.set(lineage, physicalIndex);
+  }
+  return physicalByLineage;
 }
 
 function maximumLoopError(recorded: readonly RecordedEmitter[]): {
@@ -611,22 +813,27 @@ function maximumLoopError(recorded: readonly RecordedEmitter[]): {
   for (const emitter of recorded) {
     const first = emitter.frames[0]!;
     const last = emitter.frames.at(-1)!;
+    const firstByLineage = validateRecordedFrameLineage(emitter.key, first, 0);
+    const lastFrameIndex = emitter.frames.length - 1;
+    const lastByLineage = validateRecordedFrameLineage(emitter.key, last, lastFrameIndex);
     if (
-      first.aliveIndices.length !== last.aliveIndices.length ||
-      first.aliveIndices.some((value, index) => value !== last.aliveIndices[index])
+      firstByLineage.size !== lastByLineage.size ||
+      [...firstByLineage.keys()].some((lineage) => !lastByLineage.has(lineage))
     ) {
       sameAlive = false;
     }
-    const aliveParticles = first.aliveIndices;
     for (const attribute of emitter.selected) {
       const left = first.attributes.get(attribute.name)!;
       const right = last.attributes.get(attribute.name)!;
-      for (const particle of aliveParticles) {
+      for (const [lineage, leftParticle] of firstByLineage) {
+        const rightParticle = lastByLineage.get(lineage);
+        if (rightParticle === undefined) continue;
         for (let component = 0; component < attribute.components; component += 1) {
-          const index = particle * attribute.components + component;
+          const leftIndex = leftParticle * attribute.components + component;
+          const rightIndex = rightParticle * attribute.components + component;
           if (left instanceof Float32Array) {
-            maximum = Math.max(maximum, Math.abs(left[index]! - right[index]!));
-          } else if (left[index] !== right[index]) {
+            maximum = Math.max(maximum, Math.abs(left[leftIndex]! - right[rightIndex]!));
+          } else if (left[leftIndex] !== right[rightIndex]) {
             continuousIntegers = false;
           }
         }
@@ -701,6 +908,11 @@ function buildCache(
     readonly sourceBackend: 'webgl2' | 'webgpu';
   },
 ): SimulationCache {
+  for (const emitter of recorded) {
+    for (const [frameIndex, frame] of emitter.frames.entries()) {
+      validateRecordedFrameLineage(emitter.key, frame, frameIndex);
+    }
+  }
   let offset = 0;
   let uploadBytesPerFrame = 0;
   const emitters: SimulationCacheEmitterMetadata[] = [];
@@ -709,7 +921,11 @@ function buildCache(
     const aliveIndicesOffsetBytes = offset;
     const aliveIndicesFrameStrideBytes = emitter.capacity * Uint32Array.BYTES_PER_ELEMENT;
     offset += aliveIndicesFrameStrideBytes * options.frames;
-    const hasBirthOrder = emitter.schema.byName.spawnOrder !== undefined;
+    offset = align(offset, Uint32Array.BYTES_PER_ELEMENT);
+    const lineageOffsetBytes = offset;
+    const lineageFrameStrideBytes = emitter.capacity * Uint32Array.BYTES_PER_ELEMENT;
+    offset += lineageFrameStrideBytes * options.frames;
+    const hasBirthOrder = emitter.rendererUsesSpawnOrder;
     let birthIndicesOffsetBytes: number | undefined;
     let birthIndicesFrameStrideBytes: number | undefined;
     if (hasBirthOrder) {
@@ -752,17 +968,10 @@ function buildCache(
           }),
       capacity: emitter.capacity,
       key: emitter.key,
+      lineageFrameStrideBytes,
+      lineageOffsetBytes,
     });
-    const selectedStorageIndexes = new Set(
-      emitter.selected.map(({ physical }) => physical.bufferIndex),
-    );
-    uploadBytesPerFrame +=
-      [...selectedStorageIndexes].reduce((total, storageIndex) => {
-        const storage = emitter.schema.storageArrays[storageIndex]!;
-        return total + storage.length * TSL_STORAGE_TYPE_PHYSICAL_LENGTHS[storage.type] * 4;
-      }, 0) +
-      emitter.lifecycleWordCount * 4 +
-      4;
+    uploadBytesPerFrame += emitter.uploadBytesPerFrame;
   }
   const dataBytes = align(offset, 4);
   validateSimulationCachePayloadSize(dataBytes);
@@ -775,6 +984,11 @@ function buildCache(
         metadata.aliveIndicesOffsetBytes + frameIndex * metadata.aliveIndicesFrameStrideBytes,
         metadata.capacity,
       ).set(frame.aliveIndices);
+      new Uint32Array(
+        data,
+        metadata.lineageOffsetBytes + frameIndex * metadata.lineageFrameStrideBytes,
+        metadata.capacity,
+      ).set(frame.lineage);
       if (
         metadata.birthIndicesOffsetBytes !== undefined &&
         metadata.birthIndicesFrameStrideBytes !== undefined
@@ -835,10 +1049,10 @@ function buildCache(
       interpolation: options.interpolation,
       kind: 'nachi-simulation-cache-metadata',
       loop: {
-        aliveIndicesMatch: loopError.sameAlive,
         continuous,
         enabled: options.loop,
         integerAttributesMatch: loopError.continuousIntegers,
+        lineageMatch: loopError.sameAlive,
         maximumAttributeError: loopError.maximum,
         tolerance: options.loopTolerance,
       },
@@ -846,9 +1060,37 @@ function buildCache(
       sampleStartFrame: options.sampleStartFrame,
       sourceBackend: options.sourceBackend,
       uploadBytesPerFrame,
-      version: 1,
+      version: SIMULATION_CACHE_VERSION,
     },
   };
+}
+
+async function validateSimulationCacheBakeLineageCounters(
+  renderer: VfxRuntimeRenderer,
+  views: readonly VfxEmitterRuntimeView[],
+): Promise<void> {
+  const candidates = views.filter(
+    (view) => simulationCacheSpawnOrderRequestTotal(view) >= CACHE_LINEAGE_SAFETY_LIMIT,
+  );
+  if (candidates.length === 0) return;
+  if (!renderer.readStorage) {
+    throw cacheDiagnostic(
+      'NACHI_SIM_CACHE_READBACK_UNAVAILABLE',
+      'The renderer does not expose GPU storage readback required for simulation baking.',
+    );
+  }
+  await Promise.all(
+    candidates.map(async (view) => {
+      const lifecycle = new Uint32Array(await renderer.readStorage!(view.kernels.aliveCount));
+      if ((lifecycle[view.kernels.nextSpawnOrderOffset] ?? 0) >= CACHE_LINEAGE_SAFETY_LIMIT) {
+        throw cacheDiagnostic(
+          'NACHI_SIM_CACHE_LINEAGE_WRAP_RISK',
+          'Simulation-cache baking crossed the spawnOrder half-range safety limit during warmup. Restart and bake a shorter window.',
+          'Particles.spawnOrder',
+        );
+      }
+    }),
+  );
 }
 
 /**
@@ -904,45 +1146,95 @@ export async function bakeSimulation<
         element.kind === 'grid3d'
           ? 'NACHI_SIM_CACHE_GRID3D_NOT_RECORDED'
           : 'NACHI_SIM_CACHE_GRID2D_NOT_RECORDED',
-      message: `Simulation cache v1 does not record ${element.kind === 'grid3d' ? 'Grid3D' : 'Grid2D'} state for element "${key}"; baking executes its stages, while replay neither restores nor advances that state.`,
+      message: `Simulation cache v2 does not record ${element.kind === 'grid3d' ? 'Grid3D' : 'Grid2D'} state for element "${key}"; baking executes its stages, while replay neither restores nor advances that state.`,
       path: `elements.${key}`,
       phase: 'runtime',
       severity: 'warning',
     }));
-  const instance = system.spawn(definition, options.spawn);
+  const originalDefinition = definition as unknown as AnyEffectDefinition;
+  const originalSchemas = new Map<string, ResolvedAttributeSchema>();
+  const missingLineage = new Set<string>();
+  for (const [key, element] of Object.entries(originalDefinition.elements)) {
+    if (element.kind !== 'emitter') continue;
+    const qualityEmitter = applyEmitterQualityTier(
+      element as unknown as EmitterDefinition,
+      system.qualitySelection.tier,
+    ) as EmitterDefinition<AttributeSchema, ParameterSchema>;
+    const schemaResult = resolveAttributeSchema(qualityEmitter);
+    if (!schemaResult.ok || !schemaResult.value) {
+      throw new VfxDiagnosticError(schemaResult.diagnostics);
+    }
+    originalSchemas.set(key, schemaResult.value);
+    if (schemaResult.value.byName.spawnOrder === undefined) missingLineage.add(key);
+  }
+  const bakeDefinition = withSimulationCacheLineage(originalDefinition, missingLineage);
+  const warmOriginalPool = (): void => {
+    if (bakeDefinition === originalDefinition) return;
+    const ordinary = system.spawn(
+      originalDefinition,
+      options.spawn as EffectSpawnOptions<AnyEffectDefinition> | undefined,
+    );
+    if (ordinary.state === 'error') {
+      const ordinaryDiagnostics = ordinary.diagnostics;
+      ordinary.release();
+      throw new VfxDiagnosticError(ordinaryDiagnostics);
+    }
+    ordinary.release();
+  };
+  const instance = system.spawn(
+    bakeDefinition,
+    options.spawn as EffectSpawnOptions<AnyEffectDefinition> | undefined,
+  );
   if (instance.state === 'error') {
-    const diagnostics = instance.diagnostics;
-    instance.release();
-    throw new VfxDiagnosticError(diagnostics);
+    const bakeDiagnostics = instance.diagnostics;
+    instance.releaseUnpooled();
+    try {
+      warmOriginalPool();
+    } catch {
+      // Preserve the bake-only variant's primary build diagnostics.
+    }
+    throw new VfxDiagnosticError(bakeDiagnostics);
   }
   if (instance.scalability.action !== 'full') {
     const action = instance.scalability.action;
     const reasons = instance.scalability.reasons.join(', ') || 'unspecified';
-    instance.release();
+    if (bakeDefinition === originalDefinition) instance.release();
+    else instance.releaseUnpooled();
+    warmOriginalPool();
     throw cacheDiagnostic(
       'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED',
       `Simulation baking requires full scalability execution; instance action is ${action} (${reasons}).`,
       'instance.scalability',
     );
   }
-  const entries = Object.entries(definition.elements).filter(
+  const entries = Object.entries(bakeDefinition.elements).filter(
     (entry) => entry[1].kind === 'emitter',
   );
   let recorded: RecordedEmitter[] = [];
+  let recordingFailed = false;
+  let recordingFailure: unknown;
   try {
     recorded = entries.map(([key]) => {
       const view = instance.getEmitter(key);
       if (!view) throw new Error(`Runtime emitter ${key} is missing during simulation bake.`);
+      const originalSchema = originalSchemas.get(key);
+      if (!originalSchema) throw new Error(`Original replay schema for ${key} is missing.`);
+      const selected = selectedAttributes(view, originalSchema);
+      const selectedNames = new Set(selected.map(({ name }) => name));
       return {
         capacity: view.program.attributeSchema.capacity,
         frames: [],
         key,
-        lifecycleWordCount: view.program.meta.lifecycleStorage.buffers.state.wordCount,
-        schema: view.program.attributeSchema,
-        selected: selectedAttributes(view),
+        rendererUsesSpawnOrder: selected.some(({ name }) => name === 'spawnOrder'),
+        selected,
+        uploadBytesPerFrame: replayUploadBytesPerFrame(originalSchema, selectedNames),
       };
     });
     await system.update(0);
+    await validateSimulationCacheBakeLineageCounters(
+      renderer,
+      recorded.map(({ key }) => instance.getEmitter(key)!),
+    );
     if (instance.scalability.action !== 'full') {
       throw cacheDiagnostic(
         'NACHI_SIM_CACHE_SCALABILITY_SUPPRESSED',
@@ -951,7 +1243,13 @@ export async function bakeSimulation<
       );
     }
     const step = 1 / frameRate;
-    for (let frame = 0; frame < sampleStartFrame; frame += 1) await system.update(step);
+    for (let frame = 0; frame < sampleStartFrame; frame += 1) {
+      await system.update(step);
+      await validateSimulationCacheBakeLineageCounters(
+        renderer,
+        recorded.map(({ key }) => instance.getEmitter(key)!),
+      );
+    }
     for (let frame = 0; frame < options.frames; frame += 1) {
       if (frame > 0) await system.update(step);
       await Promise.all(
@@ -965,13 +1263,35 @@ export async function bakeSimulation<
           }
           const view = instance.getEmitter(emitter.key);
           if (!view) throw new Error(`Runtime emitter ${emitter.key} disappeared during bake.`);
-          emitter.frames.push(await recordEmitterFrame(renderer, view, emitter.selected));
+          emitter.frames.push(
+            await recordEmitterFrame(
+              renderer,
+              view,
+              emitter.selected,
+              emitter.rendererUsesSpawnOrder,
+            ),
+          );
         }),
       );
     }
+  } catch (error) {
+    recordingFailed = true;
+    recordingFailure = error;
   } finally {
-    instance.release();
+    if (bakeDefinition === originalDefinition) instance.release();
+    else instance.releaseUnpooled();
   }
+  if (bakeDefinition !== originalDefinition) {
+    // v1 left one ordinary-definition resource bundle in the caller's pool. Rebuild that bundle
+    // only after the larger bake-only variant has been retired, preserving pool observability
+    // without holding both schemas at peak GPU residency.
+    try {
+      warmOriginalPool();
+    } catch (error) {
+      if (!recordingFailed) throw error;
+    }
+  }
+  if (recordingFailed) throw recordingFailure;
   return buildCache(recorded, {
     compression: options.compression ?? 'float32',
     frameRate,
@@ -1022,12 +1342,26 @@ function aliveFrame(
   ).slice();
 }
 
+function lineageFrame(
+  cache: SimulationCache,
+  emitter: SimulationCacheEmitterMetadata,
+  frame: number,
+): Uint32Array {
+  return new Uint32Array(
+    cache.data,
+    emitter.lineageOffsetBytes + frame * emitter.lineageFrameStrideBytes,
+    emitter.capacity,
+  ).slice();
+}
+
 export function interpolateSimulationCacheAttribute(
   left: LogicalArray,
   right: LogicalArray,
   alpha: number,
   leftAlive: ReadonlySet<number>,
   rightAlive: ReadonlySet<number>,
+  leftLineage: Uint32Array,
+  rightLineage: Uint32Array,
   nearestIsRight: boolean,
   components: number,
 ): LogicalArray {
@@ -1036,7 +1370,7 @@ export function interpolateSimulationCacheAttribute(
   }
   const output = (nearestIsRight ? right : left).slice();
   for (const particle of leftAlive) {
-    if (!rightAlive.has(particle)) continue;
+    if (!rightAlive.has(particle) || leftLineage[particle] !== rightLineage[particle]) continue;
     for (let component = 0; component < components; component += 1) {
       const index = particle * components + component;
       output[index] = left[index]! + (right[index]! - left[index]!) * alpha;
@@ -1086,7 +1420,7 @@ function validateReplayEmitter(
       );
     }
   }
-  const currentHasBirthOrder = schema.byName.spawnOrder !== undefined;
+  const currentHasBirthOrder = selectedAttributes(view).some(({ name }) => name === 'spawnOrder');
   const cacheHasBirthOrder = cacheEmitter.birthIndicesOffsetBytes !== undefined;
   if (currentHasBirthOrder !== cacheHasBirthOrder) {
     throw cacheDiagnostic(
@@ -1326,6 +1660,11 @@ export class SimulationCachePlayer<Definition = AnyEffectDefinition> {
       const aliveValues = nearestIsRight ? rightAliveValues : leftAliveValues;
       const leftAlive = new Set(leftAliveValues);
       const rightAlive = new Set(rightAliveValues);
+      const leftLineage = lineageFrame(this.#cache, emitterMetadata, leftFrame);
+      const rightLineage =
+        rightFrame === leftFrame
+          ? leftLineage
+          : lineageFrame(this.#cache, emitterMetadata, rightFrame);
       const physical = new Map<number, LogicalArray>();
       for (const cachedAttribute of emitterMetadata.attributes) {
         const attribute = schema.byName[cachedAttribute.name]!;
@@ -1348,6 +1687,8 @@ export class SimulationCachePlayer<Definition = AnyEffectDefinition> {
             alpha,
             leftAlive,
             rightAlive,
+            leftLineage,
+            rightLineage,
             nearestIsRight,
             cachedAttribute.components,
           ),

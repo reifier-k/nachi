@@ -162,22 +162,33 @@ function attributeDifference(
 
 function webglReplayDiagnosticCache(): SimulationCache {
   return {
-    data: new ArrayBuffer(0),
+    data: new ArrayBuffer(8),
     diagnostics: [],
     kind: 'simulation-cache',
     metadata: {
       compression: 'float32',
       durationSeconds: 0,
-      emitters: [],
+      emitters: [
+        {
+          aliveCounts: [0],
+          aliveIndicesFrameStrideBytes: 4,
+          aliveIndicesOffsetBytes: 0,
+          attributes: [],
+          capacity: 1,
+          key: 'particles',
+          lineageFrameStrideBytes: 4,
+          lineageOffsetBytes: 4,
+        },
+      ],
       frameCount: 1,
       frameRate: FRAME_RATE,
       interpolation: 'nearest',
       kind: 'nachi-simulation-cache-metadata',
       loop: {
-        aliveIndicesMatch: true,
         continuous: true,
         enabled: false,
         integerAttributesMatch: true,
+        lineageMatch: true,
         maximumAttributeError: 0,
         tolerance: 0,
       },
@@ -185,9 +196,42 @@ function webglReplayDiagnosticCache(): SimulationCache {
       sampleStartFrame: 0,
       sourceBackend: 'webgl2',
       uploadBytesPerFrame: 0,
-      version: 1,
+      version: 2,
     },
   };
+}
+
+function aliasSlotReuseLineage(cache: SimulationCache): SimulationCache {
+  const emitter = cache.metadata.emitters[0];
+  if (emitter?.capacity !== 1) {
+    throw new Error('M11 slot-reuse cache has an unexpected schema.');
+  }
+  const data = cache.data.slice(0);
+  const firstLineage = new Uint32Array(data, emitter.lineageOffsetBytes, emitter.capacity);
+  const secondLineage = new Uint32Array(
+    data,
+    emitter.lineageOffsetBytes + emitter.lineageFrameStrideBytes,
+    emitter.capacity,
+  );
+  secondLineage[0] = firstLineage[0]!;
+  return { ...cache, data };
+}
+
+function particleHorizontalCentroid(pixels: Uint8Array): number {
+  let weightedX = 0;
+  let weight = 0;
+  for (let y = 0; y < HEIGHT; y += 1) {
+    for (let x = 0; x < WIDTH; x += 1) {
+      const offset = (y * WIDTH + x) * 4;
+      const brightness =
+        Math.max(0, pixels[offset]! - 2) +
+        Math.max(0, pixels[offset + 1]! - 6) +
+        Math.max(0, pixels[offset + 2]! - 11);
+      weightedX += x * brightness;
+      weight += brightness;
+    }
+  }
+  return weight === 0 ? Number.NaN : weightedX / weight;
 }
 
 async function capture(
@@ -264,7 +308,7 @@ async function run(): Promise<void> {
   root.dataset.backend = activeBackend;
   root.dataset.rendererStatus = 'ready';
   required<HTMLElement>('#backend-value').textContent = activeBackend;
-  if (webgpu) {
+  if (webgpu && query.get('headless') !== '1') {
     root.dataset.artifactScreenshots = JSON.stringify([
       { filename: 'm11-cache.png', selector: '#cache-visual' },
     ]);
@@ -288,11 +332,23 @@ async function run(): Promise<void> {
       particles: defineEmitter({
         bounds: { center: [0.21, -0.13, 0], radius: 0.7 },
         capacity: 12,
-        init: [positionSphere({ radius: 0 }), lifetime(0.5)],
-        lifecycle: { duration: 1, loopCount: 'infinite' },
+        init: [positionSphere({ radius: 0 }), lifetime(10)],
+        lifecycle: { duration: 1, loopCount: 1 },
         render: billboard({ blending: 'additive' }),
         spawn: burst({ count: 9 }),
-        update: [sizeOverLife(curve([0, 0.11], [0.25, 0.19], [0.5, 0.11], [1, 0.11]))],
+        update: [
+          sizeOverLife(
+            curve(
+              [0, 0.11],
+              [0.11, 0.11],
+              [0.12, 0.19],
+              [0.14, 0.19],
+              [0.18, 0.11],
+              [0.22, 0.11],
+              [1, 0.11],
+            ),
+          ),
+        ],
       }),
     },
   });
@@ -306,6 +362,17 @@ async function run(): Promise<void> {
         render: billboard({ blending: 'additive' }),
         spawn: burst({ count: 9 }),
         update: [sizeOverLife(curve([0, 0.11], [0.25, 0.19], [0.5, 0.11], [1, 0.11]))],
+      }),
+    },
+  });
+  const slotReuseEffect = defineEffect({
+    elements: {
+      particles: defineEmitter({
+        capacity: 1,
+        init: [positionSphere({ radius: 0.45 }), lifetime(0.015)],
+        lifecycle: { duration: 0.02, loopCount: 'infinite' },
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 1 }),
       }),
     },
   });
@@ -347,18 +414,28 @@ async function run(): Promise<void> {
     });
     performanceSystem.spawn(singleShotEffect, spawn);
     await performanceSystem.update(0);
-    await performanceSystem.update(1 / FRAME_RATE);
     const performanceTarget = new THREE.RenderTarget(1, 1);
-    performanceRenderer.setRenderTarget(performanceTarget);
-    performanceRenderer.render(
-      new THREE.Scene(),
-      new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10),
+    const performanceScene = new THREE.Scene();
+    const performanceMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
     );
+    performanceScene.add(performanceMesh);
+    const performanceCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    performanceCamera.position.z = 1;
+    performanceRenderer.setRenderTarget(performanceTarget);
+    performanceRenderer.render(performanceScene, performanceCamera);
     await performanceRenderer.readRenderTargetPixelsAsync(performanceTarget, 0, 0, 1, 1);
+    await performanceRenderer.resolveTimestampsAsync(webgpu ? 'compute' : 'render');
+    await monitor.captureGpuSamples(async () => {
+      await performanceSystem.update(1 / FRAME_RATE);
+      performanceRenderer.render(performanceScene, performanceCamera);
+      await performanceRenderer.readRenderTargetPixelsAsync(performanceTarget, 0, 0, 1, 1);
+    });
     performanceRenderer.setRenderTarget(null);
+    performanceMesh.geometry.dispose();
+    performanceMesh.material.dispose();
     performanceTarget.dispose();
-    await monitor.resolveGpuTimestamps();
-    monitor.publish();
   };
   const loopBakeOptions = {
     compression: 'float32',
@@ -366,9 +443,8 @@ async function run(): Promise<void> {
     frames: LOOP_FRAMES + 1,
     interpolation: 'linear',
     loop: true,
-    // This only covers ordinary f32 backend variation; the former 0.8896 phase error is far too
-    // large to pass. The fixture itself is structurally periodic: 0.5 s lifetime, 1 s emission
-    // period, and a complete 1 s warmup before recording the duplicated endpoint window [1, 2].
+    // The same long-lived particle lineages span the duplicated endpoint window [1, 2]. Their
+    // size pulses inside that window but returns to the same value at both endpoints.
     loopTolerance: LOOP_TOLERANCE,
     sampleStartFrame: LOOP_FRAMES,
     spawn,
@@ -547,6 +623,100 @@ async function run(): Promise<void> {
   root.dataset.cacheMemory = JSON.stringify(memory);
   required<HTMLElement>('#memory-value').textContent = `${memory.totalBytes} bytes`;
 
+  const slotReuseBakeCounter = countedRuntime(baseRuntime);
+  const slotReuseBakedCache = await bakeSimulation(
+    new VFXSystem(slotReuseBakeCounter.runtime, undefined, { aliveCountReadbackInterval: 1 }),
+    slotReuseEffect,
+    {
+      compression: 'float32',
+      frameRate: 10,
+      frames: 2,
+      interpolation: 'linear',
+      spawn: { seed: 0x51_07 },
+    },
+  );
+  const slotReuseEmitter = slotReuseBakedCache.metadata.emitters[0]!;
+  const slotReusePosition = slotReuseEmitter.attributes.find(({ name }) => name === 'position')!;
+  const slotReuseAlive = [0, 1].map((frame) => [
+    ...new Uint32Array(
+      slotReuseBakedCache.data,
+      slotReuseEmitter.aliveIndicesOffsetBytes +
+        frame * slotReuseEmitter.aliveIndicesFrameStrideBytes,
+      slotReuseEmitter.aliveCounts[frame],
+    ),
+  ]);
+  const slotReuseLineage = [0, 1].map(
+    (frame) =>
+      new Uint32Array(
+        slotReuseBakedCache.data,
+        slotReuseEmitter.lineageOffsetBytes + frame * slotReuseEmitter.lineageFrameStrideBytes,
+        slotReuseEmitter.capacity,
+      )[0]!,
+  );
+  const slotReuseEndpoints = [0, 1].map((frame) => [
+    ...new Float32Array(
+      slotReuseBakedCache.data,
+      slotReusePosition.offsetBytes + frame * slotReusePosition.frameStrideBytes,
+      slotReusePosition.components,
+    ),
+  ]);
+  const slotReuseEndpointDistance = Math.hypot(
+    ...slotReuseEndpoints[0]!.map(
+      (component, index) => component - (slotReuseEndpoints[1]![index] ?? 0),
+    ),
+  );
+  const slotReuseCache =
+    query.get('forceFailure') === 'lineage-alias'
+      ? aliasSlotReuseLineage(slotReuseBakedCache)
+      : slotReuseBakedCache;
+  const slotReuseReplayCounter = countedRuntime(baseRuntime);
+  const slotReusePlayer = await replaySimulation(
+    new VFXSystem(slotReuseReplayCounter.runtime),
+    slotReuseEffect,
+    slotReuseCache,
+    { interpolation: 'linear', spawn: { seed: 0x51_07 } },
+  );
+  const slotReuseView = view(slotReusePlayer.instance);
+  const slotReuseScene = new THREE.Scene();
+  const slotReuseMesh = materializeThreeSpriteDraw(slotReuseView.program, slotReuseView.kernels);
+  slotReuseScene.add(slotReuseMesh);
+  const slotReuseCamera = new THREE.OrthographicCamera(-1.2, 1.2, 0.75, -0.75, 0.1, 10);
+  slotReuseCamera.position.z = 3;
+  slotReuseCamera.updateProjectionMatrix();
+  const slotReuseTarget = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
+  slotReuseTarget.texture.colorSpace = THREE.NoColorSpace;
+  await slotReusePlayer.seek(0.25 / 10);
+  const slotReuseMidpointSnapshot =
+    await slotReusePlayer.instance.debug.captureAttributes('particles');
+  const slotReuseMidpointPixels = await capture(
+    renderer,
+    slotReuseScene,
+    slotReuseCamera,
+    slotReuseTarget,
+    true,
+  );
+  await slotReusePlayer.seek(0);
+  const slotReuseNearestPixels = await capture(
+    renderer,
+    slotReuseScene,
+    slotReuseCamera,
+    slotReuseTarget,
+    true,
+  );
+  const slotReusePixels = pixelDifference(slotReuseMidpointPixels, slotReuseNearestPixels);
+  const slotReuseMidpointPosition = slotReuseMidpointSnapshot.rows[0]?.attributes.position;
+  const slotReusePositionError = Array.isArray(slotReuseMidpointPosition)
+    ? Math.max(
+        ...slotReuseEndpoints[0]!.map((value, index) =>
+          Math.abs(value - (slotReuseMidpointPosition[index] ?? Number.NaN)),
+        ),
+      )
+    : Number.POSITIVE_INFINITY;
+  const slotReuseCentroid = particleHorizontalCentroid(slotReuseMidpointPixels);
+  slotReuseScene.remove(slotReuseMesh);
+  slotReuseTarget.dispose();
+  slotReusePlayer.release();
+
   const liveCounter = countedRuntime(baseRuntime);
   const liveSystem = new VFXSystem(liveCounter.runtime, undefined, {
     aliveCountReadbackInterval: 1,
@@ -620,8 +790,8 @@ async function run(): Promise<void> {
     consoleClean: consoleMessages.length === 0,
     liveVsReplayPixelsLinearTolerance: pixels.maximumLinear <= 2 / 255 && pixels.changed === 0,
     loopContinuity:
-      cache.metadata.loop.aliveIndicesMatch &&
       cache.metadata.loop.integerAttributesMatch &&
+      cache.metadata.loop.lineageMatch &&
       cache.metadata.loop.continuous &&
       cache.metadata.loop.maximumAttributeError <= LOOP_TOLERANCE,
     memoryPublished: memory.totalBytes > memory.binaryBytes && memory.uploadBytesPerFrame > 0,
@@ -638,6 +808,17 @@ async function run(): Promise<void> {
       cache.metadata.emitters[0]?.aliveCounts[comparisonFrame],
     replaySimulationCostZero:
       replayCounter.counts.simulation === 0 && replayCounter.counts.indirect === 0,
+    slotReuseBakedIdentity:
+      slotReuseAlive[0]?.length === 1 &&
+      slotReuseAlive[0]?.[0] === 0 &&
+      slotReuseAlive[1]?.length === 1 &&
+      slotReuseAlive[1]?.[0] === 0 &&
+      slotReuseLineage[0] !== slotReuseLineage[1] &&
+      slotReuseEndpointDistance > 0.01,
+    slotReuseLineageNearest:
+      slotReusePositionError <= 1e-6 &&
+      slotReusePixels.changed === 0 &&
+      slotReuseLineage[0] !== slotReuseLineage[1],
     sourceBackendRecorded: cache.metadata.sourceBackend === 'webgpu',
   };
   const result = {
@@ -647,6 +828,8 @@ async function run(): Promise<void> {
       bake: bakeCounter.counts,
       live: liveCounter.counts,
       replay: replayCounter.counts,
+      slotReuseBake: slotReuseBakeCounter.counts,
+      slotReuseReplay: slotReuseReplayCounter.counts,
     },
     loop: cache.metadata.loop,
     memory,
@@ -661,6 +844,16 @@ async function run(): Promise<void> {
     replayReadback: {
       aliveCount: immediateReplaySnapshot.aliveCount,
       expectedAliveCount: cache.metadata.emitters[0]?.aliveCounts[comparisonFrame],
+    },
+    slotReuse: {
+      alivePhysicalSlots: slotReuseAlive,
+      endpointDistance: slotReuseEndpointDistance,
+      endpoints: slotReuseEndpoints,
+      lineage: slotReuseLineage,
+      midpointCentroid: slotReuseCentroid,
+      midpointPosition: slotReuseMidpointPosition,
+      nearestPositionError: slotReusePositionError,
+      pixels: slotReusePixels,
     },
     validation,
   };
