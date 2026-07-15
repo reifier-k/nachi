@@ -849,7 +849,7 @@ export interface CompiledLightDrawDescription {
   readonly radiusScale: number;
   readonly readback: {
     readonly latencyFrames: 1;
-    readonly records: 'position-priority/color-intensity/radius-index';
+    readonly records: 'position-priority/color-intensity/radius-index-order';
   };
   readonly requiresBackend: 'webgpu';
   /** Compute selection bindings; named vertex for the common renderer budget surface. */
@@ -2462,7 +2462,7 @@ function compileLightDraws(
     const maxLights = options.maxLights ?? 8;
     const radiusScale = options.radiusScale ?? 1;
     if (configDiagnostics.some(({ severity }) => severity === 'error')) continue;
-    const attributes = ['alive', 'color', 'intensity', 'position', 'size'];
+    const attributes = ['alive', 'color', 'intensity', 'position', 'size', 'spawnOrder'];
     const storageBuffers = rendererAttributeBuffers(schema, attributes);
     if (!storageBuffers) continue;
     // The selector scans physical attributes directly and owns one output buffer. It never binds
@@ -2482,7 +2482,7 @@ function compileLightDraws(
       radiusScale,
       readback: {
         latencyFrames: 1,
-        records: 'position-priority/color-intensity/radius-index',
+        records: 'position-priority/color-intensity/radius-index-order',
       },
       requiresBackend: 'webgpu',
       vertex: {

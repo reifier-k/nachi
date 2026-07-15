@@ -1089,6 +1089,7 @@ export function lightRenderer(options: LightRendererOptions = {}): RenderModule 
       'Particles.intensity',
       'Particles.position',
       'Particles.size',
+      'Particles.spawnOrder',
     ],
     writes: [],
   });

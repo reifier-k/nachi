@@ -25,6 +25,7 @@ import {
 import { collectEmitterModules } from './emitter-modules.js';
 import { Grid2DRuntime, type Grid2DStageRegistry } from './grid2d.js';
 import { Grid3DRuntime, type Grid3DStageRegistry } from './grid3d.js';
+import { nextEffectInstanceIdentity } from './internal-instance-identity.js';
 import { hashModuleLabel, pcgRandomFloat, resolveRandomSampleSlot } from './random.js';
 import {
   applyEmitterQualityTier,
@@ -252,27 +253,36 @@ const DEFAULT_CAMERA_STATE: VfxCameraState = {
 };
 
 export interface CoarseTransparencyEntry<T = unknown> {
+  /**
+   * Optional numeric instance creation order. Numeric ordering is used only when every entry in
+   * the collection supplies a safe integer; otherwise the whole collection falls back to key.
+   */
+  readonly stableSequence?: number;
   readonly stableKey: string;
   readonly value: T;
   readonly worldPosition: readonly [number, number, number];
 }
 
-/** Stable far-to-near ordering using the same column-major view matrix accepted by setCamera(). */
+/**
+ * Stable far-to-near ordering using the same column-major view matrix accepted by setCamera().
+ * Equal-depth entries use numeric sequence only in all-valid mode, preserving a strict total order.
+ */
 export function sortEmittersBackToFront<T>(
   entries: readonly CoarseTransparencyEntry<T>[],
   viewMatrix: readonly number[],
 ): readonly CoarseTransparencyEntry<T>[] {
   const depth = ({ worldPosition: [x, y, z] }: CoarseTransparencyEntry<T>) =>
     -(viewMatrix[2]! * x + viewMatrix[6]! * y + viewMatrix[10]! * z + viewMatrix[14]!);
+  const useNumericSequence = entries.every(({ stableSequence }) =>
+    Number.isSafeInteger(stableSequence),
+  );
   return [...entries].sort((left, right) => {
     const difference = depth(right) - depth(left);
-    return difference === 0
-      ? left.stableKey < right.stableKey
-        ? -1
-        : left.stableKey > right.stableKey
-          ? 1
-          : 0
-      : difference;
+    if (difference !== 0) return difference;
+    if (useNumericSequence && left.stableSequence !== right.stableSequence) {
+      return left.stableSequence! - right.stableSequence!;
+    }
+    return left.stableKey < right.stableKey ? -1 : left.stableKey > right.stableKey ? 1 : 0;
   });
 }
 
@@ -628,6 +638,19 @@ type RuntimeEffectDefinition = {
   readonly parameters?: ParameterSchema;
   readonly scalability?: EffectScalabilityConfig;
 };
+
+// Public instance IDs remain strings for compatibility. Runtime budget/render tie-breaks use this
+// separately owned numeric creation order so decimal digit boundaries cannot change semantics.
+const INSTANCE_CREATION_SEQUENCE = new WeakMap<
+  VfxEffectInstance<RuntimeEffectDefinition>,
+  number
+>();
+
+function instanceCreationSequence(instance: VfxEffectInstance<RuntimeEffectDefinition>): number {
+  const sequence = INSTANCE_CREATION_SEQUENCE.get(instance);
+  if (sequence === undefined) throw new Error(`Missing creation sequence for ${instance.id}.`);
+  return sequence;
+}
 
 type AdvanceContext = {
   readonly prewarmStepSeconds: number;
@@ -2864,7 +2887,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     options: EffectSpawnOptions<EffectDefinition<Elements, Parameters>> = {},
   ): VfxEffectInstance<EffectDefinition<Elements, Parameters>> {
     const preparationSpawn = this.#preparationSpawn;
-    const id = `nachi-effect-${++this.#instanceSequence}`;
+    const identity = nextEffectInstanceIdentity(this.#instanceSequence);
+    this.#instanceSequence = identity.sequence;
+    const creationSequence = identity.sequence;
+    const id = identity.id;
     const parameterDefinitions = (definition.parameters ?? {}) as ParameterSchema;
     if (options.priority !== undefined && !Number.isFinite(options.priority)) {
       throw new RangeError('EffectSpawnOptions.priority must be finite.');
@@ -2884,6 +2910,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       options.priority ?? 0,
       undefined,
       (capture) => this.#scheduleCapture(capture),
+    );
+    INSTANCE_CREATION_SEQUENCE.set(
+      instance as VfxEffectInstance<RuntimeEffectDefinition>,
+      creationSequence,
     );
     if (!preparationSpawn) this.#instances.set(id, instance);
 
@@ -3267,11 +3297,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           (this.#budgetAdmittedInstances.has(right.instance.id) ? BUDGET_HYSTERESIS_SCORE : 0);
         const difference = rightScore - leftScore;
         return difference === 0
-          ? left.instance.id < right.instance.id
-            ? -1
-            : left.instance.id > right.instance.id
-              ? 1
-              : 0
+          ? instanceCreationSequence(left.instance) - instanceCreationSequence(right.instance)
           : difference;
       });
     let activeInstances = 0;
@@ -3313,7 +3339,8 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     const entries = [...this.#instances.values()].flatMap((instance) =>
       instance.transparencyEmitters().map(([key, emitter]) => ({
         instance,
-        stableKey: `${instance.id}/${key}`,
+        stableKey: key,
+        stableSequence: instanceCreationSequence(instance),
         value: emitter,
         worldPosition: emitter.worldPosition,
       })),
@@ -3481,49 +3508,73 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       }));
     const byKey = new Map(emitters.map((entry) => [entry.key, entry] as const));
     const eventDiagnostics: VfxDiagnostic[] = [];
-    const eventLinks = emitters.flatMap((source) =>
-      source.program.events.flatMap((queue) =>
-        queue.handlers.flatMap((handler) => {
-          const target = byKey.get(handler.target);
-          if (!target) {
-            eventDiagnostics.push({
-              code: 'NACHI_EVENT_TARGET_UNKNOWN',
-              message: `emitTo() target "${handler.target}" is not an emitter in this effect.`,
-              path: `${source.key}.${handler.path}.config.target`,
-              phase: 'compile',
-              severity: 'error',
-            });
-            return [];
-          }
-          for (const [index, name] of handler.inherit.entries()) {
-            const producerAttribute = source.program.attributeSchema.byName[name];
-            const consumerAttribute = target.program.attributeSchema.byName[name];
-            if (!consumerAttribute) {
+    const eventLinks = emitters
+      .flatMap((source) =>
+        source.program.events.flatMap((queue) =>
+          queue.handlers.flatMap((handler) => {
+            const target = byKey.get(handler.target);
+            if (!target) {
               eventDiagnostics.push({
-                code: 'NACHI_EVENT_PAYLOAD_TARGET_UNKNOWN',
-                message: `Target emitter "${handler.target}" does not declare inherited attribute "${name}".`,
-                path: `${source.key}.${handler.path}.config.inherit[${index}]`,
+                code: 'NACHI_EVENT_TARGET_UNKNOWN',
+                message: `emitTo() target "${handler.target}" is not an emitter in this effect.`,
+                path: `${source.key}.${handler.path}.config.target`,
                 phase: 'compile',
                 severity: 'error',
               });
-            } else if (
-              producerAttribute &&
-              (consumerAttribute.logicalType !== producerAttribute.logicalType ||
-                consumerAttribute.components !== producerAttribute.components)
-            ) {
-              eventDiagnostics.push({
-                code: 'NACHI_EVENT_PAYLOAD_TYPE_MISMATCH',
-                message: `Inherited attribute "${name}" is ${producerAttribute.logicalType} on "${source.key}" but ${consumerAttribute.logicalType} on "${handler.target}".`,
-                path: `${source.key}.${handler.path}.config.inherit[${index}]`,
-                phase: 'compile',
-                severity: 'error',
-              });
+              return [];
             }
-          }
-          return [{ handler, queue, sourceKey: source.key, targetKey: target.key }];
-        }),
-      ),
-    );
+            for (const [index, name] of handler.inherit.entries()) {
+              const producerAttribute = source.program.attributeSchema.byName[name];
+              const consumerAttribute = target.program.attributeSchema.byName[name];
+              if (!consumerAttribute) {
+                eventDiagnostics.push({
+                  code: 'NACHI_EVENT_PAYLOAD_TARGET_UNKNOWN',
+                  message: `Target emitter "${handler.target}" does not declare inherited attribute "${name}".`,
+                  path: `${source.key}.${handler.path}.config.inherit[${index}]`,
+                  phase: 'compile',
+                  severity: 'error',
+                });
+              } else if (
+                producerAttribute &&
+                (consumerAttribute.logicalType !== producerAttribute.logicalType ||
+                  consumerAttribute.components !== producerAttribute.components)
+              ) {
+                eventDiagnostics.push({
+                  code: 'NACHI_EVENT_PAYLOAD_TYPE_MISMATCH',
+                  message: `Inherited attribute "${name}" is ${producerAttribute.logicalType} on "${source.key}" but ${consumerAttribute.logicalType} on "${handler.target}".`,
+                  path: `${source.key}.${handler.path}.config.inherit[${index}]`,
+                  phase: 'compile',
+                  severity: 'error',
+                });
+              }
+            }
+            return [{ handler, queue, sourceKey: source.key, targetKey: target.key }];
+          }),
+        ),
+      )
+      .sort((left, right) => {
+        const leftTuple = [
+          left.targetKey,
+          left.sourceKey,
+          left.queue.eventName,
+          left.handler.target,
+          [...left.handler.inherit].sort().join('\u0000'),
+        ];
+        const rightTuple = [
+          right.targetKey,
+          right.sourceKey,
+          right.queue.eventName,
+          right.handler.target,
+          [...right.handler.inherit].sort().join('\u0000'),
+        ];
+        for (let index = 0; index < leftTuple.length; index += 1) {
+          const leftKey = leftTuple[index]!;
+          const rightKey = rightTuple[index]!;
+          if (leftKey < rightKey) return -1;
+          if (leftKey > rightKey) return 1;
+        }
+        return 0;
+      });
     if (eventDiagnostics.length > 0) throw new VfxDiagnosticError(eventDiagnostics);
     const outgoing = new Map<string, string[]>();
     for (const { sourceKey, targetKey } of eventLinks) {

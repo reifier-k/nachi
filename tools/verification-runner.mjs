@@ -10,6 +10,7 @@ const suites = [
       'm3-sprites',
       'm12-grid',
       'm10-sort',
+      'm10-lit',
       'm8-vat',
       'm7-ribbons',
       'm12-neighbors',

@@ -1486,6 +1486,8 @@ describe('emitter kernel compiler', () => {
       requiresBackend: 'webgpu',
     });
     expect(program.attributeSchema.byName).toHaveProperty('intensity');
+    expect(program.attributeSchema.byName).toHaveProperty('spawnOrder');
+    expect(program.draws[0]?.vertex.attributes).toContain('spawnOrder');
     expect(
       program.kernels.update.modules.find(({ type }) => type === 'core/intensity-over-life')?.lutId,
     ).toBeDefined();

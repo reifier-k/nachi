@@ -5,6 +5,7 @@ import {
   colorOverLife,
   defineEffect,
   defineEmitter,
+  emitTo,
   flipbook,
   gradient,
   gravity,
@@ -23,7 +24,7 @@ import {
   createThreeTextureResolver,
   materializeThreeSpriteDraw,
 } from '@nachi-vfx/three';
-import { readLogicalAttribute } from './three-runtime-readback';
+import { readLogicalAttribute, readStorage } from './three-runtime-readback';
 import { createPerformanceMonitor } from './perf';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './m3-sprites.css';
@@ -699,6 +700,72 @@ async function run(): Promise<void> {
     rateReuseFirst.pixels,
     rateReusePerturbed.pixels,
   );
+  const captureEventRouting = async (reverseInsertion: boolean) => {
+    const source = (center: readonly [number, number, number]) =>
+      defineEmitter({
+        capacity: 1,
+        events: { onDeath: emitTo('target', { inherit: ['position'] }) },
+        init: [positionSphere({ center, radius: 0 }), lifetime(0.01)],
+        integration: 'none' as const,
+        render: billboard({ blending: 'additive' as const }),
+        spawn: burst({ count: 1 }),
+      });
+    const target = defineEmitter({
+      capacity: 1,
+      init: [positionSphere({ radius: 0 }), lifetime(1)],
+      integration: 'none',
+      render: billboard({ blending: 'additive' }),
+      spawn: burst({ count: 0 }),
+    });
+    const alpha = source([-0.75, 0, 0]);
+    const zeta = source([0.75, 0, 0]);
+    const elements = reverseInsertion ? { alpha, target, zeta } : { zeta, target, alpha };
+    const routeSystem = new VFXSystem(runtimeRenderer, undefined, {
+      aliveCountReadbackInterval: 1,
+      maxPoolSize: 0,
+    });
+    const routeInstance = routeSystem.spawn(defineEffect({ elements }), { seed: 0x2e71 });
+    try {
+      await routeSystem.update(0);
+      await routeSystem.update(0.02);
+      await routeSystem.update(0.001);
+      const targetView = routeInstance.getEmitter('target');
+      if (!targetView) throw new Error('M3 event routing target is missing.');
+      const [position, spawnOrder, alive, state] = await Promise.all([
+        readLogicalAttribute(
+          renderer,
+          targetView.program,
+          targetView.kernels,
+          'position',
+        ) as Promise<Float32Array>,
+        readLogicalAttribute(
+          renderer,
+          targetView.program,
+          targetView.kernels,
+          'spawnOrder',
+        ) as Promise<Uint32Array>,
+        readLogicalAttribute(
+          renderer,
+          targetView.program,
+          targetView.kernels,
+          'alive',
+        ) as Promise<Uint32Array>,
+        readStorage(renderer, targetView.kernels.aliveCount, 'uint') as Promise<Uint32Array>,
+      ]);
+      return {
+        alive: alive[0] ?? 0,
+        dropped: state[targetView.kernels.counterOffsets.spawnOverflow] ?? 0,
+        positionX: position[0] ?? 0,
+        spawnOrder: spawnOrder[0] ?? 0xffffffff,
+      };
+    } finally {
+      routeInstance.release();
+    }
+  };
+  const eventRouting = {
+    forward: await captureEventRouting(false),
+    reversed: await captureEventRouting(true),
+  };
   const blendBrightness = Object.fromEntries(
     Object.entries(blendMetrics).map(([mode, metrics]) => [mode, metrics.meanForegroundBrightness]),
   );
@@ -743,6 +810,12 @@ async function run(): Promise<void> {
     m2NumericRegression:
       regressionView.program.meta.storageBufferCount <= 8 &&
       Math.abs(movementDelta - STEP) < 0.0002,
+    eventRoutingCanonical:
+      JSON.stringify(eventRouting.forward) === JSON.stringify(eventRouting.reversed) &&
+      eventRouting.forward.alive === 1 &&
+      eventRouting.forward.dropped >= 1 &&
+      eventRouting.forward.positionX < -0.7 &&
+      eventRouting.forward.spawnOrder === 0,
     rateReuseRandomDeterminism:
       rateReuseFirst.successfulBirths > 32 &&
       rateReuseFirst.successfulBirths === rateReuseSecond.successfulBirths &&
@@ -871,6 +944,7 @@ async function run(): Promise<void> {
       interpolationDifference,
     },
     foreground,
+    eventRouting,
     premultipliedOpacityDifference,
     premultipliedTextureDifference,
     m2Regression: {

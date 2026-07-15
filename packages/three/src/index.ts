@@ -40,6 +40,7 @@ import {
   cameraProjectionMatrixInverse,
   cameraWorldMatrix,
   float,
+  floatBitsToUint,
   floor,
   fract,
   instanceIndex,
@@ -62,6 +63,7 @@ import {
   texture3D,
   uv,
   uint,
+  uintBitsToFloat,
   uniform,
   varying,
   vec2,
@@ -1599,6 +1601,18 @@ function mutable(value: unknown): MutableNode {
   return value as MutableNode;
 }
 
+function nodeOr(left: KernelNode, right: KernelNode): KernelNode {
+  return left.not().and(right.not()).not();
+}
+
+function nodeFloatBitsToUint(value: unknown): KernelNode {
+  return asNode((floatBitsToUint as unknown as (input: unknown) => unknown)(value));
+}
+
+function nodeUintBitsToFloat(value: unknown): KernelNode {
+  return asNode((uintBitsToFloat as unknown as (input: unknown) => unknown)(value));
+}
+
 export interface ThreeLightSelectionStats {
   readonly candidateCount: number;
   readonly selectedCount: number;
@@ -1609,6 +1623,7 @@ export interface ThreeLightSelectionStats {
     readonly position: readonly [number, number, number];
     readonly priority: number;
     readonly radius: number;
+    readonly spawnOrder: number;
   }[];
 }
 
@@ -1677,42 +1692,72 @@ export function materializeThreeLightDraw(
           If(valid as never, () => {
             candidateCount.addAssign(uint(1) as never);
             const minimumPriority = mutable(float(1e30).toVar());
+            const maximumSpawnOrder = mutable(uint(0).toVar());
             const minimumSlot = mutable(uint(0).toVar());
             for (let slot = 0; slot < draw.maxLights; slot += 1) {
-              const slotPriority = selection.element(uint(1 + slot * 3) as never).w;
-              If(slotPriority.lessThan(minimumPriority) as never, () => {
-                minimumPriority.assign(slotPriority);
-                minimumSlot.assign(uint(slot));
-              });
+              const base = uint(1 + slot * 3);
+              const slotPriority = selection.element(base as never).w;
+              const slotSpawnOrder = nodeFloatBitsToUint(
+                selection.element(base.add(uint(2)) as never).z,
+              );
+              If(
+                nodeOr(
+                  slotPriority.lessThan(minimumPriority),
+                  slotPriority
+                    .equal(minimumPriority)
+                    .and(maximumSpawnOrder.lessThan(slotSpawnOrder)),
+                ) as never,
+                () => {
+                  minimumPriority.assign(slotPriority);
+                  maximumSpawnOrder.assign(slotSpawnOrder);
+                  minimumSlot.assign(uint(slot));
+                },
+              );
             }
-            If(mutable(priority).greaterThan(minimumPriority) as never, () => {
-              const base = minimumSlot.mul(asNode(uint(3))).add(asNode(uint(1)));
-              const position = logicalAttribute('position', physical);
-              const color = logicalAttribute('color', physical);
-              selection
-                .element(base as never)
-                .assign(
-                  vec4(
-                    position.x as never,
-                    position.y as never,
-                    position.z as never,
-                    priority as never,
-                  ) as never,
-                );
-              selection
-                .element(base.add(asNode(uint(1))) as never)
-                .assign(
-                  vec4(
-                    color.r as never,
-                    color.g as never,
-                    color.b as never,
-                    intensity as never,
-                  ) as never,
-                );
-              selection
-                .element(base.add(asNode(uint(2))) as never)
-                .assign(vec4(radius as never, physical as never, 0, 0) as never);
-            });
+            const spawnOrder = logicalAttribute('spawnOrder', physical);
+            If(
+              nodeOr(
+                minimumPriority.lessThan(priority),
+                mutable(priority)
+                  .equal(minimumPriority)
+                  .and(spawnOrder.lessThan(maximumSpawnOrder)),
+              ) as never,
+              () => {
+                const base = minimumSlot.mul(asNode(uint(3))).add(asNode(uint(1)));
+                const position = logicalAttribute('position', physical);
+                const color = logicalAttribute('color', physical);
+                selection
+                  .element(base as never)
+                  .assign(
+                    vec4(
+                      position.x as never,
+                      position.y as never,
+                      position.z as never,
+                      priority as never,
+                    ) as never,
+                  );
+                selection
+                  .element(base.add(asNode(uint(1))) as never)
+                  .assign(
+                    vec4(
+                      color.r as never,
+                      color.g as never,
+                      color.b as never,
+                      intensity as never,
+                    ) as never,
+                  );
+                selection
+                  .element(base.add(asNode(uint(2))) as never)
+                  .assign(
+                    vec4(
+                      radius as never,
+                      physical as never,
+                      nodeUintBitsToFloat(spawnOrder) as never,
+                      0,
+                    ) as never,
+                  );
+              },
+            );
           });
         },
       );
@@ -1759,6 +1804,7 @@ export function materializeThreeLightDraw(
   let stats: ThreeLightSelectionStats = { candidateCount: 0, selected: [], selectedCount: 0 };
   const apply = (buffer: ArrayBuffer): ThreeLightSelectionStats => {
     const values = new Float32Array(buffer);
+    const words = new Uint32Array(buffer);
     const selectedCount = Math.min(draw.maxLights, Math.max(0, Math.round(values[0] ?? 0)));
     const candidateCount = Math.max(0, Math.round(values[1] ?? 0));
     const selected: ThreeLightSelectionStats['selected'][number][] = [];
@@ -1773,11 +1819,12 @@ export function materializeThreeLightDraw(
         position: [values[base] ?? 0, values[base + 1] ?? 0, values[base + 2] ?? 0] as const,
         priority,
         radius: values[base + 8] ?? 0,
+        spawnOrder: words[base + 10] ?? 0xffffffff,
       };
       selected.push(entry);
     }
     selected.sort(
-      (left, right) => right.priority - left.priority || left.physicalIndex - right.physicalIndex,
+      (left, right) => right.priority - left.priority || left.spawnOrder - right.spawnOrder,
     );
     for (let index = 0; index < lights.length; index += 1) {
       const light = lights[index]!;

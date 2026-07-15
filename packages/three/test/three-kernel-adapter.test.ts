@@ -603,6 +603,50 @@ describe('three kernel adapter', () => {
     ).toThrowError('NACHI_DECAL_WEBGL2_UNSUPPORTED');
   });
 
+  it('orders equal-priority PointLight readback by logical spawnOrder instead of physical slot', async () => {
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 8,
+        init: [lifetime(10), lightIntensity(4)],
+        integration: 'none',
+        render: lightRenderer({ maxLights: 2 }),
+        spawn: burst({ count: 2 }),
+      }),
+    );
+    const draw = materializeThreeLightDraw(
+      program,
+      program.buildKernels(createThreeKernelAdapter()),
+    );
+    const buffer = new ArrayBuffer((1 + 2 * 3) * 4 * Float32Array.BYTES_PER_ELEMENT);
+    const values = new Float32Array(buffer);
+    const words = new Uint32Array(buffer);
+    values[0] = 2;
+    values[1] = 3;
+    const write = (slot: number, physicalIndex: number, spawnOrder: number) => {
+      const base = (1 + slot * 3) * 4;
+      values[base + 3] = 4;
+      values[base + 7] = 4;
+      values[base + 8] = 1;
+      values[base + 9] = physicalIndex;
+      words[base + 10] = spawnOrder;
+    };
+    write(0, 1, 100);
+    write(1, 7, 9);
+    const renderer = {
+      async computeAsync() {},
+      async getArrayBufferAsync() {
+        return buffer.slice(0);
+      },
+    } as unknown as THREE.WebGPURenderer;
+
+    await draw.update(renderer);
+    const stats = await draw.update(renderer);
+
+    expect(stats.candidateCount).toBe(3);
+    expect(stats.selected.map(({ spawnOrder }) => spawnOrder)).toEqual([9, 100]);
+    expect(stats.selected.map(({ physicalIndex }) => physicalIndex)).toEqual([7, 1]);
+  });
+
   it('materializes an external @nachi-vfx/trails GPU birth-ring draw', async () => {
     const registry = registerTrails(createCoreKernelModuleRegistry());
     const program = compileEmitter(

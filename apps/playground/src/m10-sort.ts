@@ -30,6 +30,7 @@ import {
 import {
   createThreeKernelAdapter,
   createThreeRuntimeRenderer,
+  disposeThreeDraw,
   materializeThreeSpriteDraw,
 } from '@nachi-vfx/three';
 import { createPlaygroundRenderer } from './webgpu-renderer';
@@ -393,6 +394,79 @@ async function run(): Promise<void> {
     ({ code }) => code === 'NACHI_ALPHA_SORT_CAMERA_UNSET',
   );
 
+  const tieEmitter = defineEmitter({
+    bounds: { radius: 0.1 },
+    capacity: 1,
+    integration: 'none',
+    render: billboard({ blending: 'alpha' }),
+    spawn: burst({ count: 0 }),
+  });
+  const tieEffect = defineEffect({ elements: { particles: tieEmitter } });
+  const tieSystem = new VFXSystem(runtime, undefined, { maxPoolSize: 0 });
+  tieSystem.setCamera(cameraState(alphaCamera));
+  const tieDraws = new Map<number, ReturnType<typeof materializeThreeSpriteDraw>>();
+  const tieResources: Array<{
+    readonly draw: ReturnType<typeof materializeThreeSpriteDraw>;
+    readonly instance: { release(): void };
+    readonly view: VfxEmitterRuntimeView;
+  }> = [];
+  for (let sequence = 1; sequence <= 100; sequence += 1) {
+    const tied = tieSystem.spawn(tieEffect);
+    if ([9, 10, 99, 100].includes(sequence)) {
+      const view = emitter(tied, 'particles');
+      const draw = materializeThreeSpriteDraw(view.program, view.kernels);
+      tieDraws.set(sequence, draw);
+      tieResources.push({ draw, instance: tied, view });
+    } else tied.release();
+  }
+  tieSystem.setCamera(cameraState(alphaCamera));
+  const tieRenderOrders = Object.fromEntries(
+    [...tieDraws].map(([sequence, draw]) => [sequence, draw.renderOrder]),
+  );
+
+  const budgetProbe = async (boundary: 10 | 100, budget: 'instance' | 'particle') => {
+    const system = new VFXSystem(runtime, undefined, {
+      maxPoolSize: 0,
+      significanceBudget:
+        budget === 'instance'
+          ? { maxActiveInstances: 1, maxParticles: 2 }
+          : { maxActiveInstances: 2, maxParticles: 1 },
+    });
+    system.setCamera(cameraState(alphaCamera));
+    const definition = defineEffect({
+      elements: { particles: tieEmitter },
+      scalability: {
+        culling: { distance: { fadeEnd: 6, fadeStart: 5 }, frustum: false },
+      },
+    });
+    for (let sequence = 1; sequence < boundary - 1; sequence += 1) {
+      system.spawn(definition, { position: [10, 0, 0] }).release();
+    }
+    const earlier = system.spawn(definition, { position: [10, 0, 0] });
+    const later = system.spawn(definition, { position: [10, 0, 0] });
+    earlier.setTransform([0, 0, 0]);
+    later.setTransform([0, 0, 0]);
+    await system.update(0);
+    const result = {
+      earlier: { action: earlier.scalability.action, id: earlier.id },
+      later: { action: later.scalability.action, id: later.id },
+    };
+    earlier.release();
+    later.release();
+    return result;
+  };
+  const tieBudgets = {
+    digit10: await budgetProbe(10, 'instance'),
+    digit100: await budgetProbe(100, 'particle'),
+  };
+  const numericInstanceTieBreak =
+    tieRenderOrders[9]! < tieRenderOrders[10]! &&
+    tieRenderOrders[99]! < tieRenderOrders[100]! &&
+    tieBudgets.digit10.earlier.action === 'full' &&
+    tieBudgets.digit10.later.action === 'culled' &&
+    tieBudgets.digit100.earlier.action === 'full' &&
+    tieBudgets.digit100.later.action === 'spawn-suppressed';
+
   const oitScene = new THREE.Scene();
   const oitCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
   oitCamera.position.z = 3;
@@ -462,6 +536,7 @@ async function run(): Promise<void> {
     deterministic: JSON.stringify(firstSort.indices) === JSON.stringify(secondSort.indices),
     depthMonotonic,
     killMixed: firstSort.aliveCount > 0 && firstSort.aliveCount < 7,
+    numericInstanceTieBreak,
     paddingBoundary: firstSort.padded === 8,
     spawnOrderInitReadback,
     sortedDrawReversal,
@@ -478,6 +553,7 @@ async function run(): Promise<void> {
     backend,
     expectedRgb,
     firstSort,
+    numericInstanceTieBreak: { budgets: tieBudgets, renderOrders: tieRenderOrders },
     sortedDrawReadback: {
       cameraA: [...sortedCameraA.slice(center, center + 4)],
       cameraB: [...sortedCameraB.slice(center, center + 4)],
@@ -489,6 +565,10 @@ async function run(): Promise<void> {
   target.dispose();
   sortedDrawTarget.dispose();
   oit.dispose();
+  for (const { draw, instance, view } of tieResources) {
+    disposeThreeDraw(view.kernels, draw, renderer);
+    instance.release();
+  }
 }
 
 void run().catch((error) => {

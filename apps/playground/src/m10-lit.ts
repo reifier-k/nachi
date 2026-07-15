@@ -259,6 +259,70 @@ async function run(): Promise<void> {
   await lightDraw.update(renderer);
   lightDraw.group.position.set(-1.34, 0.37, 1.12);
 
+  const probeLightSelection = async (capacity: number) => {
+    const probeSystem = new VFXSystem(runtime, undefined, {
+      aliveCountReadbackInterval: 1,
+      maxPoolSize: 0,
+    });
+    const probeInstance = probeSystem.spawn(
+      defineEffect({
+        elements: {
+          lights: defineEmitter({
+            capacity,
+            init: [positionSphere({ radius: 0 }), lifetime(0.02), lightIntensity(4)],
+            integration: 'none',
+            render: lightRenderer({ maxLights: 2 }),
+            spawn: burst({ count: 4, cycles: 3, interval: 0.04 }),
+          }),
+        },
+      }),
+      { seed: 0x1047 },
+    );
+    let probeDraw: ReturnType<typeof materializeThreeLightDraw> | undefined;
+    try {
+      const probeView = probeInstance.getEmitter('lights');
+      if (!probeView) throw new Error('M10 light selection probe emitter is missing.');
+      const draw = materializeThreeLightDraw(probeView.program, probeView.kernels);
+      probeDraw = draw;
+      const captureSelection = async () => {
+        await draw.update(renderer);
+        const stats = await draw.update(renderer);
+        return {
+          candidateCount: stats.candidateCount,
+          physicalIndices: stats.selected.map(({ physicalIndex }) => physicalIndex),
+          spawnOrders: stats.selected.map(({ spawnOrder }) => spawnOrder),
+        };
+      };
+      await probeSystem.update(0);
+      const cycles = [await captureSelection()];
+      for (let cycle = 1; cycle < 3; cycle += 1) {
+        for (let step = 0; step < 4; step += 1) await probeSystem.update(0.01);
+        cycles.push(await captureSelection());
+      }
+      return { capacity, cycles };
+    } finally {
+      probeDraw?.dispose(renderer);
+      probeInstance.release();
+    }
+  };
+  const lightSelectionRuns = [
+    await probeLightSelection(5),
+    await probeLightSelection(5),
+    await probeLightSelection(6),
+  ];
+  const expectedLightOrders = [
+    [0, 1],
+    [4, 5],
+    [8, 9],
+  ];
+  const logicalLightTieBreak = lightSelectionRuns.every(({ cycles }) =>
+    cycles.every(
+      ({ candidateCount, spawnOrders }, index) =>
+        candidateCount === 4 &&
+        JSON.stringify(spawnOrders) === JSON.stringify(expectedLightOrders[index]),
+    ),
+  );
+
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x010204);
   scene.add(lightDraw.group);
@@ -311,6 +375,7 @@ async function run(): Promise<void> {
   const checks = {
     consoleClean: messages.length === 0,
     lightRendererSelected: lightDraw.stats.selectedCount === 1,
+    logicalLightTieBreak,
     normalMapDifference:
       normalMapDifference.changed > 240 &&
       normalMapDifference.mean > 0.35 &&
@@ -325,21 +390,25 @@ async function run(): Promise<void> {
       visual.foregroundRatio > 0.01 && visual.foregroundRatio < 0.5 && visual.saturatedRatio < 0.13,
   };
   const monitor = createPerformanceMonitor(renderer, {
-    gpuScopes: ['render'],
+    gpuScopes: ['compute', 'render'],
     mode: new URLSearchParams(location.search).get('headless') === '1' ? 'headless' : 'visual',
     page: 'm10-lit',
   });
   scene.add(mapped);
   renderer.setRenderTarget(target);
-  renderer.render(scene, camera);
+  await monitor.captureGpuSamples(async () => {
+    await lightDraw.update(renderer);
+    renderer.render(scene, camera);
+    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+  });
   scene.remove(mapped);
-  await monitor.resolveGpuTimestamps();
   monitor.publish();
   checks.consoleClean = messages.length === 0;
   const result = {
     checks,
     evidence: {
       lightRenderer: lightDraw.stats,
+      lightSelectionRuns,
       normalMapAsymmetricSamples: asymmetricSamples,
       leftDominance,
       normalMapDifference,

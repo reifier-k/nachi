@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { nextEffectInstanceIdentity } from '../src/internal-instance-identity.js';
+
 import {
   EffectClock,
   EmitterLifecycleController,
@@ -68,6 +70,90 @@ describe('M10 coarse transparency order', () => {
     ]);
     const reversedView = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1];
     expect(sortEmittersBackToFront(entries, reversedView)[0]?.stableKey).toBe('a');
+  });
+
+  it.each([
+    [9, 10],
+    [99, 100],
+  ])('uses numeric instance creation order across the %i -> %i digit boundary', (earlier, later) => {
+    const entries = [later, earlier].map((stableSequence) => ({
+      stableKey: `nachi-effect-${stableSequence}/particles`,
+      stableSequence,
+      value: stableSequence,
+      worldPosition: [0, 0, -2] as const,
+    }));
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+    expect(sortEmittersBackToFront(entries, identity).map(({ value }) => value)).toEqual([
+      earlier,
+      later,
+    ]);
+  });
+
+  it.each([
+    ['a', 'b', 'c'],
+    ['a', 'c', 'b'],
+    ['b', 'a', 'c'],
+    ['b', 'c', 'a'],
+    ['c', 'a', 'b'],
+    ['c', 'b', 'a'],
+  ])('falls the whole mixed collection back to stable keys for input %j', (...inputKeys) => {
+    const byKey = {
+      a: { stableKey: 'a', stableSequence: 30, value: 'a', worldPosition: [0, 0, -2] as const },
+      b: { stableKey: 'b', value: 'b', worldPosition: [0, 0, -2] as const },
+      c: { stableKey: 'c', stableSequence: 10, value: 'c', worldPosition: [0, 0, -2] as const },
+    };
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const entries = inputKeys.map((key) => byKey[key as keyof typeof byKey]);
+
+    expect(sortEmittersBackToFront(entries, identity).map(({ stableKey }) => stableKey)).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])('falls the whole collection back to stable keys for invalid sequence %s', (invalidSequence) => {
+    const entries = [
+      { stableKey: 'a', stableSequence: 30, value: 'a', worldPosition: [0, 0, -2] as const },
+      {
+        stableKey: 'b',
+        stableSequence: invalidSequence,
+        value: 'b',
+        worldPosition: [0, 0, -2] as const,
+      },
+      { stableKey: 'c', stableSequence: 10, value: 'c', worldPosition: [0, 0, -2] as const },
+    ];
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+    expect(
+      sortEmittersBackToFront(entries.reverse(), identity).map(({ stableKey }) => stableKey),
+    ).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('internal effect instance identity allocation', () => {
+  it('emits the final exact safe integer ID once and rejects exhaustion', () => {
+    const penultimate = nextEffectInstanceIdentity(Number.MAX_SAFE_INTEGER - 2);
+    const final = nextEffectInstanceIdentity(penultimate.sequence);
+
+    expect(penultimate).toEqual({
+      id: `nachi-effect-${Number.MAX_SAFE_INTEGER - 1}`,
+      sequence: Number.MAX_SAFE_INTEGER - 1,
+    });
+    expect(final).toEqual({
+      id: `nachi-effect-${Number.MAX_SAFE_INTEGER}`,
+      sequence: Number.MAX_SAFE_INTEGER,
+    });
+    expect(Number.isSafeInteger(final.sequence)).toBe(true);
+    expect(new Set([penultimate.id, final.id]).size).toBe(2);
+    expect(() => nextEffectInstanceIdentity(final.sequence)).toThrowError(
+      'VFXSystem instance creation sequence exhausted Number.MAX_SAFE_INTEGER.',
+    );
   });
 });
 
@@ -3461,6 +3547,84 @@ describe('VFXSystem runtime scheduler', () => {
     expect(consumer.kernels.eventInputs[0]?.binding.sourceKey).toBe('sparks');
   });
 
+  it('canonicalizes multi-source event routing independently of element insertion order', () => {
+    const source = (event: 'onCollision' | 'onDeath') =>
+      defineEmitter({
+        capacity: 1,
+        events: { [event]: emitTo('target', { inherit: ['position'] }) },
+        init: [lifetime(0.1)],
+        integration: 'none' as const,
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+      });
+    const target = defineEmitter({
+      capacity: 1,
+      init: [positionSphere({ radius: 0 })],
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 0 }),
+    });
+    const elements = {
+      zeta: source('onDeath'),
+      target,
+      alpha: source('onCollision'),
+    };
+    const reversed = Object.fromEntries(Object.entries(elements).reverse()) as typeof elements;
+    const routeKeys = (definitionElements: typeof elements) => {
+      const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+        defineEffect({ elements: definitionElements }),
+      );
+      return instance
+        .getEmitter('target')!
+        .kernels.eventInputs.map(
+          ({ binding }) =>
+            `${binding.sourceKey}/${binding.queue.eventName}/${binding.handler.target}`,
+        );
+    };
+
+    expect(routeKeys(elements)).toEqual(['alpha/onCollision/target', 'zeta/onDeath/target']);
+    expect(routeKeys(reversed)).toEqual(routeKeys(elements));
+  });
+
+  it('canonicalizes distinct handlers in one source queue by semantic inherit key', () => {
+    const route = (reverseHandlers: boolean) => {
+      const handlers = [
+        emitTo('target', { inherit: ['velocity'] }),
+        emitTo('target', { inherit: ['position'] }),
+      ];
+      const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(
+        defineEffect({
+          elements: {
+            source: defineEmitter({
+              capacity: 1,
+              events: { onDeath: reverseHandlers ? [...handlers].reverse() : handlers },
+              init: [positionSphere({ radius: 0 })],
+              render: computeRender,
+              spawn: burst({ count: 1 }),
+            }),
+            target: defineEmitter({
+              capacity: 2,
+              init: [positionSphere({ radius: 0 })],
+              render: computeRender,
+              spawn: burst({ count: 0 }),
+              update: [
+                tslModule(({ velocity }) => ({ velocity }), {
+                  access: { reads: ['Particles.velocity'], writes: ['Particles.velocity'] },
+                }),
+              ],
+            }),
+          },
+        }),
+      );
+      return instance
+        .getEmitter('target')!
+        .kernels.eventInputs.map(({ binding }) => binding.handler.inherit);
+    };
+
+    expect(route(false)).toEqual([['position'], ['velocity']]);
+    expect(route(true)).toEqual(route(false));
+  });
+
   it('materializes onCollision producer and inherited-position consumer kernels', () => {
     const instance = new VFXSystem(new FakeRuntimeRenderer()).spawn(collisionEventEffect());
     const producer = instance.getEmitter('source')!;
@@ -3944,6 +4108,56 @@ describe('M11 VFXSystem scalability scheduling', () => {
     expect(low.scalability.action).toBe('culled');
     expect(low.scalability.reasons).toContain('significance-instance-budget');
     expect(high.scalability.score).toBeGreaterThan(low.scalability.score);
+  });
+
+  it.each([
+    { boundary: 10, budget: 'instance' as const },
+    { boundary: 100, budget: 'particle' as const },
+  ])('uses numeric creation order for equal significance at id $boundary ($budget budget)', async ({
+    boundary,
+    budget,
+  }) => {
+    const system = new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+      maxPoolSize: 1,
+      significanceBudget:
+        budget === 'instance'
+          ? { maxActiveInstances: 1, maxParticles: 2 }
+          : { maxActiveInstances: 2, maxParticles: 1 },
+    });
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          bounds: { radius: 0.1 },
+          capacity: 1,
+          render: computeRender,
+          spawn: burst({ count: 0 }),
+        }),
+      },
+      scalability: {
+        culling: { distance: { fadeEnd: 2, fadeStart: 1 }, frustum: false },
+        significance: { priority: 0 },
+      },
+    });
+    for (let sequence = 1; sequence < boundary - 1; sequence += 1) {
+      system.spawn(definition, { position: [10, 0, 0] }).release();
+    }
+    const earlier = system.spawn(definition, { position: [10, 0, 0] });
+    const later = system.spawn(definition, { position: [10, 0, 0] });
+    expect([earlier.id, later.id]).toEqual([
+      `nachi-effect-${boundary - 1}`,
+      `nachi-effect-${boundary}`,
+    ]);
+    earlier.setTransform([0, 0, 0]);
+    later.setTransform([0, 0, 0]);
+
+    await system.update(0);
+
+    expect(earlier.scalability.action).toBe('full');
+    expect(later.scalability.action).toBe(budget === 'instance' ? 'culled' : 'spawn-suppressed');
+    expect(later.scalability.reasons).toContain(
+      budget === 'instance' ? 'significance-instance-budget' : 'significance-particle-budget',
+    );
   });
 
   it('does not let a hidden preparation spawn perturb significance admission', async () => {
