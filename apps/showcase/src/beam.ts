@@ -51,10 +51,13 @@ import {
 } from '@nachi-vfx/three';
 import {
   allPanelsHaveForeground,
+  allTimelineElementsHaveActivity,
   createDrainedReadback,
   createPerformanceMonitor,
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
+  timelineDefinitionElementKeys,
+  timelineTrackedKeysMatchDefinition,
 } from './harness';
 import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
@@ -1285,7 +1288,7 @@ async function run(): Promise<void> {
       });
       perfTarget.dispose();
     };
-    await runHeadless(renderer, post, step, instance, {
+    await runHeadless(renderer, post, step, instance, effect, {
       coreFx: () => coreFx,
       markers,
       perfWindow,
@@ -1389,6 +1392,7 @@ async function runHeadless(
     readonly state: string;
     getElementState(key: string): unknown;
   },
+  definition: { readonly elements: Readonly<Record<string, unknown>> },
   context: {
     coreFx: () => readonly CoreFxRuntime[];
     markers: readonly string[];
@@ -1397,16 +1401,7 @@ async function runHeadless(
 ): Promise<void> {
   const labels = required<HTMLElement>('#frame-labels');
   labels.innerHTML = CAPTURE_LABELS.map((label) => `<span>${label}</span>`).join('');
-  const elementKeys = [
-    'beamCore',
-    'beamGlow',
-    'beamResidual',
-    'beamSheath',
-    'circleGlyphs',
-    'circleTicks',
-    'impactRing',
-    'muzzleRing',
-  ] as const;
+  const elementKeys = timelineDefinitionElementKeys(definition);
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   const drainReadback = createDrainedReadback(renderer, target);
   const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
@@ -1475,6 +1470,8 @@ async function runHeadless(
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
     allPanelsVisible: allPanelsHaveForeground(panelStats),
+    allTimelineElementsActive: allTimelineElementsHaveActivity(captureStates, elementKeys),
+    allTimelineElementsTracked: timelineTrackedKeysMatchDefinition(definition, elementKeys),
     beamVisible:
       firePanel.foregroundRatio > 0.025 &&
       impactPanel.foregroundRatio > 0.03 &&
@@ -1494,6 +1491,7 @@ async function runHeadless(
     evidence: {
       captureStates,
       captureTimes: CAPTURE_TIMES,
+      elementKeys,
       coreDiagnostics,
       finalLocalTime: instance.localTime,
       finalState: instance.state,

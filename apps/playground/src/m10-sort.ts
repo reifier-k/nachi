@@ -147,7 +147,14 @@ async function run(): Promise<void> {
       sortDiagnostic,
       wboitDiagnostic: oitDiagnostic,
     };
-    performanceMonitor.publish();
+    const target = new THREE.RenderTarget(1, 1);
+    renderer.setRenderTarget(target);
+    await performanceMonitor.captureGpuSamples(async () => {
+      renderer.render(new THREE.Scene(), new THREE.Camera());
+      await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+    });
+    renderer.setRenderTarget(null);
+    target.dispose();
     publishM10SortValidation(root, statusValue, validation, {
       backend,
       diagnostics: {
@@ -442,9 +449,11 @@ async function run(): Promise<void> {
     { filename: 'm10-sort.png', selector: '#sort-visual' },
   ]);
   renderer.setRenderTarget(target);
-  renderer.render(alphaScene, alphaCamera);
-  await performanceMonitor.resolveGpuTimestamps();
-  performanceMonitor.publish();
+  await performanceMonitor.captureGpuSamples(async () => {
+    await alphaSystem.update(1 / 60);
+    renderer.render(alphaScene, alphaCamera);
+    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+  });
   const validation = {
     cameraWarning,
     coarseReversal,

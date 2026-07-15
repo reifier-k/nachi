@@ -77,6 +77,39 @@ function materialWgsl(material: THREE.MeshBasicNodeMaterial): string {
   return builder.fragmentShader;
 }
 
+function meshVertexWgsl(mesh: THREE.Mesh): string {
+  const renderer = {
+    backend: {
+      capabilities: { getUniformBufferLimit: () => 64 },
+      compatibilityMode: false,
+      utils: {
+        getTextureSampleData: () => ({ isMSAA: false, primarySamples: 1, samples: 1 }),
+      },
+    },
+    contextNode: context({}),
+    coordinateSystem: THREE.WebGPUCoordinateSystem,
+    getMRT: () => null,
+    getRenderTarget: () => null,
+    hasFeature: () => false,
+    library: new THREE.BasicNodeLibrary(),
+    lighting: { enabled: false },
+  };
+  const NodeBuilder = THREE.WGSLNodeBuilder as unknown as new (
+    object: unknown,
+    renderer: unknown,
+  ) => {
+    build(): void;
+    camera: THREE.Camera;
+    scene: THREE.Scene;
+    vertexShader: string;
+  };
+  const builder = new NodeBuilder(mesh, renderer);
+  builder.camera = new THREE.PerspectiveCamera();
+  builder.scene = new THREE.Scene();
+  builder.build();
+  return builder.vertexShader;
+}
+
 function expectCounts(
   geometry: ReturnType<typeof createRingGeometry>,
   vertices: number,
@@ -319,6 +352,60 @@ describe('@nachi-vfx/mesh-fx Blender VAT runtime', () => {
       vertexLookup: 'vertex-index',
     });
     expect(controls.frameCount).toBe(4);
+  });
+
+  it('builds every public VAT layout/encoding/clock variant through real Three vertex WGSL', () => {
+    const buildVariant = (variant: Partial<Parameters<typeof applyVat>[1]>) => {
+      const mesh = vatMesh();
+      if (variant.vertexLookup === 'vertex-index') mesh.geometry.deleteAttribute('uv1');
+      applyVat(mesh, {
+        fps: 8,
+        frameCount: 4,
+        normalTexture: vatTexture(),
+        positionTexture: vatTexture(),
+        ...variant,
+      });
+      const material = mesh.material as THREE.MeshStandardNodeMaterial;
+      // The codegen renderer has lighting disabled. Route VAT normal output into color as well so
+      // the vertex-stage varying and the selected normal-decoding branch cannot be dead-code
+      // eliminated by WGSLNodeBuilder.
+      material.colorNode = material.normalNode as Node<'vec3'> | null;
+      return meshVertexWgsl(mesh);
+    };
+    const defaultShader = buildVariant({});
+    const variants = {
+      bottomToTop: buildVariant({ frameOrder: 'bottom-to-top' }),
+      externalTime: buildVariant({ time: float(0.25) }),
+      signedNormal: buildVariant({ normalEncoding: 'signed' }),
+      vertexIndex: buildVariant({ vertexLookup: 'vertex-index' }),
+      xzNegativeY: buildVariant({ axisMap: 'xz-y' }),
+      absolutePosition: buildVariant({ positionMode: 'absolute' }),
+    };
+    const shaders = [defaultShader, ...Object.values(variants)];
+
+    expect(shaders).toHaveLength(7);
+    for (const shader of shaders) {
+      expect(shader).toContain('@vertex');
+      expect(shader.match(/textureLoad/g)?.length).toBeGreaterThanOrEqual(4);
+    }
+    for (const [name, shader] of Object.entries(variants)) {
+      expect(shader, `${name} must reach its selected VAT branch`).not.toBe(defaultShader);
+    }
+    expect(new Set(shaders).size).toBe(7);
+    expect(defaultShader).toContain('uv1.x');
+    expect(defaultShader).toContain('( positionLocal +');
+    expect(defaultShader).toContain('* vec3<f32>( 2.0 )');
+    expect(variants.bottomToTop).toContain('( 3.0 - nodeVar');
+    expect(variants.externalTime).toContain('( 0.25 * 8.0 )');
+    expect(variants.signedNormal).toContain('normalize( mix(');
+    expect(variants.signedNormal).not.toContain('* vec3<f32>( 2.0 )');
+    expect(variants.vertexIndex).toContain('i32( vertexIndex )');
+    expect(variants.vertexIndex).not.toContain('uv1.x');
+    expect(variants.xzNegativeY).toMatch(
+      /vec3<f32>\( nodeVar\d+\.x, nodeVar\d+\.z, \( - nodeVar\d+\.y \) \)/,
+    );
+    expect(variants.absolutePosition).toContain('positionLocal = mix(');
+    expect(variants.absolutePosition).not.toContain('( positionLocal +');
   });
 
   it('diagnoses missing textures, layout/count mismatch, float format, and frame overflow', () => {

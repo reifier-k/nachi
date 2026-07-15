@@ -23,3 +23,32 @@ Element screenshots selected by `data-artifact-screenshots` are saved at their C
 dimensions, not at a canvas's native backing-store dimensions. Treat page-published readback
 statistics such as `panelStats` as authoritative for pixel analysis; PNG artifacts are for visual
 inspection.
+
+Committed screenshot baselines live in `tools/baselines/`; `artifacts/` only contains disposable
+local output. A missing baseline is always a failure. Create or replace one deliberately with
+`--update-screenshots`; CI never uses that flag and rejects dirty or untracked files under the
+baseline directory. Screenshot specs may include normalized `regions` with an absolute
+`minimumForegroundPixels` and a `maximumChangedPixelRatio`; both the baseline and current image
+must clear the absolute floor, so two identically empty images cannot pass.
+
+`spike-runner.mjs` treats browser warnings, errors, and uncaught page errors as failures. A page
+that intentionally emits a diagnostic may publish `data-expected-diagnostics` as a JSON array of
+`{"type":"warning|error|pageerror","text":"required substring"}` records. Each record matches one
+diagnostic only; unexpected diagnostics and expectations that never occur both fail.
+
+The runner also validates `nachi.perf-baseline` v2 completion. Pages publish their requested GPU
+timestamp scopes, and every requested scope plus the total must finish its warmed sample window.
+`pending`, `error`, or a requested-but-unavailable scope fails. Adapter-level timestamp-query
+unavailability is allowed only when a structured `unavailableCause` identifies the active backend's
+missing timestamp-query capability. Renderer configuration causes such as `trackTimestamp: false`,
+missing/mismatched causes, and malformed or incomplete warmup counters fail; timings themselves
+remain measurements rather than SwiftShader performance claims.
+
+Run the expanded GPU suite while playground and showcase dev servers are listening on ports 5173
+and 5174:
+
+```sh
+pnpm verify:gpu
+```
+
+It covers Grid2D, WBOIT, VAT, textured ribbons, NeighborGrid, and all six showcase pages.

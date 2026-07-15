@@ -21,6 +21,7 @@ import {
 } from 'three/tsl';
 
 import { createPerformanceMonitor } from './perf';
+import { evaluateDrawControl } from './spike-compute-contract';
 import { createPlaygroundRenderer } from './webgpu-renderer';
 import './spike-compute.css';
 
@@ -96,6 +97,23 @@ type TimingStats = {
   frameMs?: number;
 };
 
+type DrawControlSample = {
+  foreground: boolean;
+  indirectArgs: number[] | null;
+  instanceCount: number;
+  pixel: number[];
+};
+
+type DrawReadback = {
+  controlPassed: boolean;
+  foreground: boolean;
+  indirectCausal: boolean;
+  mechanism: 'cpu-direct-instance-count-fallback' | 'gpu-generated-indirect-instance-count';
+  nonzero: DrawControlSample;
+  pixel: number[];
+  zero: DrawControlSample;
+};
+
 type SpikeResult = {
   ok: boolean;
   activeBackend: BackendName;
@@ -103,7 +121,9 @@ type SpikeResult = {
   computeOk: boolean;
   dispatchIndirectOk: boolean;
   drawExecuted: boolean;
+  drawReadback: DrawReadback | null;
   drawPath: 'directInstancedCpuCount' | 'drawIndexedIndirect';
+  indirectDrawCausal: boolean | null;
   indirectOk: boolean;
   measurementFrames: number;
   mode: 'headless' | 'visual';
@@ -128,6 +148,14 @@ root.dataset.headless = String(headless);
 root.dataset.particleCount = String(particleCount);
 root.dataset.rendererStatus = 'initializing';
 root.dataset.spikeStatus = 'initializing';
+if (requestedBackend === 'webgl') {
+  root.dataset.expectedDiagnostics = JSON.stringify([
+    {
+      type: 'warning',
+      text: 'THREE.WebGLBackend.compute(): The count parameter must be a single number, not IndirectStorageBufferAttribute',
+    },
+  ]);
+}
 
 const sceneHost = requireElement<HTMLDivElement>('#scene');
 const particleValue = requireElement<HTMLElement>('#particle-value');
@@ -250,6 +278,7 @@ function publishResult(result: SpikeResult): void {
   root.dataset.computeOk = String(result.computeOk);
   root.dataset.dispatchIndirectOk = String(result.dispatchIndirectOk);
   root.dataset.drawExecuted = String(result.drawExecuted);
+  root.dataset.indirectDrawCausal = String(result.indirectDrawCausal);
   root.dataset.indirectOk = String(result.indirectOk);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.supportMatrix = JSON.stringify(result.supportMatrix);
@@ -484,6 +513,16 @@ async function runSpike(): Promise<void> {
   })()
     .compute(1, [1])
     .setName('FinalizeIndirectArguments');
+
+  const zeroDrawIndirectKernel = Fn(() => {
+    drawIndirectArguments.element(uint(0)).assign(uint(indexCount));
+    drawIndirectArguments.element(uint(1)).assign(uint(0));
+    drawIndirectArguments.element(uint(2)).assign(uint(0));
+    drawIndirectArguments.element(uint(3)).assign(uint(0));
+    drawIndirectArguments.element(uint(4)).assign(uint(0));
+  })()
+    .compute(1, [1])
+    .setName('ZeroDrawIndirectArguments');
 
   const dispatchProbeKernel = Fn(() => {
     dispatchOutput.element(instanceIndex).assign(instanceIndex.mul(uint(3)).add(uint(7)));
@@ -733,7 +772,7 @@ async function runSpike(): Promise<void> {
       ? capability(
           'supported',
           headless
-            ? 'Indexed indirect arguments were GPU-generated and read back; draw intentionally not executed in headless mode.'
+            ? 'Indexed indirect arguments were GPU-generated and read back; causal zero/nonzero draw control is pending.'
             : 'Indexed indirect arguments were GPU-generated and are bound to BufferGeometry.',
         )
       : capability('error', 'Indexed indirect arguments failed validation.');
@@ -765,17 +804,21 @@ async function runSpike(): Promise<void> {
     stats: TimingStats,
     renderedFrames: number,
     drawExecuted: boolean,
+    drawReadback: SpikeResult['drawReadback'] = null,
+    drawExecutionOk = true,
   ): SpikeResult => ({
     activeBackend,
     atomicOk: activeBackend === 'WebGPU' ? validation.atomicOk : false,
     computeOk: baselineOk,
     dispatchIndirectOk: activeBackend === 'WebGPU' ? validation.dispatchIndirectOk : false,
     drawExecuted,
+    drawReadback,
     drawPath: activeBackend === 'WebGPU' ? 'drawIndexedIndirect' : 'directInstancedCpuCount',
+    indirectDrawCausal: drawReadback?.indirectCausal ?? null,
     indirectOk: activeBackend === 'WebGPU' ? validation.indirectOk : false,
     measurementFrames,
     mode: headless ? 'headless' : 'visual',
-    ok: baselineOk && advancedOk,
+    ok: baselineOk && advancedOk && drawExecutionOk,
     particleCount,
     renderedFrames,
     requestedBackend,
@@ -785,30 +828,14 @@ async function runSpike(): Promise<void> {
     validation,
   });
 
-  if (headless) {
-    const encodeMs = encodeSamples.mean();
-    const result = createResult(
-      {
-        encodeMs: roundMetric(encodeMs),
-        p95EncodeMs: roundMetric(percentile95(encodeSamples.values())),
-      },
-      0,
-      false,
-    );
-    setMetrics(null, encodeMs, validation.expectedAliveCount);
-    await performanceMonitor.resolveGpuTimestamps();
-    performanceMonitor.publish();
-    publishResult(result);
-    root.dataset.spikeStatus = result.ok ? 'complete' : 'error';
-    statusValue.textContent = result.ok
-      ? `${activeBackend} capability measurement complete`
-      : `${activeBackend} capability validation failed`;
-    return;
-  }
-
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x02050d);
-  const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 100);
+  scene.background = headless ? null : new THREE.Color(0x02050d);
+  const camera = new THREE.PerspectiveCamera(
+    52,
+    headless ? 1 : window.innerWidth / window.innerHeight,
+    0.1,
+    100,
+  );
   camera.position.set(0, 1.2, 8.5);
   camera.lookAt(0, 0.5, 0);
 
@@ -830,6 +857,121 @@ async function runSpike(): Promise<void> {
   particles.frustumCulled = false;
   if (activeBackend === 'WebGL2') particles.count = validation.expectedAliveCount;
   scene.add(particles);
+
+  if (headless) {
+    const encodeMs = encodeSamples.mean();
+    const drawTarget = new THREE.RenderTarget(1, 1, { depthBuffer: true });
+    renderer.setClearColor(0x000000, 0);
+    renderer.setRenderTarget(drawTarget);
+    const renderAndReadPixel = async (): Promise<number[]> => {
+      renderer.clear();
+      renderer.render(scene, camera);
+      return [
+        ...new Uint8Array(await renderer.readRenderTargetPixelsAsync(drawTarget, 0, 0, 1, 1)),
+      ].slice(0, 4);
+    };
+    const isForeground = (pixel: readonly number[]) =>
+      (pixel[0] ?? 0) + (pixel[1] ?? 0) + (pixel[2] ?? 0) > 0;
+
+    let zero: DrawControlSample;
+    let nonzero: DrawControlSample;
+    if (activeBackend === 'WebGPU') {
+      await renderer.computeAsync(zeroDrawIndirectKernel);
+      const zeroArguments = [
+        ...new Uint32Array(await renderer.getArrayBufferAsync(drawIndirectAttribute)).slice(0, 5),
+      ];
+      const zeroPixel = await renderAndReadPixel();
+      zero = {
+        foreground: isForeground(zeroPixel),
+        indirectArgs: zeroArguments,
+        instanceCount: zeroArguments[1] ?? -1,
+        pixel: zeroPixel,
+      };
+
+      await runComputeFrame((headlessFrames + 3) * FIXED_DELTA_SECONDS);
+      const nonzeroArguments = [
+        ...new Uint32Array(await renderer.getArrayBufferAsync(drawIndirectAttribute)).slice(0, 5),
+      ];
+      const nonzeroPixel = await renderAndReadPixel();
+      nonzero = {
+        foreground: isForeground(nonzeroPixel),
+        indirectArgs: nonzeroArguments,
+        instanceCount: nonzeroArguments[1] ?? -1,
+        pixel: nonzeroPixel,
+      };
+    } else {
+      particles.count = 0;
+      const zeroPixel = await renderAndReadPixel();
+      zero = {
+        foreground: isForeground(zeroPixel),
+        indirectArgs: null,
+        instanceCount: 0,
+        pixel: zeroPixel,
+      };
+      particles.count = validation.expectedAliveCount;
+      const nonzeroPixel = await renderAndReadPixel();
+      nonzero = {
+        foreground: isForeground(nonzeroPixel),
+        indirectArgs: null,
+        instanceCount: validation.expectedAliveCount,
+        pixel: nonzeroPixel,
+      };
+    }
+    const { controlPassed: drawExecutionOk, indirectCausal } = evaluateDrawControl(
+      activeBackend,
+      indexCount,
+      zero,
+      nonzero,
+    );
+    const drawReadback: DrawReadback = {
+      controlPassed: drawExecutionOk,
+      foreground: nonzero.foreground,
+      indirectCausal,
+      mechanism:
+        activeBackend === 'WebGPU'
+          ? 'gpu-generated-indirect-instance-count'
+          : 'cpu-direct-instance-count-fallback',
+      nonzero,
+      pixel: nonzero.pixel,
+      zero,
+    };
+    if (activeBackend === 'WebGPU') {
+      supportMatrix.indirectDraw = drawExecutionOk
+        ? capability(
+            'supported',
+            'The same bound geometry consumed GPU-written instanceCount=0 as black and a GPU-written nonzero count as foreground; no CPU instance count was changed.',
+          )
+        : capability(
+            'error',
+            `GPU indirect draw causal control failed (zero=${zero.pixel.join(',')}, nonzero=${nonzero.pixel.join(',')}).`,
+          );
+    }
+    await performanceMonitor.captureGpuSamples(async (sample) => {
+      await runComputeFrame((headlessFrames + sample + 3) * FIXED_DELTA_SECONDS);
+      renderer.clear();
+      renderer.render(scene, camera);
+      await renderer.readRenderTargetPixelsAsync(drawTarget, 0, 0, 1, 1);
+    });
+    renderer.setRenderTarget(null);
+    drawTarget.dispose();
+    const result = createResult(
+      {
+        encodeMs: roundMetric(encodeMs),
+        p95EncodeMs: roundMetric(percentile95(encodeSamples.values())),
+      },
+      1,
+      true,
+      drawReadback,
+      drawExecutionOk,
+    );
+    setMetrics(null, encodeMs, validation.expectedAliveCount);
+    publishResult(result);
+    root.dataset.spikeStatus = result.ok ? 'complete' : 'error';
+    statusValue.textContent = result.ok
+      ? `${activeBackend} capability measurement complete`
+      : `${activeBackend} capability validation failed`;
+    return;
+  }
 
   const frameSamples = new RollingAverage(METRIC_WINDOW);
   let previousTimestamp: number | undefined;

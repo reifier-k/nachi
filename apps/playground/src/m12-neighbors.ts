@@ -9,6 +9,7 @@ import {
   defineNeighborGrid,
   enumerateNeighborGridCells,
   lifetime,
+  neighborGridTslModule,
   neighborGridPositionCell,
   pbdDistanceConstraint,
   tslModule,
@@ -30,6 +31,15 @@ const query = new URLSearchParams(location.search);
 const headless = query.get('headless') === '1';
 const requestedBackend = query.get('backend') === 'webgl' ? 'webgl' : 'webgpu';
 root.dataset.headless = String(headless);
+const WEBGL_UNSUPPORTED_CODE = 'NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED';
+if (requestedBackend === 'webgl') {
+  root.dataset.expectedDiagnostics = JSON.stringify(
+    Array.from({ length: 2 }, () => ({
+      text: `[${WEBGL_UNSUPPORTED_CODE}]`,
+      type: 'error',
+    })),
+  );
+}
 
 const messages: string[] = [];
 const originalWarn = console.warn.bind(console);
@@ -241,6 +251,37 @@ async function run() {
       ]),
     },
   });
+  // Isolate the WebGL2 capability probe from unrelated emitter-storage limitations. The zero-count
+  // emitter binds and reads the grid through the public custom-neighbor module, but its empty render
+  // module avoids billboard/lifecycle attributes that WebGL2 rejects for separate reasons.
+  const webglRejectionEffect = defineEffect({
+    elements: {
+      neighbors: countGrid,
+      particles: defineEmitter({
+        capacity: 1,
+        integration: 'none',
+        render: {
+          access: { reads: [], writes: [] },
+          config: {},
+          kind: 'module',
+          stage: 'render',
+          type: 'test/runtime-compute-only',
+          version: 1,
+        },
+        spawn: burst({ count: 0 }),
+        update: [
+          neighborGridTslModule(
+            {
+              access: { reads: ['Particles.position'], writes: [] },
+              grid: 'neighbors',
+              radius: 0,
+            },
+            () => ({}),
+          ),
+        ],
+      }),
+    },
+  });
   // Keep timestamp queries off the correctness renderer and confine them to this short fixture
   // after every validation readback has completed.
   const capturePerformance = async (): Promise<void> => {
@@ -273,45 +314,53 @@ async function run() {
         mode: headless ? 'headless' : 'visual',
         page: '/m12-neighbors/',
       });
-      const performanceSystem = new VFXSystem(performanceRuntime, undefined, {
-        onBuildDiagnostic: null,
-      });
-      performanceSystem.spawn(countEffect);
-      await performanceSystem.update(0);
-      await performanceSystem.update(1 / 60);
+      const performanceSystem = new VFXSystem(performanceRuntime);
+      if (performanceWebgpu) performanceSystem.spawn(countEffect);
+      else performanceSystem.spawn(webglRejectionEffect);
       const performanceTarget = new THREE.RenderTarget(1, 1);
       try {
         performanceRenderer.setRenderTarget(performanceTarget);
-        performanceRenderer.render(
-          new THREE.Scene(),
-          new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10),
-        );
-        await performanceRenderer.readRenderTargetPixelsAsync(performanceTarget, 0, 0, 1, 1);
+        const performanceScene = new THREE.Scene();
+        const performanceCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+        await performanceMonitor.captureGpuSamples(async () => {
+          await performanceSystem.update(1 / 60);
+          performanceRenderer.render(performanceScene, performanceCamera);
+          await performanceRenderer.readRenderTargetPixelsAsync(performanceTarget, 0, 0, 1, 1);
+        });
         performanceRenderer.setRenderTarget(null);
       } finally {
         performanceTarget.dispose();
       }
-      await performanceMonitor.resolveGpuTimestamps();
-      performanceMonitor.publish();
     } finally {
       performanceRenderer.dispose();
     }
   };
-  const countSystem = new VFXSystem(runtime, undefined, { onBuildDiagnostic: null });
-  const countInstance = countSystem.spawn(countEffect);
+  // Keep the default delivery path on both backends. The runner narrowly consumes only the two
+  // known WebGL2 rejection diagnostics (correctness + performance systems); every other build
+  // diagnostic remains an unexpected console failure.
+  const countSystem = new VFXSystem(runtime);
+  const countInstance = webgpu
+    ? countSystem.spawn(countEffect)
+    : countSystem.spawn(webglRejectionEffect);
   await countSystem.update(0);
   await countSystem.update(1 / 60);
 
   if (!webgpu) {
     const codes = countInstance.diagnostics.map(({ code }) => code);
     await capturePerformance();
+    const expectedMessages = messages.filter((message) =>
+      message.includes(`[${WEBGL_UNSUPPORTED_CODE}]`),
+    );
+    const unexpectedMessages = messages.filter(
+      (message) => !message.includes(`[${WEBGL_UNSUPPORTED_CODE}]`),
+    );
     const validation = {
-      consoleClean: messages.length === 0,
-      webgl2ExplicitlyRejected: codes.includes('NACHI_NEIGHBOR_GRID_WEBGL2_UNSUPPORTED'),
+      consoleClean: expectedMessages.length === 2 && unexpectedMessages.length === 0,
+      webgl2ExplicitlyRejected: codes.includes(WEBGL_UNSUPPORTED_CODE),
     };
     const result = {
       backend: 'WebGL2',
-      checks: { diagnostics: codes },
+      checks: { diagnostics: codes, expectedMessages, unexpectedMessages },
       ok: Object.values(validation).every(Boolean),
       validation,
     };

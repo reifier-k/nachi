@@ -247,7 +247,7 @@
 
 **全項目共通のDoD**(H1を踏襲): 対象プランの受け入れ基準に加え、(1) ショーケース6ページを修正へ追従させ不要になった回避策を撤去・簡素化する、(2) 全ショーケースspike ok:true+ゴールデン7本回帰(意図的な見た目変更のみ `--update-screenshots` で基準再記録し理由をセッションログに明記。再記録前に「変化」と「退行」を構造比較で弁別=H1-10知見)、(3) `pnpm typecheck/lint/test` 緑、(4) 変更パッケージのchangeset起票、(5) 静的監査由来の「要検証」項目は実装前に再現プローブで確度を確定してから着手。
 
-- [ ] H2-1: 検証基盤ハードニング全10件(plan 024) — CI収容拡大/基準PNG欠落fail化/custom Grid実codegen回帰/showcase evidence合否集約/VAT variant実行/小領域閾値/console・perf合否化/opt-out是正/indirect draw。**以降の全タスクの検収面を強化するため先行**
+- [x] H2-1: 検証基盤ハードニング全10件(plan 024) — **受入済み(2026-07-15、独立最終レビューACCEPT、BLOCKER/SHOULD/NIT=0)**。Git管理baseline 22枚+欠落fail/CI dirty・untracked gate、全契約成功時だけ一括commitするスクショ更新transaction(result/perf/diagnostic各単独失敗で2 hash不変・tmp/bak無し、成功時2件commit)、代表GPU面5+showcase 6の常設suite(通常56.351s)、Grid2D/3D custom stage inline/registered同一かつ固有演算入り実WGSL、VAT default+公開6 variantの全7 distinct+branch固有WGSL、emitter aliveCount優先のshowcase定義由来全114要素state活性+panel非0下限、ring-only対照を含む3ゴールデンROI絶対下限+局所差分、warning/error/pageerror限定opt-out、adapter capabilityだけを許すstructured perf cause+requested scope 16/16 complete、m12-neighborsは診断抑制なしでWebGL2専用最小fixtureの既知2エラーだけをrunner消費、spike-compute headless indirect drawのGPU zero-black/nonzero-white因果対照まで実測。副産物としてslash clock観測窓のfixed-step恒常false negativeも較正。build/typecheck/lint/format/692テスト、golden 7/7、suite 11/11全緑。公開API不変=changesetなし。**以降の全タスクの検収面を強化するため先行**
 - [ ] H2-2: 連続spawnの無限duration導出(plan 012) — rate/perDistanceのlifecycle省略でduration 0=無spawn(H1-1包絡導出の残存)。裁定=無限継続既定
 - [ ] H2-3: update段乱数のspawnOrderキー化(plan 019) — H1-10続編。統計プローブ+決定性ゲート+基準再記録前提
 - [ ] H2-4: 決定性tie-break残余バッチ(plan 018) — instance ID数値化/light top-N論理キー/event routing論理順固定+event原子順・neighbor bucket順のRFC既知制限化

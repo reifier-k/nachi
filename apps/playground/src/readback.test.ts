@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   allPanelsHaveForeground,
+  allTimelineElementsHaveActivity,
   compactRgba8Readback,
   createDrainedReadback,
   normalizeRgba8Readback,
+  timelineDefinitionElementKeys,
+  timelineTrackedKeysMatchDefinition,
 } from './readback';
 
 describe('headless readback drain', () => {
@@ -37,8 +40,66 @@ describe('contract-sheet foreground guard', () => {
     expect(allPanelsHaveForeground([{ foregroundRatio: 0.01 }, { foregroundRatio: 0 }])).toBe(
       false,
     );
+    expect(allPanelsHaveForeground([{ foregroundRatio: 1 / 100_000 }])).toBe(false);
     expect(allPanelsHaveForeground([{ foregroundRatio: 0.01 }], 0.015)).toBe(false);
     expect(allPanelsHaveForeground([])).toBe(false);
+  });
+});
+
+describe('showcase timeline-state guard', () => {
+  it('accepts type-appropriate activity while requiring every element at every capture', () => {
+    const captures = [
+      {
+        emitter: { aliveCount: 0, localTime: 0, playing: false, visible: false },
+        mesh: { aliveCount: undefined, localTime: 0, playing: false, visible: false },
+      },
+      {
+        emitter: { aliveCount: 4, localTime: 0.1, playing: true, visible: true },
+        mesh: { aliveCount: undefined, localTime: 0.2, playing: false, visible: true },
+      },
+    ];
+    expect(allTimelineElementsHaveActivity(captures, ['emitter', 'mesh'])).toBe(true);
+    expect(
+      allTimelineElementsHaveActivity([captures[0]!, { emitter: captures[1]!.emitter }], ['mesh']),
+    ).toBe(false);
+  });
+
+  it('rejects an all-zero/never-visible fake implementation', () => {
+    const inert = {
+      aliveCount: 0,
+      localTime: 0,
+      playing: false,
+      visible: false,
+    };
+    expect(
+      allTimelineElementsHaveActivity([{ effect: inert }, { effect: inert }], ['effect']),
+    ).toBe(false);
+  });
+
+  it('does not let emitter clocks or flags hide an always-empty alive population', () => {
+    expect(
+      allTimelineElementsHaveActivity(
+        [
+          { emitter: { aliveCount: 0, localTime: 0.2, playing: true, visible: true } },
+          { emitter: { aliveCount: 0, localTime: 0.6, playing: true, visible: true } },
+        ],
+        ['emitter'],
+      ),
+    ).toBe(false);
+  });
+
+  it('derives every definition key and rejects one silently untracked element', () => {
+    const definition = { elements: { active: {}, unmonitored: {} } };
+    expect(timelineDefinitionElementKeys(definition)).toEqual(['active', 'unmonitored']);
+    expect(timelineTrackedKeysMatchDefinition(definition, ['active', 'unmonitored'])).toBe(true);
+    expect(timelineTrackedKeysMatchDefinition(definition, ['active'])).toBe(false);
+    expect(timelineTrackedKeysMatchDefinition(definition, ['active', 'active'])).toBe(false);
+    expect(
+      allTimelineElementsHaveActivity(
+        [{ active: { aliveCount: 2, localTime: 0.1, playing: true, visible: true } }],
+        timelineDefinitionElementKeys(definition),
+      ),
+    ).toBe(false);
   });
 });
 

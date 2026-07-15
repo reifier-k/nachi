@@ -28,6 +28,7 @@
     "esm:check": "node tools/check-all-package-esm.mjs",
     "esm-all": "node tools/check-all-package-esm.mjs",
     "golden:regress": "node tools/golden-runner.mjs",
+    "verify:gpu": "node tools/verification-runner.mjs",
     "release:dry": "pnpm build && pnpm esm:check && node tools/release-dry.mjs",
     "release": "pnpm build && pnpm esm:check && changeset publish"
   },

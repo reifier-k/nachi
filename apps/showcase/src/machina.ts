@@ -49,10 +49,13 @@ import {
 } from '@nachi-vfx/three';
 import {
   allPanelsHaveForeground,
+  allTimelineElementsHaveActivity,
   createDrainedReadback,
   createPerformanceMonitor,
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
+  timelineDefinitionElementKeys,
+  timelineTrackedKeysMatchDefinition,
 } from './harness';
 import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
@@ -1275,6 +1278,7 @@ async function run(): Promise<void> {
       post,
       step,
       instance,
+      effect,
       () => [...landedStrikeIndices],
       () => [...spriteDraws.keys(), ...lightDraws.keys()],
       perfWindow,
@@ -1356,27 +1360,14 @@ async function runHeadless(
     readonly state: string;
     getElementState(key: string): unknown;
   },
+  definition: { readonly elements: Readonly<Record<string, unknown>> },
   landedStrikes: () => readonly number[],
   drawKeys: () => readonly string[],
   perfWindow: () => Promise<void>,
 ): Promise<void> {
   const labels = required<HTMLElement>('#frame-labels');
   labels.innerHTML = CAPTURE_LABELS.map((label) => `<span>${label}</span>`).join('');
-  const elementKeys = [
-    'circleCore',
-    'circleMid',
-    'circleOuter',
-    'column',
-    'embers',
-    'haze',
-    'impactSparks0',
-    'impactSparks5',
-    'impactSparksFinal',
-    'laser0',
-    'laser5',
-    'laserFinal',
-    'shockFinal',
-  ] as const;
+  const elementKeys = timelineDefinitionElementKeys(definition);
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   const drainReadback = createDrainedReadback(renderer, target);
   const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
@@ -1444,6 +1435,8 @@ async function runHeadless(
     afterglowLingers: afterglow.foregroundRatio > 0.012,
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
     allPanelsVisible: allPanelsHaveForeground(panelStats),
+    allTimelineElementsActive: allTimelineElementsHaveActivity(captureStates, elementKeys),
+    allTimelineElementsTracked: timelineTrackedKeysMatchDefinition(definition, elementKeys),
     allStrikesLanded: landedStrikes().length === STRIKES.length + 1,
     barrageReads: barrage.foregroundRatio > 0.035 && barrage.saturatedRatio < 0.28,
     consoleClean: consoleMessages.length === 0,
@@ -1457,6 +1450,7 @@ async function runHeadless(
     evidence: {
       captureStates,
       captureTimes: CAPTURE_TIMES,
+      elementKeys,
       drawKeys: drawKeys(),
       finalLocalTime: instance.localTime,
       finalState: instance.state,

@@ -5,6 +5,19 @@ type MetricStatus = 'available' | 'unavailable';
 type GpuMetricStatus = 'available' | 'error' | 'pending' | 'unavailable';
 type TimestampScope = 'compute' | 'render';
 
+export type GpuUnavailableCause =
+  | {
+      kind: 'adapter-capability';
+      backend: 'WebGL2' | 'WebGPU';
+      capability: 'EXT_disjoint_timer_query_webgl2' | 'timestamp-query';
+    }
+  | {
+      kind: 'renderer-configuration';
+      option: 'trackTimestamp';
+      expected: true;
+      actual: false;
+    };
+
 type NumericMetric = {
   status: MetricStatus;
   value: number | null;
@@ -14,10 +27,14 @@ type NumericMetric = {
 type GpuMetric = {
   status: GpuMetricStatus;
   source: 'three.resolveTimestampsAsync';
+  /** Scopes the page explicitly asked the monitor to collect. */
+  requestedScopes: readonly TimestampScope[];
   renderMs: number | null;
   computeMs: number | null;
   totalMs: number | null;
   reason: string | null;
+  /** Machine-readable reason; verification only permits adapter-capability absence. */
+  unavailableCause: GpuUnavailableCause | null;
   sampleWindow: {
     warmup: { completed: number; target: number };
     targetSamples: number;
@@ -372,8 +389,10 @@ export class PerformanceMonitor {
     const common = {
       computeMs: null,
       renderMs: null,
+      requestedScopes: [...this.#options.gpuScopes],
       source: 'three.resolveTimestampsAsync' as const,
       totalMs: null,
+      unavailableCause: null,
       sampleWindow: {
         compute: emptyGpuAggregate('pending', this.#options.gpuSampleSize),
         render: emptyGpuAggregate('pending', this.#options.gpuSampleSize),
@@ -390,6 +409,11 @@ export class PerformanceMonitor {
           ...common,
           reason: 'The selected WebGPU adapter does not expose the timestamp-query feature.',
           status: 'unavailable',
+          unavailableCause: {
+            backend: 'WebGPU',
+            capability: 'timestamp-query',
+            kind: 'adapter-capability',
+          },
         };
       }
     } else if (backend.hasTimestamp !== true) {
@@ -397,6 +421,11 @@ export class PerformanceMonitor {
         ...common,
         reason: 'EXT_disjoint_timer_query_webgl2 is unavailable on the WebGL2 backend.',
         status: 'unavailable',
+        unavailableCause: {
+          backend: 'WebGL2',
+          capability: 'EXT_disjoint_timer_query_webgl2',
+          kind: 'adapter-capability',
+        },
       };
     }
 
@@ -405,6 +434,12 @@ export class PerformanceMonitor {
         ...common,
         reason: 'The renderer was not initialized with trackTimestamp: true.',
         status: 'unavailable',
+        unavailableCause: {
+          actual: false,
+          expected: true,
+          kind: 'renderer-configuration',
+          option: 'trackTimestamp',
+        },
       };
     }
 

@@ -52,10 +52,13 @@ import {
 } from '@nachi-vfx/three';
 import {
   allPanelsHaveForeground,
+  allTimelineElementsHaveActivity,
   createDrainedReadback,
   createPerformanceMonitor,
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
+  timelineDefinitionElementKeys,
+  timelineTrackedKeysMatchDefinition,
 } from './harness';
 import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
@@ -1076,7 +1079,7 @@ async function run(): Promise<void> {
       });
       perfTarget.dispose();
     };
-    await runHeadless(renderer, post, step, instance, perfWindow);
+    await runHeadless(renderer, post, step, instance, effect, perfWindow);
     return;
   }
 
@@ -1155,26 +1158,12 @@ async function runHeadless(
     readonly state: string;
     getElementState(key: string): unknown;
   },
+  definition: { readonly elements: Readonly<Record<string, unknown>> },
   perfWindow: () => Promise<void>,
 ): Promise<void> {
   const labels = required<HTMLElement>('#frame-labels');
   labels.innerHTML = CAPTURE_LABELS.map((label) => `<span>${label}</span>`).join('');
-  const elementKeys = [
-    'burstDust',
-    'circleInner',
-    'circleOuter',
-    'flash',
-    'frostWave',
-    'haze',
-    'motes',
-    'snow',
-    'sparkle',
-    ...ALL_PILLARS.flatMap((spec) => [
-      `pillar${spec.suffix}`,
-      `ring${spec.suffix}`,
-      `shards${spec.suffix}`,
-    ]),
-  ];
+  const elementKeys = timelineDefinitionElementKeys(definition);
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   const drainReadback = createDrainedReadback(renderer, target);
   const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
@@ -1241,6 +1230,8 @@ async function runHeadless(
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
     allPanelsVisible: allPanelsHaveForeground(panelStats),
+    allTimelineElementsActive: allTimelineElementsHaveActivity(captureStates, elementKeys),
+    allTimelineElementsTracked: timelineTrackedKeysMatchDefinition(definition, elementKeys),
     consoleClean: consoleMessages.length === 0,
     eruptionVisible: eruption.foregroundRatio > 0.02 && eruption.saturatedRatio < 0.3,
     forestVisible: forest.foregroundRatio > 0.045 && forest.saturatedRatio < 0.32,
@@ -1253,6 +1244,7 @@ async function runHeadless(
     evidence: {
       captureStates,
       captureTimes: CAPTURE_TIMES,
+      elementKeys,
       finalLocalTime: instance.localTime,
       finalState: instance.state,
       instanceDiagnostics: instance.diagnostics.map(

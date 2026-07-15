@@ -97,3 +97,64 @@ jobs:
             exit 1
           fi
           pnpm golden:regress
+
+  verification-surface:
+    name: verification-surface
+    if: ${{ vars.NACHI_SKIP_GPU_VERIFICATION != '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install headless Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Build verification dependencies
+        run: |
+          pnpm --filter @nachi-vfx/playground^... build
+          pnpm --filter @nachi-vfx/showcase^... build
+
+      - name: Verify committed screenshot baselines
+        run: |
+          test -n "$(git ls-files 'tools/baselines/*.png')"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Run representative verification surfaces with SwiftShader
+        run: |
+          pnpm dev > /tmp/nachi-playground.log 2>&1 &
+          playground_pid=$!
+          pnpm showcase:dev -- --host 127.0.0.1 --port 5174 > /tmp/nachi-showcase.log 2>&1 &
+          showcase_pid=$!
+          trap 'kill "$playground_pid" "$showcase_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:5173/ > /dev/null && curl --fail --silent http://127.0.0.1:5174/ > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/nachi-playground.log
+            cat /tmp/nachi-showcase.log
+            exit 1
+          fi
+          pnpm verify:gpu
+          status="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$status" ]; then
+            printf '%s\n' "$status"
+            exit 1
+          fi

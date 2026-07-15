@@ -56,11 +56,14 @@ import {
 import { createCompanionSocketPhase } from './companion-socket-phase';
 import {
   allPanelsHaveForeground,
+  allTimelineElementsHaveActivity,
   createDrainedReadback,
   createPerformanceMonitor,
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
   readLogicalAttribute,
+  timelineDefinitionElementKeys,
+  timelineTrackedKeysMatchDefinition,
 } from './harness';
 import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
@@ -928,7 +931,7 @@ async function run(): Promise<void> {
       });
       perfTarget.dispose();
     };
-    await runHeadless(renderer, post, step, instance, () => trailRuntimes, perfWindow);
+    await runHeadless(renderer, post, step, instance, effect, () => trailRuntimes, perfWindow);
     return;
   }
 
@@ -1043,6 +1046,7 @@ async function runHeadless(
     readonly state: string;
     getElementState(key: string): unknown;
   },
+  definition: { readonly elements: Readonly<Record<string, unknown>> },
   trails: () => ReadonlyArray<{
     draw?: ReturnType<typeof materializeThreeRibbonDraw>;
     readonly instance: {
@@ -1056,17 +1060,7 @@ async function runHeadless(
 ): Promise<void> {
   const labels = required<HTMLElement>('#frame-labels');
   labels.innerHTML = CAPTURE_LABELS.map((label) => `<span>${label}</span>`).join('');
-  const elementKeys = [
-    'circleInner',
-    'circleOuter',
-    'embers',
-    'flash',
-    'glint',
-    'shock',
-    'slashCounter',
-    'slashMain',
-    'sparks',
-  ] as const;
+  const elementKeys = timelineDefinitionElementKeys(definition);
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   const drainReadback = createDrainedReadback(renderer, target);
   const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
@@ -1082,7 +1076,9 @@ async function runHeadless(
   await drainReadback();
   for (let frame = 0; frame < 140; frame += 1) {
     await step(STEP);
-    if (instance.localTime >= 0.49 && instance.localTime <= 0.505) {
+    // Fixed-step quantization plus the latched hit-stop boundary can skip the former 15 ms window.
+    // Two adjacent 60 Hz ticks still prove both companion trails share the exact same clock.
+    if (instance.localTime >= 0.48 && instance.localTime <= 0.515) {
       for (const trail of trails()) {
         if (trail.instance.state !== 'active') continue;
         companionClockSamples += 1;
@@ -1174,6 +1170,8 @@ async function runHeadless(
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
     allPanelsVisible: allPanelsHaveForeground(panelStats),
+    allTimelineElementsActive: allTimelineElementsHaveActivity(captureStates, elementKeys),
+    allTimelineElementsTracked: timelineTrackedKeysMatchDefinition(definition, elementKeys),
     companionClockSynchronized: companionClockSamples >= 4 && companionClockError < 1e-8,
     consoleClean: consoleMessages.length === 0,
     impactVisible: impact.foregroundRatio > 0.02 && impact.saturatedRatio < 0.3,
@@ -1192,6 +1190,7 @@ async function runHeadless(
     evidence: {
       captureStates,
       captureTimes: CAPTURE_TIMES,
+      elementKeys,
       companionClock: { maximumError: companionClockError, samples: companionClockSamples },
       finalLocalTime: instance.localTime,
       finalState: instance.state,

@@ -6,6 +6,19 @@ export type PanelReadbackStats = {
   foregroundRatio: number;
 };
 
+type TimelineElementActivityState = {
+  aliveCount?: unknown;
+  localTime?: unknown;
+  playing?: unknown;
+  visible?: unknown;
+};
+
+export type TimelineElementDefinitionLike = {
+  readonly elements: Readonly<Record<string, unknown>>;
+};
+
+const DEFAULT_PANEL_FOREGROUND_RATIO = 0.0005;
+
 type RenderTargetReadbackRenderer = Pick<THREE.WebGPURenderer, 'readRenderTargetPixelsAsync'>;
 
 /**
@@ -23,10 +36,10 @@ export function createDrainedReadback(
   };
 }
 
-/** Contract-sheet guard: every captured panel must contain at least some foreground pixels. */
+/** Contract-sheet guard: every captured panel must contain a meaningful non-single-pixel floor. */
 export function allPanelsHaveForeground(
   panelStats: readonly PanelReadbackStats[],
-  minimumForegroundRatio = 0,
+  minimumForegroundRatio = DEFAULT_PANEL_FOREGROUND_RATIO,
 ): boolean {
   return (
     panelStats.length > 0 &&
@@ -34,6 +47,73 @@ export function allPanelsHaveForeground(
       ({ foregroundRatio }) =>
         Number.isFinite(foregroundRatio) && foregroundRatio > minimumForegroundRatio,
     )
+  );
+}
+
+/**
+ * Requires every requested timeline element to publish a state at every capture and to show at
+ * least one type-appropriate sign of activity. This catches missing elements and definitions whose
+ * timers/visibility/alive population remain at their inert zero values for the entire showcase.
+ */
+export function allTimelineElementsHaveActivity(
+  captures: readonly Readonly<Record<string, unknown>>[],
+  elementKeys: readonly string[],
+): boolean {
+  if (captures.length === 0 || elementKeys.length === 0) return false;
+  return elementKeys.every((key) => {
+    const states = captures.map((capture) => capture[key]);
+    if (
+      states.some(
+        (state) =>
+          typeof state !== 'object' ||
+          state === null ||
+          Array.isArray(state) ||
+          !(
+            'localTime' in state ||
+            'playing' in state ||
+            'visible' in state ||
+            'aliveCount' in state
+          ),
+      )
+    ) {
+      return false;
+    }
+    const activityStates = states as TimelineElementActivityState[];
+    const publishesEmitterPopulation = activityStates.some(
+      ({ aliveCount }) => typeof aliveCount === 'number' && Number.isFinite(aliveCount),
+    );
+    if (publishesEmitterPopulation) {
+      return activityStates.some(
+        ({ aliveCount }) =>
+          typeof aliveCount === 'number' && Number.isFinite(aliveCount) && aliveCount > 0,
+      );
+    }
+    return activityStates.some(
+      ({ localTime, playing, visible }) =>
+        playing === true ||
+        visible === true ||
+        (typeof localTime === 'number' && Number.isFinite(localTime) && localTime > 0),
+    );
+  });
+}
+
+/** Returns the complete element key set owned by a timeline definition. */
+export function timelineDefinitionElementKeys(
+  definition: TimelineElementDefinitionLike,
+): readonly string[] {
+  return Object.freeze(Object.keys(definition.elements));
+}
+
+/** Guards page wiring against silently tracking only a hand-picked subset of a definition. */
+export function timelineTrackedKeysMatchDefinition(
+  definition: TimelineElementDefinitionLike,
+  trackedKeys: readonly string[],
+): boolean {
+  const expected = timelineDefinitionElementKeys(definition);
+  return (
+    trackedKeys.length === expected.length &&
+    new Set(trackedKeys).size === trackedKeys.length &&
+    expected.every((key) => trackedKeys.includes(key))
   );
 }
 

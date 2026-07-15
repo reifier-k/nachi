@@ -590,7 +590,22 @@ async function run(): Promise<void> {
   };
   root.dataset.artifactScreenshots = JSON.stringify([
     { filename: 'golden-ambient-fireflies.png', selector: '#ambient-fireflies' },
-    { filename: 'golden-ambient-leaves.png', selector: '#ambient-leaves' },
+    {
+      filename: 'golden-ambient-leaves.png',
+      selector: '#ambient-leaves',
+      regions: [
+        {
+          name: 'falling-leaves',
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 1,
+          luminanceThreshold: 28,
+          minimumForegroundPixels: 200,
+          maximumChangedPixelRatio: 0.0025,
+        },
+      ],
+    },
   ]);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';

@@ -37,9 +37,16 @@ import './golden-character.css';
 const STEP = 1 / 30;
 const WIDTH = 640;
 const HEIGHT = 640;
+const RING_READBACK_SIZE = 320;
+const MINIMUM_RING_FOREGROUND_PIXELS = 120;
 const root = document.documentElement;
 const query = new URLSearchParams(location.search);
 const headless = query.get('headless') === '1';
+const hideRingForNegativeControl = query.get('ring') === 'hidden';
+const screenshotUpdateControl = query.get('updateControl');
+const failScreenshotUpdateResultControl = screenshotUpdateControl === 'fail-result';
+const failScreenshotUpdatePerformanceControl = screenshotUpdateControl === 'fail-perf';
+const failScreenshotUpdateDiagnosticControl = screenshotUpdateControl === 'fail-diagnostic';
 const backendValue = requireElement<HTMLElement>('#backend-value');
 const modeValue = requireElement<HTMLElement>('#mode-value');
 const statusValue = requireElement<HTMLElement>('#status-value');
@@ -92,17 +99,22 @@ function bytesEqual(left: ArrayBufferView, right: ArrayBufferView): boolean {
   return a.every((value, index) => value === b[index]);
 }
 
-function paintReadback(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): number {
+function paintReadback(
+  canvas: HTMLCanvasElement,
+  pixels: ArrayLike<number>,
+  width = WIDTH,
+  height = HEIGHT,
+): number {
   const context = canvas.getContext('2d');
   if (!context) throw new Error('Golden character preview canvas has no 2D context.');
-  const image = context.createImageData(WIDTH, HEIGHT);
+  const image = context.createImageData(width, height);
   const background = [pixels[0] ?? 0, pixels[1] ?? 0, pixels[2] ?? 0] as const;
   let foregroundPixels = 0;
-  for (let y = 0; y < HEIGHT; y += 1) {
-    const sourceY = HEIGHT - 1 - y;
-    for (let x = 0; x < WIDTH; x += 1) {
-      const source = (sourceY * WIDTH + x) * 4;
-      const target = (y * WIDTH + x) * 4;
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = height - 1 - y;
+    for (let x = 0; x < width; x += 1) {
+      const source = (sourceY * width + x) * 4;
+      const target = (y * width + x) * 4;
       image.data[target] = pixels[source] ?? 0;
       image.data[target + 1] = pixels[source + 1] ?? 0;
       image.data[target + 2] = pixels[source + 2] ?? 0;
@@ -115,7 +127,22 @@ function paintReadback(canvas: HTMLCanvasElement, pixels: ArrayLike<number>): nu
     }
   }
   context.putImageData(image, 0, 0);
-  return foregroundPixels / (WIDTH * HEIGHT);
+  return foregroundPixels / (width * height);
+}
+
+function countChangedPixels(visible: ArrayLike<number>, hidden: ArrayLike<number>): number {
+  if (visible.length !== hidden.length) {
+    throw new Error('Golden character ring control readbacks have different lengths.');
+  }
+  let changedPixels = 0;
+  for (let offset = 0; offset < visible.length; offset += 4) {
+    const difference =
+      Math.abs((visible[offset] ?? 0) - (hidden[offset] ?? 0)) +
+      Math.abs((visible[offset + 1] ?? 0) - (hidden[offset + 1] ?? 0)) +
+      Math.abs((visible[offset + 2] ?? 0) - (hidden[offset + 2] ?? 0));
+    if (difference > 12) changedPixels += 1;
+  }
+  return changedPixels;
 }
 
 function buildCharacter() {
@@ -381,11 +408,10 @@ async function run(): Promise<void> {
   scene.add(key);
   const auraView = emitter(auraInstance, 'aura');
   const orbitView = emitter(orbitInstance, 'orbit');
-  scene.add(
-    materializeThreeSpriteDraw(auraView.program, auraView.kernels),
-    materializeThreeSpriteDraw(ringView.program, ringView.kernels),
-    materializeThreeSpriteDraw(orbitView.program, orbitView.kernels),
-  );
+  const auraDraw = materializeThreeSpriteDraw(auraView.program, auraView.kernels);
+  const ringDraw = materializeThreeSpriteDraw(ringView.program, ringView.kernels);
+  const orbitDraw = materializeThreeSpriteDraw(orbitView.program, orbitView.kernels);
+  scene.add(auraDraw, ringDraw, orbitDraw);
   const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 30);
   camera.position.set(0, 0.7, 5.2);
   camera.lookAt(0, 0.25, 0);
@@ -404,6 +430,52 @@ async function run(): Promise<void> {
     requireElement<HTMLCanvasElement>('#golden-character'),
     visualPixels,
   );
+
+  // Isolate the socket ring and compare the same draw/readback path with only its visibility
+  // toggled. The artifact floor below therefore cannot be satisfied by the character body, aura,
+  // or orbit particles, and baseline regeneration refuses a missing ring too.
+  const ringScene = new THREE.Scene();
+  ringScene.background = new THREE.Color(0x061018);
+  ringScene.add(ringDraw);
+  const ringTarget = new THREE.RenderTarget(RING_READBACK_SIZE, RING_READBACK_SIZE, {
+    depthBuffer: true,
+  });
+  renderer.setRenderTarget(ringTarget);
+  ringDraw.visible = !hideRingForNegativeControl;
+  renderer.render(ringScene, camera);
+  const ringVisiblePixels = await renderer.readRenderTargetPixelsAsync(
+    ringTarget,
+    0,
+    0,
+    RING_READBACK_SIZE,
+    RING_READBACK_SIZE,
+  );
+  ringDraw.visible = false;
+  renderer.render(ringScene, camera);
+  const ringHiddenPixels = await renderer.readRenderTargetPixelsAsync(
+    ringTarget,
+    0,
+    0,
+    RING_READBACK_SIZE,
+    RING_READBACK_SIZE,
+  );
+  ringDraw.visible = true;
+  renderer.setRenderTarget(null);
+  const ringChangedPixels = countChangedPixels(ringVisiblePixels, ringHiddenPixels);
+  const ringForegroundRatio = paintReadback(
+    requireElement<HTMLCanvasElement>('#golden-character-ring'),
+    ringVisiblePixels,
+    RING_READBACK_SIZE,
+    RING_READBACK_SIZE,
+  );
+  if (failScreenshotUpdateResultControl) {
+    for (const selector of ['#golden-character', '#golden-character-ring']) {
+      const context = requireElement<HTMLCanvasElement>(selector).getContext('2d');
+      if (!context) throw new Error(`Golden character update control has no context: ${selector}`);
+      context.fillStyle = '#ff0033';
+      context.fillRect(0, 0, 48, 48);
+    }
+  }
 
   const performanceRenderer = await createPlaygroundRenderer({
     antialias: false,
@@ -442,6 +514,9 @@ async function run(): Promise<void> {
       bytesEqual(animatedPose.normals, deterministicPose.normals),
     meshNormalVelocity: maximumNormalVelocityError < 0.0001,
     socketFollow: socketError < 0.0001,
+    socketRingIsolation:
+      ringChangedPixels >= MINIMUM_RING_FOREGROUND_PIXELS && ringForegroundRatio > 0,
+    screenshotUpdateControl: !failScreenshotUpdateResultControl,
     surfaceSpawn: surfaceDistance < 0.7,
     visualReadback: foregroundPixelRatio > 0.01,
     visualReadbackNotSaturated: foregroundPixelRatio < 0.3,
@@ -454,17 +529,50 @@ async function run(): Promise<void> {
     maximumPoseDelta,
     mode: headless ? 'headless' : 'visual',
     ok: Object.values(validation).every(Boolean),
+    ringChangedPixels,
+    ringControl: hideRingForNegativeControl ? 'hidden-negative-control' : 'visible',
+    ringForegroundPixels: Math.round(ringForegroundRatio * RING_READBACK_SIZE ** 2),
     skinningPath: 'cpu-deformed-triangle-cdf-upload',
     socketError,
     surfaceDistance,
     validation,
   };
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'golden-character.png', selector: '#golden-character' },
+    {
+      filename: 'golden-character-ring.png',
+      selector: '#golden-character-ring',
+      regions: [
+        {
+          name: 'socket-ring-only',
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 1,
+          luminanceThreshold: 28,
+          minimumForegroundPixels: MINIMUM_RING_FOREGROUND_PIXELS,
+          maximumChangedPixelRatio: 0.002,
+        },
+      ],
+    },
+    {
+      filename: 'golden-character.png',
+      selector: '#golden-character',
+    },
   ]);
+  // These query-only controls exercise spike-runner's final transaction gate with both screenshot
+  // candidates already staged. They deliberately fail exactly one non-screenshot contract so an
+  // integration probe can prove that neither baseline is partially replaced.
+  if (failScreenshotUpdatePerformanceControl) {
+    const performance = JSON.parse(root.dataset.perfResult ?? 'null');
+    performance.gpu.status = 'pending';
+    root.dataset.perfResult = JSON.stringify(performance);
+  }
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';
   root.dataset.spikeStatus = result.ok ? 'complete' : 'error';
+  if (failScreenshotUpdateDiagnosticControl) {
+    console.error('[H2_SCREENSHOT_UPDATE_DIAGNOSTIC_CONTROL] intentional runner failure');
+  }
   statusValue.textContent = result.ok ? 'Golden character verified' : 'Golden character failed';
 }
 

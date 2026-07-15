@@ -610,8 +610,25 @@ async function run(): Promise<void> {
       source: 'offscreen-render-target-readback-to-2d-canvas',
     },
   };
+  const sparkRegionX = Math.max(0, (expectedDecalPixel.x - 80) / WIDTH);
+  const sparkRegionY = Math.max(0, (HEIGHT - expectedDecalPixel.y - 80) / HEIGHT);
   root.dataset.artifactScreenshots = JSON.stringify([
-    { filename: 'golden-slash.png', selector: '#golden-slash' },
+    {
+      filename: 'golden-slash.png',
+      selector: '#golden-slash',
+      regions: [
+        {
+          name: 'impact-sparks',
+          x: sparkRegionX,
+          y: sparkRegionY,
+          width: Math.min(160 / WIDTH, 1 - sparkRegionX),
+          height: Math.min(160 / HEIGHT, 1 - sparkRegionY),
+          luminanceThreshold: 28,
+          minimumForegroundPixels: 30,
+          maximumChangedPixelRatio: 0.003,
+        },
+      ],
+    },
   ]);
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';

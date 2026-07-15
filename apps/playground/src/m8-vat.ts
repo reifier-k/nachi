@@ -465,8 +465,10 @@ async function run(): Promise<void> {
     mode: query.get('headless') === '1' ? 'headless' : 'visual',
     page: 'm8-vat',
   });
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  await monitor.captureGpuSamples(async (sample) => {
+    controls.setTime(sample / FPS / 4);
+    await render(scene);
+  });
   const result = {
     backend,
     consoleMessages,

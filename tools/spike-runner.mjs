@@ -1,6 +1,14 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  validateBrowserDiagnostics,
+  validatePerformanceSnapshot,
+  validateScreenshotUpdateEligibility,
+  validateScreenshotRegions,
+  screenshotRegionResultsOk,
+} from './verification-contract.mjs';
 
 const REPOSITORY_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const CURRENT_WORKING_DIRECTORY = path.resolve(process.cwd());
@@ -13,6 +21,7 @@ if (CURRENT_WORKING_DIRECTORY !== REPOSITORY_ROOT) {
 const { chromium } = await import('playwright');
 
 const DEFAULT_URL = 'http://127.0.0.1:5173/spike-compute/';
+const DEFAULT_BASELINE_DIRECTORY = path.join(REPOSITORY_ROOT, 'tools', 'baselines');
 const ADAPTER_FLAGS = {
   default: [],
   swiftshader: ['--use-webgpu-adapter=swiftshader', '--enable-unsafe-swiftshader'],
@@ -22,6 +31,7 @@ const ADAPTER_FLAGS = {
 function parseArguments(arguments_) {
   const positional = [];
   let adapter = 'swiftshader';
+  let baselineDirectory = DEFAULT_BASELINE_DIRECTORY;
   let distDirectory;
   let updateScreenshots = false;
 
@@ -34,6 +44,11 @@ function parseArguments(arguments_) {
       adapter = argument.slice('--adapter='.length);
     } else if (argument === '--update-screenshots') {
       updateScreenshots = true;
+    } else if (argument === '--baseline-dir') {
+      baselineDirectory = path.resolve(arguments_[index + 1]);
+      index += 1;
+    } else if (argument?.startsWith('--baseline-dir=')) {
+      baselineDirectory = path.resolve(argument.slice('--baseline-dir='.length));
     } else if (argument === '--dist') {
       distDirectory = arguments_[index + 1];
       index += 1;
@@ -48,7 +63,7 @@ function parseArguments(arguments_) {
 
   if (positional.length > 1 || !Object.hasOwn(ADAPTER_FLAGS, adapter)) {
     throw new Error(
-      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default] [--dist directory] [--update-screenshots]',
+      'Usage: node tools/spike-runner.mjs [url] [--adapter swiftshader|vulkan|default] [--dist directory] [--baseline-dir directory] [--update-screenshots]',
     );
   }
 
@@ -63,6 +78,7 @@ function parseArguments(arguments_) {
   }
   return {
     adapter,
+    baselineDirectory,
     ...(distDirectory === undefined ? {} : { distDirectory: path.resolve(distDirectory) }),
     updateScreenshots,
     url: url.toString(),
@@ -102,9 +118,9 @@ async function installDistRoute(page, origin, directory) {
   });
 }
 
-async function comparePngPixels(page, baseline, actual) {
+async function comparePngPixels(page, baseline, actual, regions) {
   return page.evaluate(
-    async ({ actualBase64, baselineBase64 }) => {
+    async ({ actualBase64, baselineBase64, specifications }) => {
       const decode = async (base64) => {
         const image = new Image();
         image.src = `data:image/png;base64,${base64}`;
@@ -129,6 +145,14 @@ async function comparePngPixels(page, baseline, actual) {
           changedPixels: Math.max(left.data.length, right.data.length) / 4,
           dimensionsMatch: false,
           pixelCount: Math.max(left.data.length, right.data.length) / 4,
+          regionChanges: specifications.map((specification) => ({
+            changedPixelRatio: 1,
+            changedPixels: null,
+            maximumChangedPixelRatio: specification.maximumChangedPixelRatio ?? null,
+            name: specification.name,
+            ok: false,
+            pixelCount: null,
+          })),
         };
       }
       let changedPixels = 0;
@@ -143,14 +167,128 @@ async function comparePngPixels(page, baseline, actual) {
         }
       }
       const pixelCount = left.data.length / 4;
+      const regionChanges = specifications.map((specification) => {
+        const startX = Math.floor(specification.x * left.width);
+        const startY = Math.floor(specification.y * left.height);
+        const width = Math.max(1, Math.floor(specification.width * left.width));
+        const height = Math.max(1, Math.floor(specification.height * left.height));
+        let regionChangedPixels = 0;
+        for (let y = startY; y < startY + height; y += 1) {
+          for (let x = startX; x < startX + width; x += 1) {
+            const offset = (y * left.width + x) * 4;
+            if (
+              left.data[offset] !== right.data[offset] ||
+              left.data[offset + 1] !== right.data[offset + 1] ||
+              left.data[offset + 2] !== right.data[offset + 2] ||
+              left.data[offset + 3] !== right.data[offset + 3]
+            ) {
+              regionChangedPixels += 1;
+            }
+          }
+        }
+        const regionPixelCount = width * height;
+        const changedPixelRatio = regionChangedPixels / regionPixelCount;
+        const maximumChangedPixelRatio = specification.maximumChangedPixelRatio ?? null;
+        return {
+          changedPixelRatio,
+          changedPixels: regionChangedPixels,
+          maximumChangedPixelRatio,
+          name: specification.name,
+          ok: maximumChangedPixelRatio === null || changedPixelRatio < maximumChangedPixelRatio,
+          pixelCount: regionPixelCount,
+        };
+      });
       return {
         changedPixelRatio: changedPixels / pixelCount,
         changedPixels,
         dimensionsMatch: true,
         pixelCount,
+        regionChanges,
       };
     },
-    { actualBase64: actual.toString('base64'), baselineBase64: baseline.toString('base64') },
+    {
+      actualBase64: actual.toString('base64'),
+      baselineBase64: baseline.toString('base64'),
+      specifications: regions,
+    },
+  );
+}
+
+async function measurePngRegions(page, png, regions) {
+  return page.evaluate(
+    async ({ pngBase64, specifications }) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${pngBase64}`;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) throw new Error('Could not create screenshot region context.');
+      context.drawImage(image, 0, 0);
+      return specifications.map((specification) => {
+        const x = Math.floor(specification.x * canvas.width);
+        const y = Math.floor(specification.y * canvas.height);
+        const width = Math.max(1, Math.floor(specification.width * canvas.width));
+        const height = Math.max(1, Math.floor(specification.height * canvas.height));
+        const pixels = context.getImageData(x, y, width, height).data;
+        let foregroundPixels = 0;
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+          const luminance =
+            (pixels[offset] ?? 0) * 0.2126 +
+            (pixels[offset + 1] ?? 0) * 0.7152 +
+            (pixels[offset + 2] ?? 0) * 0.0722;
+          if (luminance > specification.luminanceThreshold) foregroundPixels += 1;
+        }
+        return {
+          ...specification,
+          foregroundPixels,
+          ok: foregroundPixels >= specification.minimumForegroundPixels,
+          pixelCount: pixels.length / 4,
+        };
+      });
+    },
+    { pngBase64: png.toString('base64'), specifications: regions },
+  );
+}
+
+async function commitScreenshotBaselineTransaction(updates) {
+  if (updates.length === 0) return;
+  const transactionId = `${process.pid}-${Date.now()}`;
+  const entries = updates.map((update, index) => ({
+    ...update,
+    backedUp: false,
+    backupPath: `${update.baselinePath}.${transactionId}-${index}.bak`,
+    installed: false,
+    stagedPath: `${update.baselinePath}.${transactionId}-${index}.tmp`,
+  }));
+  try {
+    for (const entry of entries) {
+      await mkdir(path.dirname(entry.baselinePath), { recursive: true });
+      await writeFile(entry.stagedPath, entry.actual);
+    }
+    for (const entry of entries) {
+      if (entry.baseline !== undefined) {
+        await rename(entry.baselinePath, entry.backupPath);
+        entry.backedUp = true;
+      }
+      await rename(entry.stagedPath, entry.baselinePath);
+      entry.installed = true;
+    }
+  } catch (error) {
+    for (const entry of [...entries].reverse()) {
+      if (entry.installed) await rm(entry.baselinePath, { force: true }).catch(() => undefined);
+      if (entry.backedUp) {
+        await rename(entry.backupPath, entry.baselinePath).catch(() => undefined);
+      }
+      await rm(entry.stagedPath, { force: true }).catch(() => undefined);
+    }
+    throw error;
+  }
+  await Promise.all(
+    entries
+      .filter(({ backedUp }) => backedUp)
+      .map(({ backupPath }) => rm(backupPath, { force: true }).catch(() => undefined)),
   );
 }
 
@@ -159,6 +297,7 @@ let browser;
 let webgpuAdapterInfo;
 let target = {
   adapter: 'swiftshader',
+  baselineDirectory: DEFAULT_BASELINE_DIRECTORY,
   updateScreenshots: false,
   url: `${DEFAULT_URL}?headless=1`,
 };
@@ -205,6 +344,7 @@ try {
     artifactScreenshots: document.documentElement.dataset.artifactScreenshots ?? null,
     backend: document.documentElement.dataset.backend ?? null,
     error: document.documentElement.dataset.spikeError ?? null,
+    expectedDiagnostics: document.documentElement.dataset.expectedDiagnostics ?? null,
     result: document.documentElement.dataset.spikeResult ?? null,
     performance: document.documentElement.dataset.perfResult ?? null,
     status: document.documentElement.dataset.spikeStatus ?? null,
@@ -215,7 +355,9 @@ try {
 
   const result = JSON.parse(harnessState.result);
   const artifactScreenshots = {};
+  const screenshotBaselines = {};
   const screenshotComparisons = {};
+  const screenshotUpdates = [];
   let screenshotsOk = true;
   if (harnessState.artifactScreenshots) {
     const specifications = JSON.parse(harnessState.artifactScreenshots);
@@ -224,6 +366,7 @@ try {
     }
     const artifactDirectory = path.resolve('artifacts');
     await mkdir(artifactDirectory, { recursive: true });
+    const screenshotFilenames = new Set();
     for (const specification of specifications) {
       const filename = specification?.filename;
       const selector = specification?.selector;
@@ -238,25 +381,53 @@ try {
           `Invalid artifact screenshot specification: ${JSON.stringify(specification)}`,
         );
       }
+      if (screenshotFilenames.has(filename)) {
+        throw new Error(`Duplicate artifact screenshot filename: ${filename}.`);
+      }
+      screenshotFilenames.add(filename);
       const outputPath = path.join(artifactDirectory, filename);
+      const baselinePath = path.join(target.baselineDirectory, filename);
       const actual = await page.locator(selector).screenshot({ type: 'png' });
+      const regions = validateScreenshotRegions(specification?.regions);
+      const actualRegions = await measurePngRegions(page, actual, regions);
+      const actualRegionsOk = actualRegions.every(({ ok }) => ok);
       let baseline;
       try {
-        baseline = await readFile(outputPath);
+        baseline = await readFile(baselinePath);
       } catch (error) {
         if (error?.code !== 'ENOENT') throw error;
       }
-      if (target.updateScreenshots || baseline === undefined) {
-        await writeFile(outputPath, actual);
+      if (baseline === undefined && !target.updateScreenshots) {
+        throw new Error(
+          `Screenshot baseline is missing: ${path.relative(REPOSITORY_ROOT, baselinePath)}. Recreate it explicitly with --update-screenshots.`,
+        );
+      }
+      await writeFile(outputPath, actual);
+      if (target.updateScreenshots) {
         screenshotComparisons[filename] = {
-          baseline: baseline === undefined ? 'created' : 'updated',
-          ok: true,
-          threshold: 0.005,
+          baseline: 'unchanged',
+          committed: false,
+          ok: actualRegionsOk,
+          regions: actualRegions,
+          threshold: specification.threshold ?? 0.005,
         };
+        screenshotsOk &&= actualRegionsOk;
+        screenshotUpdates.push({ actual, baseline, baselinePath, filename });
       } else {
-        const comparison = await comparePngPixels(page, baseline, actual);
-        const ok = comparison.dimensionsMatch && comparison.changedPixelRatio < 0.005;
-        screenshotComparisons[filename] = { ...comparison, ok, threshold: 0.005 };
+        const comparison = await comparePngPixels(page, baseline, actual, regions);
+        const baselineRegions = await measurePngRegions(page, baseline, regions);
+        const threshold = specification.threshold ?? 0.005;
+        const ok =
+          comparison.dimensionsMatch &&
+          comparison.changedPixelRatio < threshold &&
+          screenshotRegionResultsOk(actualRegions, baselineRegions, comparison.regionChanges);
+        screenshotComparisons[filename] = {
+          ...comparison,
+          actualRegions,
+          baselineRegions,
+          ok,
+          threshold,
+        };
         screenshotsOk &&= ok;
         if (!ok) {
           const actualPath = path.join(
@@ -268,27 +439,57 @@ try {
         }
       }
       artifactScreenshots[filename] = outputPath;
+      screenshotBaselines[filename] = baselinePath;
     }
   }
   if (harnessState.status === 'complete' && !harnessState.performance) {
     throw new Error('Spike finished without data-perf-result.');
   }
   const performanceResult = harnessState.performance ? JSON.parse(harnessState.performance) : null;
+  const performanceValidation = validatePerformanceSnapshot(performanceResult);
+  const expectedDiagnostics = harnessState.expectedDiagnostics
+    ? JSON.parse(harnessState.expectedDiagnostics)
+    : [];
+  const diagnosticValidation = validateBrowserDiagnostics(diagnostics, expectedDiagnostics);
+  const runnerContractsOk = validateScreenshotUpdateEligibility({
+    diagnosticOk: diagnosticValidation.ok,
+    performanceOk: performanceValidation.ok,
+    resultOk: result.ok,
+    screenshotsOk,
+    status: harnessState.status,
+  });
+  if (target.updateScreenshots && runnerContractsOk) {
+    await commitScreenshotBaselineTransaction(screenshotUpdates);
+    for (const { baseline, filename } of screenshotUpdates) {
+      screenshotComparisons[filename].baseline = baseline === undefined ? 'created' : 'updated';
+      screenshotComparisons[filename].committed = true;
+    }
+  }
   outcome = {
     ...result,
-    ok: harnessState.status === 'complete' && result.ok === true && screenshotsOk,
+    ok: runnerContractsOk,
     url: target.url,
     requestedAdapter: target.adapter,
     webgpuAdapterInfo,
     backend: harnessState.backend,
     artifactScreenshots,
+    screenshotBaselines,
     screenshotComparisons,
     performance: performanceResult,
+    performanceValidation,
     diagnostics,
+    diagnosticValidation,
   };
 
   if (!outcome.ok && !outcome.error) {
-    outcome.error = harnessState.error ?? `Spike ended with status ${harnessState.status}.`;
+    const failedScreenshot = Object.entries(screenshotComparisons).find(
+      ([, comparison]) => comparison.ok !== true,
+    );
+    outcome.error =
+      harnessState.error ??
+      (target.updateScreenshots && failedScreenshot
+        ? `Refusing to update ${failedScreenshot[0]}: screenshot region validation failed (${JSON.stringify(failedScreenshot[1].regions)}).`
+        : `Spike ended with status ${harnessState.status}.`);
   }
 } catch (error) {
   outcome = {

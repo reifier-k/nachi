@@ -48,10 +48,13 @@ import {
 } from '@nachi-vfx/three';
 import {
   allPanelsHaveForeground,
+  allTimelineElementsHaveActivity,
   createDrainedReadback,
   createPerformanceMonitor,
   createPlaygroundRenderer,
   createTimestampQueryPoolDrain,
+  timelineDefinitionElementKeys,
+  timelineTrackedKeysMatchDefinition,
 } from './harness';
 import { createShowcaseLoading } from './loading';
 import { attachShowcaseTuning } from './tuning';
@@ -931,7 +934,7 @@ async function run(): Promise<void> {
       });
       perfTarget.dispose();
     };
-    await runHeadless(renderer, post, step, instance, perfWindow);
+    await runHeadless(renderer, post, step, instance, effect, perfWindow);
     return;
   }
 
@@ -1009,25 +1012,12 @@ async function runHeadless(
     readonly state: string;
     getElementState(key: string): unknown;
   },
+  definition: { readonly elements: Readonly<Record<string, unknown>> },
   perfWindow: () => Promise<void>,
 ): Promise<void> {
   const labels = required<HTMLElement>('#frame-labels');
   labels.innerHTML = CAPTURE_LABELS.map((label) => `<span>${label}</span>`).join('');
-  const elementKeys = [
-    'baseRim',
-    'circleFill',
-    'circleInner',
-    'circleOuter',
-    'coreGlow',
-    'deployBurst',
-    'domeCore',
-    'driftMotes',
-    'flash',
-    'motes',
-    'shieldCells',
-    'shock',
-    'streams',
-  ] as const;
+  const elementKeys = timelineDefinitionElementKeys(definition);
   const target = new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true });
   const drainReadback = createDrainedReadback(renderer, target);
   const drainTimestampQueries = createTimestampQueryPoolDrain(renderer);
@@ -1094,6 +1084,8 @@ async function runHeadless(
   const checks = {
     allFramesCaptured: captures.length === CAPTURE_TIMES.length,
     allPanelsVisible: allPanelsHaveForeground(panelStats),
+    allTimelineElementsActive: allTimelineElementsHaveActivity(captureStates, elementKeys),
+    allTimelineElementsTracked: timelineTrackedKeysMatchDefinition(definition, elementKeys),
     consoleClean: consoleMessages.length === 0,
     deployVisible: deploy.foregroundRatio > 0.035 && deploy.saturatedRatio < 0.3,
     domeVisible: shell.foregroundRatio > 0.05 && shell.saturatedRatio < 0.25,
@@ -1106,6 +1098,7 @@ async function runHeadless(
     evidence: {
       captureStates,
       captureTimes: CAPTURE_TIMES,
+      elementKeys,
       finalLocalTime: instance.localTime,
       finalState: instance.state,
       panelStats,

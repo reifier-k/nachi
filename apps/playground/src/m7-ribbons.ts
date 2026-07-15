@@ -58,6 +58,7 @@ type CaseResult = {
   readonly spawnOrder: Uint32Array;
   readonly uvAndParametric: Float32Array;
   readonly widths: Float32Array;
+  readonly system: VFXSystem;
 };
 
 const root = document.documentElement;
@@ -266,6 +267,7 @@ async function run(): Promise<void> {
       spawnOrder: order as Uint32Array,
       uvAndParametric: segments.uvAndParametric,
       widths: segments.widths,
+      system,
     };
   };
 
@@ -408,8 +410,13 @@ async function run(): Promise<void> {
     mode: headless ? 'headless' : 'visual',
     page: 'm7-ribbons',
   });
-  await performanceMonitor.resolveGpuTimestamps();
-  performanceMonitor.publish();
+  renderer.setRenderTarget(target);
+  await performanceMonitor.captureGpuSamples(async () => {
+    await stretched.system.update(STEP);
+    renderer.render(visualScene, camera);
+    await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+  });
+  renderer.setRenderTarget(null);
 
   const validation = {
     compactionResilient:

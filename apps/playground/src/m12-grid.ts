@@ -16,6 +16,7 @@ import {
   type ParameterSchema,
   type VfxRuntimeRenderer,
 } from '@nachi-vfx/core';
+import * as THREE from 'three/webgpu';
 
 import { createPerformanceMonitor } from './perf';
 import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi-vfx/three';
@@ -113,7 +114,7 @@ async function simulate<Elements extends EffectElements, Parameters extends Para
   const system = new VFXSystem(runtime);
   const instance = system.spawn(effect);
   for (let frame = 0; frame < frames; frame += 1) await system.update(delta);
-  return { instance, snapshot: await gridView(instance).capture() };
+  return { instance, snapshot: await gridView(instance).capture(), system };
 }
 
 function maximumDifference(left: ArrayLike<number>, right: ArrayLike<number>) {
@@ -207,7 +208,14 @@ async function run() {
     required<HTMLElement>('#status-value').textContent = result.ok
       ? 'Explicitly unsupported'
       : 'Diagnostic missing';
-    monitor.publish();
+    const target = new THREE.RenderTarget(1, 1);
+    renderer.setRenderTarget(target);
+    await monitor.captureGpuSamples(async () => {
+      renderer.render(new THREE.Scene(), new THREE.Camera());
+      await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+    });
+    renderer.setRenderTarget(null);
+    target.dispose();
     return;
   }
 
@@ -331,8 +339,9 @@ async function run() {
   const density = grid2DSnapshotChannel(main.snapshot, 'density');
   const temperature = grid2DSnapshotChannel(main.snapshot, 'temperature');
   paintSmoke(density, temperature, main.snapshot.resolution);
-  await monitor.resolveGpuTimestamps();
-  monitor.publish();
+  await monitor.captureGpuSamples(async () => {
+    await main.system.update(1 / 30);
+  });
 
   const validation = {
     analyticInjectionAndDissipation: Math.abs(analyticActual - analyticExpected) <= 2e-5,
