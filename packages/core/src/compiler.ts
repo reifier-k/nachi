@@ -1257,6 +1257,26 @@ function withDerivedConfigReads<Stage extends ModuleDefinition['stage']>(
   });
 }
 
+function withNeighborGridTransformRead<Stage extends ModuleDefinition['stage']>(
+  module: ModuleDefinition<Stage, object>,
+): ModuleDefinition<Stage, object> {
+  if (
+    module.type !== 'core/boids' &&
+    module.type !== 'core/pbd-distance-constraint' &&
+    module.type !== 'core/neighbor-grid-tsl'
+  ) {
+    return module;
+  }
+  const access = module.access ?? { reads: [], writes: [] };
+  if (access.reads.includes('Emitter.transform')) return module;
+  // Pre-H2-5 v1 documents serialized the old built-in access manifests. Compilation supplements
+  // the new implementation read without mutating the loaded definition or its round-trip JSON.
+  return withAccess(module, {
+    ...access,
+    reads: [...access.reads, 'Emitter.transform'],
+  });
+}
+
 function defaultsModule(schema: ResolvedAttributeSchema): InitModule {
   const config = {
     attributes: schema.attributes
@@ -1309,9 +1329,11 @@ function normalizeModules(
               `${path}.factory`,
             ),
           );
-        return withDerivedConfigReads(module);
+        return withDerivedConfigReads(withNeighborGridTransformRead(module));
       }
-      if (module.type !== 'core/tsl-module') return withDerivedConfigReads(module);
+      if (module.type !== 'core/tsl-module') {
+        return withDerivedConfigReads(withNeighborGridTransformRead(module));
+      }
       const path = `${stage}[${index}]`;
       const trace = traceTslModule(module as TslModuleDefinition, path, options);
       diagnostics.push(...trace.diagnostics);
@@ -3443,6 +3465,22 @@ function createBuildKernels(
       readonly positionSnapshot: KernelStorageNode;
       readonly velocitySnapshot: KernelStorageNode;
     };
+    const neighborGridCellCoordinates = (
+      definition: NeighborGridDefinition,
+      worldPosition: KernelNode,
+    ): { readonly x: KernelNode; readonly y: KernelNode; readonly z: KernelNode } => {
+      // Particle snapshots and pairwise distance math remain world-space. Only hashing enters the
+      // emitter frame, whose transform already composes the instance transform and emitter offset.
+      const inverseEmitterTransform = adapter.inverse(uniformNode('Emitter.transform'));
+      const localPosition = inverseEmitterTransform.mul(
+        adapter.vec4(worldPosition.x, worldPosition.y, worldPosition.z, 1),
+      ).xyz;
+      return {
+        x: adapter.floor!(localPosition.x.sub(definition.origin[0]).div(definition.cellSize)),
+        y: adapter.floor!(localPosition.y.sub(definition.origin[1]).div(definition.cellSize)),
+        z: adapter.floor!(localPosition.z.sub(definition.origin[2]).div(definition.cellSize)),
+      };
+    };
     const neighborGrids: Record<string, MutableNeighborGrid> = {};
     for (const [key, definition] of Object.entries(neighborGridDefinitions)) {
       const cells = neighborGridCellCount(definition.resolution);
@@ -3495,15 +3533,7 @@ function createBuildKernels(
               .element(particleIndex)
               .assign(adapter.vec4(velocity.x, velocity.y, velocity.z, 0));
             adapter.branch(attributeNode('alive', particleIndex).equal(adapter.uint(1)), () => {
-              const x = adapter.floor!(
-                position.x.sub(definition.origin[0]).div(definition.cellSize),
-              );
-              const y = adapter.floor!(
-                position.y.sub(definition.origin[1]).div(definition.cellSize),
-              );
-              const z = adapter.floor!(
-                position.z.sub(definition.origin[2]).div(definition.cellSize),
-              );
+              const { x, y, z } = neighborGridCellCoordinates(definition, position);
               const zero = adapter.constant(0, 'f32');
               const inside = x
                 .greaterThanEqual(zero)
@@ -3573,9 +3603,7 @@ function createBuildKernels(
     ): void => {
       const { definition } = grid;
       const [width, height, depth] = definition.resolution;
-      const baseX = adapter.floor!(position.x.sub(definition.origin[0]).div(definition.cellSize));
-      const baseY = adapter.floor!(position.y.sub(definition.origin[1]).div(definition.cellSize));
-      const baseZ = adapter.floor!(position.z.sub(definition.origin[2]).div(definition.cellSize));
+      const { x: baseX, y: baseY, z: baseZ } = neighborGridCellCoordinates(definition, position);
       const zero = adapter.constant(0, 'f32');
       const loop = adapter.loop!;
       const offsetRange = { end: radius + 1, start: -radius, type: 'int' as const };
@@ -5891,7 +5919,13 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Emitter.deltaTime', 'Particles.alive', 'Particles.position', 'Particles.velocity'],
+      reads: [
+        'Emitter.deltaTime',
+        'Emitter.transform',
+        'Particles.alive',
+        'Particles.position',
+        'Particles.velocity',
+      ],
       writes: ['Particles.velocity'],
     },
     build() {
@@ -5903,7 +5937,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
   });
   registry.register({
     access: {
-      reads: ['Particles.alive', 'Particles.position'],
+      reads: ['Emitter.transform', 'Particles.alive', 'Particles.position'],
       writes: ['Particles.position'],
     },
     build() {
@@ -5914,7 +5948,7 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
     version: 1,
   });
   registry.register({
-    access: { reads: [], writes: [] },
+    access: { reads: ['Emitter.transform'], writes: [] },
     build() {},
     stage: 'update',
     type: 'core/neighbor-grid-tsl',

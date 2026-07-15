@@ -23,6 +23,15 @@
 null opt-out、ハンドラ例外封じ込め)を runtime 診断へ延長。light 上限は preparer から自動接続。
 容量飽和は readback 有効時のみ(既存性能設計は変えない)。
 
+### H2-5 先行seam(2026-07-15)
+
+plan 013のdominant NeighborGrid out-of-boundsを既定consoleへ配送するため、H2-5で
+`VfxSystemOptions.onRuntimeDiagnostic?: ((diagnostic) => void) | null` と共通1行formatter、`null` opt-out、
+handler例外封じ込め(`NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED`)だけを先行導入した。接続済みsourceは
+`NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT` のみである。`markError()`、device loss、attachment、
+light pool、spawn/event overflow等の既存source配線と全ページのopt-out棚卸しは本planの未実装範囲に残る。
+したがって本planの状態/checkboxは完了へ変更しない。
+
 ## 受け入れ基準
 
 1. markError 経路の全診断コードが既定 console に 1 行で乗る(意図的発火ページは opt-out)。

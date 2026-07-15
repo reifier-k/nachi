@@ -190,6 +190,11 @@ export interface VfxSystemOptions {
   readonly aliveCountReadbackInterval?: number;
   /** Reports spawn-time compile and kernel-build diagnostics. Null disables reporting. */
   readonly onBuildDiagnostic?: ((diagnostic: VfxDiagnostic) => void) | null;
+  /**
+   * Reports runtime diagnostics as their source observes them. Null disables reporting. H2-5
+   * wires NeighborGrid dominant out-of-bounds; H2-12 will connect the remaining runtime sources.
+   */
+  readonly onRuntimeDiagnostic?: ((diagnostic: VfxDiagnostic) => void) | null;
   readonly fixedTimeStep?: VfxFixedTimeStepOptions;
   /** Maximum released resource bundles retained per effect definition. Defaults to 16. */
   readonly maxPoolSize?: number;
@@ -211,7 +216,7 @@ export interface VfxSystemOptions {
   readonly grid3DStageRegistry?: Grid3DStageRegistry;
 }
 
-function defaultBuildDiagnosticHandler(diagnostic: VfxDiagnostic): void {
+function defaultDiagnosticHandler(diagnostic: VfxDiagnostic): void {
   const path = diagnostic.path === undefined ? '' : ` (${diagnostic.path})`;
   const line = `[${diagnostic.code}] ${diagnostic.message}${path}`.replace(/[\r\n]+/g, ' ');
   if (diagnostic.severity === 'error') console.error(line);
@@ -660,12 +665,16 @@ type AdvanceContext = {
 
 class NeighborGridRuntime implements NeighborGridRuntimeView {
   #initialized = false;
+  #reportedOutOfBounds = false;
   #submissionCount = 0;
 
   constructor(
+    readonly key: string,
     readonly definition: NeighborGridDefinition,
     readonly kernels: BuiltNeighborGridKernels,
     readonly renderer: VfxRuntimeRenderer,
+    readonly emitterPath: string,
+    readonly onDiagnostic: (diagnostic: VfxDiagnostic) => void,
   ) {}
 
   get initialized(): boolean {
@@ -683,6 +692,7 @@ class NeighborGridRuntime implements NeighborGridRuntimeView {
 
   release(): void {
     this.#initialized = false;
+    this.#reportedOutOfBounds = false;
   }
 
   async capture(): Promise<NeighborGridSnapshot> {
@@ -702,22 +712,57 @@ class NeighborGridRuntime implements NeighborGridRuntimeView {
     const stats = await this.renderer.readStorage(this.kernels.stats);
     const counters = new Uint32Array(stats);
     const dropped = counters[0] ?? 0;
-    return {
-      counts: new Uint32Array(counts),
-      dropped,
-      diagnostics:
-        dropped === 0
-          ? []
-          : [
-              {
-                code: 'NACHI_NEIGHBOR_GRID_CELL_OVERFLOW',
-                message: `NeighborGrid fixed cell capacity ${this.definition.cellCapacity} dropped ${dropped} particle insertion(s) during the latest rebuild.`,
-                path: 'neighbor-grid.cellCapacity',
-                phase: 'runtime',
-                severity: 'warning',
+    const outOfBounds = counters[1] ?? 0;
+    const capturedCounts = new Uint32Array(counts);
+    const inBounds = capturedCounts.reduce((sum, count) => sum + count, 0);
+    const total = inBounds + outOfBounds;
+    const outOfBoundsRatio = total === 0 ? 0 : outOfBounds / total;
+    const overflowDiagnostic: VfxDiagnostic | undefined =
+      dropped === 0
+        ? undefined
+        : {
+            code: 'NACHI_NEIGHBOR_GRID_CELL_OVERFLOW',
+            message: `NeighborGrid fixed cell capacity ${this.definition.cellCapacity} dropped ${dropped} particle insertion(s) during the latest rebuild.`,
+            path: 'neighbor-grid.cellCapacity',
+            phase: 'runtime',
+            severity: 'warning',
+          };
+    const outOfBoundsDiagnostic: VfxDiagnostic | undefined =
+      total > 0 && outOfBoundsRatio > 0.5
+        ? {
+            code: 'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+            context: {
+              emitterPath: this.emitterPath,
+              kernel: 'neighbor-grid',
+              neighborGrid: {
+                cellCapacity: this.definition.cellCapacity,
+                cellSize: this.definition.cellSize,
+                inBounds,
+                key: this.key,
+                origin: this.definition.origin,
+                outOfBounds,
+                outOfBoundsRatio,
+                resolution: this.definition.resolution,
+                total,
               },
-            ],
-      outOfBounds: counters[1] ?? 0,
+            },
+            message: `NeighborGrid "${this.key}" rejected ${outOfBounds} of ${total} insertion attempt(s) (${(outOfBoundsRatio * 100).toFixed(1)}%) as outside its emitter-local volume.`,
+            path: `elements.${this.key}.origin`,
+            phase: 'runtime',
+            severity: 'warning',
+          }
+        : undefined;
+    if (outOfBoundsDiagnostic && !this.#reportedOutOfBounds) {
+      this.#reportedOutOfBounds = true;
+      this.onDiagnostic(outOfBoundsDiagnostic);
+    }
+    return {
+      counts: capturedCounts,
+      dropped,
+      diagnostics: [overflowDiagnostic, outOfBoundsDiagnostic].filter(
+        (diagnostic): diagnostic is VfxDiagnostic => diagnostic !== undefined,
+      ),
+      outOfBounds,
       slots: new Uint32Array(slots),
     };
   }
@@ -1149,6 +1194,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     maxLifetime: number,
     aliveCountReadbackInterval: number | undefined,
     onDiagnostic: (diagnostic: VfxDiagnostic) => void,
+    onNeighborGridDiagnostic: (diagnostic: VfxDiagnostic) => void,
     eventOutputs: Readonly<Record<string, EventQueueResources>> = {},
     eventInputs: readonly EventInputBinding[] = [],
     onEventAggregate: (summary: EffectEventSummary) => void = () => undefined,
@@ -1182,7 +1228,17 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.kernels =
       reusedKernels ?? program.buildKernels(renderer.kernelAdapter, { eventInputs, eventOutputs });
     for (const [key, kernels] of Object.entries(this.kernels.neighborGrids)) {
-      this.#neighborGrids.set(key, new NeighborGridRuntime(kernels.definition, kernels, renderer));
+      this.#neighborGrids.set(
+        key,
+        new NeighborGridRuntime(
+          key,
+          kernels.definition,
+          kernels,
+          renderer,
+          emitterPath,
+          onNeighborGridDiagnostic,
+        ),
+      );
     }
     renderer.clearStorageReplayReady?.(this.kernels);
     this.setQualityTier(qualityTier);
@@ -2698,6 +2754,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
   readonly #instances = new Map<string, VfxEffectInstance<RuntimeEffectDefinition>>();
   readonly #now: () => number;
   readonly #onBuildDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
+  readonly #onRuntimeDiagnostic: ((diagnostic: VfxDiagnostic) => void) | undefined;
   readonly #maxPoolSize: number;
   readonly #prewarmStepSeconds: number;
   readonly #registry: KernelModuleRegistry | undefined;
@@ -2732,8 +2789,12 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     this.#grid3DStageRegistry = options.grid3DStageRegistry;
     this.#onBuildDiagnostic =
       options.onBuildDiagnostic === undefined
-        ? defaultBuildDiagnosticHandler
+        ? defaultDiagnosticHandler
         : (options.onBuildDiagnostic ?? undefined);
+    this.#onRuntimeDiagnostic =
+      options.onRuntimeDiagnostic === undefined
+        ? defaultDiagnosticHandler
+        : (options.onRuntimeDiagnostic ?? undefined);
     const runtimeRenderer = asRuntimeRenderer(renderer);
     const automaticSelection = selectDeviceQualityTier(
       options.deviceProfile ?? {
@@ -3015,6 +3076,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           entry.maxLifetime,
           this.#aliveCountReadbackInterval,
           (diagnostic) => instance.recordDiagnostic(diagnostic),
+          (diagnostic) => {
+            instance.recordDiagnostic(diagnostic);
+            this.#reportRuntimeDiagnostic(instance, diagnostic);
+          },
           pooled ? {} : eventResources.get(entry.key),
           pooled
             ? []
@@ -3778,6 +3843,20 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         code: 'NACHI_BUILD_DIAGNOSTIC_HANDLER_FAILED',
         message: `VFXSystem.onBuildDiagnostic failed: ${error instanceof Error ? error.message : String(error)}`,
         path: 'VFXSystem.onBuildDiagnostic',
+        phase: 'runtime',
+        severity: 'warning',
+      });
+    }
+  }
+
+  #reportRuntimeDiagnostic(instance: VfxEffectInstance, diagnostic: VfxDiagnostic): void {
+    try {
+      this.#onRuntimeDiagnostic?.(diagnostic);
+    } catch (error) {
+      instance.recordDiagnosticOnce({
+        code: 'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+        message: `VFXSystem.onRuntimeDiagnostic failed: ${error instanceof Error ? error.message : String(error)}`,
+        path: 'VFXSystem.onRuntimeDiagnostic',
         phase: 'runtime',
         severity: 'warning',
       });

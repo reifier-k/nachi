@@ -102,6 +102,7 @@ import type {
 
 export const DEFAULT_NEIGHBOR_CELL_CAPACITY = 32;
 
+/** Declares an emitter-local grid; origin is its minimum corner and cellSize remains a world length. */
 export function defineNeighborGrid(config: {
   readonly cellCapacity?: number;
   readonly cellSize?: number;
@@ -772,7 +773,13 @@ export function drag(value: ValueInput<number>): UpdateModule {
 /** Classic separation/alignment/cohesion evaluated through a NeighborGrid data interface. */
 export function boids(options: BoidsOptions): UpdateModule {
   return createModule('update', 'core/boids', options, {
-    reads: ['Emitter.deltaTime', 'Particles.alive', 'Particles.position', 'Particles.velocity'],
+    reads: [
+      'Emitter.deltaTime',
+      'Emitter.transform',
+      'Particles.alive',
+      'Particles.position',
+      'Particles.velocity',
+    ],
     writes: ['Particles.velocity'],
   });
 }
@@ -783,7 +790,7 @@ export function boids(options: BoidsOptions): UpdateModule {
  */
 export function pbdDistanceConstraint(options: PbdDistanceConstraintOptions): UpdateModule {
   return createModule('update', 'core/pbd-distance-constraint', options, {
-    reads: ['Particles.alive', 'Particles.position'],
+    reads: ['Emitter.transform', 'Particles.alive', 'Particles.position'],
     writes: ['Particles.position'],
   });
 }
@@ -804,7 +811,10 @@ export function neighborGridTslModule(
     'update',
     'core/neighbor-grid-tsl',
     { grid: options.grid, radius: options.radius ?? 1, source: { kind: 'inline' as const } },
-    options.access,
+    {
+      ...options.access,
+      reads: [...new Set([...options.access.reads, 'Emitter.transform' as const])],
+    },
   ) as NeighborGridTslModuleDefinition;
   Object.defineProperty(module, 'factory', { enumerable: false, value: factory });
   return module;

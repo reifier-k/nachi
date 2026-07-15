@@ -45,7 +45,7 @@ Particle position and velocity storage is world-space throughout the simulation.
 | `lightRenderer`                               | implicit `Particles.position`                            | world-space particle position, fixed                                          | No                       | None                                            |
 | `decalRenderer`                               | implicit `Particles.position` / rotation and scene depth | world-space projection box, fixed                                             | No                       | None; intrinsically world/depth-bound           |
 | `emitTo(..., { inherit: ['position', ...] })` | event payload position/velocity                          | world-space particle snapshot, fixed                                          | No                       | None                                            |
-| `NeighborGrid` / `boids` / PBD                | grid `origin`, particle positions                        | world-space grid, fixed                                                       | No                       | None                                            |
+| `NeighborGrid` / `boids` / PBD                | grid `origin`, bucket/current-cell lookup; world snapshots/distances | emitter-local grid, fixed; follows composed emitter transform                 | No                       | None (tracking fixed in H2-5)                   |
 | `gridInject`, `grid3DInject`                  | `center`                                                 | normalized Grid2D/Grid3D coordinates, fixed and independent of emitter frames | No                       | None                                            |
 
 ## 3. Problem

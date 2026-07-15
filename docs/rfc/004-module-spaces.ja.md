@@ -44,7 +44,7 @@
 | `lightRenderer`                               | 暗黙の`Particles.position`                       | world-space粒子位置固定                                           | 不可                    | なし                                |
 | `decalRenderer`                               | 暗黙の`Particles.position`/rotationとscene depth | world-space projection box固定                                    | 不可                    | なし。本質的にworld/depthへ結合     |
 | `emitTo(..., { inherit: ['position', ...] })` | event payloadのposition/velocity                 | world-space粒子snapshot固定                                       | 不可                    | なし                                |
-| `NeighborGrid` / `boids` / PBD                | gridの`origin`、粒子位置                         | world-space grid固定                                              | 不可                    | なし                                |
+| `NeighborGrid` / `boids` / PBD                | gridの`origin`、bucket/current-cell lookup。snapshot/distanceはworld | emitter-local grid固定。合成済みemitter transformへ追従            | 不可                    | なし(H2-5で追従修正)                |
 | `gridInject`、`grid3DInject`                  | `center`                                         | emitter frameと独立した正規化Grid2D/Grid3D座標固定                | 不可                    | なし                                |
 
 ## 3. 問題

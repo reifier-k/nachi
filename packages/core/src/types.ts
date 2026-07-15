@@ -790,10 +790,10 @@ export interface Grid3DDefinition<Channels extends Grid3DChannelSchema = Grid3DC
 export interface NeighborGridDefinition {
   /** Maximum particle indices retained per cell. Later inserts are dropped and counted. */
   readonly cellCapacity: number;
-  /** World-space edge length of one cubic cell. Search radii are authored in these units. */
+  /** World-unit edge length of one emitter-local cubic cell. Search radii use these units. */
   readonly cellSize: number;
   readonly kind: 'neighbor-grid';
-  /** World-space position of cell (0, 0, 0)'s minimum corner. */
+  /** Emitter-local position of cell (0, 0, 0)'s minimum corner. */
   readonly origin: Vec3;
   readonly resolution: readonly [width: number, height: number, depth: number];
   readonly version: 1;
@@ -1310,6 +1310,18 @@ export type VfxGpuKernelKind =
 export interface VfxDiagnosticContext {
   readonly emitterPath: string;
   readonly kernel: VfxGpuKernelKind;
+  /** Present for NeighborGrid readback diagnostics. All definition coordinates are emitter-local. */
+  readonly neighborGrid?: {
+    readonly cellCapacity: number;
+    readonly cellSize: number;
+    readonly inBounds: number;
+    readonly key: string;
+    readonly origin: Vec3;
+    readonly outOfBounds: number;
+    readonly outOfBoundsRatio: number;
+    readonly resolution: readonly [width: number, height: number, depth: number];
+    readonly total: number;
+  };
 }
 
 export interface VfxDiagnostic {

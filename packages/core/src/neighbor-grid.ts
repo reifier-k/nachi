@@ -41,6 +41,7 @@ export function neighborGridCellIndex(
   return (z * height + y) * width + x;
 }
 
+/** Maps one emitter-local position to a grid cell. */
 export function neighborGridPositionCell(
   position: Vec3,
   definition: Pick<NeighborGridDefinition, 'cellSize' | 'origin' | 'resolution'>,
@@ -87,7 +88,10 @@ export interface CpuNeighborGridBuckets {
   readonly slots: Uint32Array;
 }
 
-/** CPU replica of atomicAdd reservation followed by fixed-slot overflow dropping. */
+/**
+ * CPU replica of atomicAdd reservation followed by fixed-slot overflow dropping. Input points are
+ * emitter-local; callers mirroring GPU world positions must apply the inverse emitter transform.
+ */
 export function bucketNeighborGridPoints(
   points: readonly Vec3[],
   definition: NeighborGridDefinition,

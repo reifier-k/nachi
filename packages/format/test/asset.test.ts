@@ -1063,7 +1063,7 @@ describe('asset-reference emitter inheritance', () => {
     ).toEqual(document);
   });
 
-  it('round-trips NeighborGrid declarations and built-in boids references', () => {
+  it('round-trips emitter-local NeighborGrid origin in the unchanged v1 envelope/schema', () => {
     const neighbors = defineNeighborGrid({
       cellCapacity: 24,
       cellSize: 0.5,
@@ -1074,13 +1074,49 @@ describe('asset-reference emitter inheritance', () => {
       capacity: 256,
       render: billboard({}),
       spawn: burst({ count: 64 }),
-      update: [boids({ cohesion: 0.8, grid: 'neighbors', radius: 1 })],
+      update: [
+        boids({ cohesion: 0.8, grid: 'neighbors', radius: 1 }),
+        pbdDistanceConstraint({ distance: 0.25, grid: 'neighbors', radius: 1 }),
+      ],
     });
     const effect = defineEffect({ elements: { flock, neighbors } });
     const document = serializeEffect(effect);
+    expect(document).toMatchObject({ format: 'nachi-effect', version: 1 });
+    expect((document.effect as { elements: { neighbors: unknown } }).elements.neighbors).toEqual({
+      cellCapacity: 24,
+      cellSize: 0.5,
+      kind: 'neighbor-grid',
+      origin: [-4, -2, -4],
+      resolution: [16, 8, 16],
+      version: 1,
+    });
     const loaded = loadEffect(document);
     expect(serializeEffect(loaded)).toEqual(document);
     expect(loaded.elements.neighbors).toEqual(neighbors);
+
+    const legacyDocument = structuredClone(document) as unknown as {
+      effect: {
+        elements: {
+          flock: { update: Array<{ access: { reads: string[] } }> };
+        };
+      };
+    };
+    for (const module of legacyDocument.effect.elements.flock.update) {
+      module.access.reads = module.access.reads.filter((read) => read !== 'Emitter.transform');
+    }
+    const legacyLoaded = loadEffect(legacyDocument);
+    expect(serializeEffect(legacyLoaded)).toEqual(legacyDocument);
+    const compiledLegacy = compileEmitter(legacyLoaded.elements.flock as typeof flock, {
+      neighborGrids: { neighbors: legacyLoaded.elements.neighbors as typeof neighbors },
+    });
+    expect(compiledLegacy.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_MODULE_ACCESS_MISMATCH' }),
+    );
+    expect(
+      compiledLegacy.kernels.update.modules
+        .filter(({ type }) => type === 'core/boids' || type === 'core/pbd-distance-constraint')
+        .every(({ access }) => access.reads.includes('Emitter.transform')),
+    ).toBe(true);
   });
 
   it('rejects inline Grid3D TSL', () => {

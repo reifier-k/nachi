@@ -40,6 +40,7 @@ import {
   lifetime,
   lightIntensity,
   lightRenderer,
+  neighborGridTslModule,
   intensityOverLife,
   decalRenderer,
   meshRenderer,
@@ -286,6 +287,89 @@ describe('M12 neighbor-module diagnostic coverage', () => {
       ]),
     );
     expect(() => oversized.buildKernels(fakeAdapter())).toThrow(VfxDiagnosticError);
+  });
+
+  it('uses one emitter-local cell-coordinate path for bucket, boids, custom, and PBD lookups', () => {
+    const custom = neighborGridTslModule(
+      {
+        access: { reads: ['Particles.position'], writes: [] },
+        grid: 'neighbors',
+        radius: 1,
+      },
+      (context) => {
+        context.forEachNeighbor(() => undefined);
+        return {};
+      },
+    );
+    expect(custom.access?.reads).toContain('Emitter.transform');
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 4,
+        integration: 'none',
+        render: computeRender,
+        spawn: burst({ count: 1 }),
+        update: [
+          boids({ grid: 'neighbors', radius: 1 }),
+          custom,
+          pbdDistanceConstraint({ distance: 0.5, grid: 'neighbors', radius: 1 }),
+        ],
+      }),
+      { neighborGrids: { neighbors } },
+    );
+    let inverseCalls = 0;
+    const base = fakeAdapter();
+    const adapter: KernelTslAdapter = {
+      ...base,
+      floor: base.uint,
+      inverse(value) {
+        inverseCalls += 1;
+        return base.inverse(value);
+      },
+      loop(_range, callback) {
+        callback(base.uint(0));
+      },
+    };
+
+    program.buildKernels(adapter);
+    expect(inverseCalls).toBe(4);
+  });
+
+  it('supplements pre-H2-5 v1 neighbor access manifests without mutating the source definition', () => {
+    const currentBoids = boids({ grid: 'neighbors', radius: 1 });
+    const currentPbd = pbdDistanceConstraint({ distance: 0.5, grid: 'neighbors' });
+    const legacy = [currentBoids, currentPbd].map((module) => {
+      if (!module.access) throw new Error('Expected built-in neighbor access metadata.');
+      return {
+        ...module,
+        access: {
+          ...module.access,
+          reads: module.access.reads.filter((read) => read !== 'Emitter.transform'),
+        },
+      };
+    });
+    const definition = defineEmitter({
+      capacity: 4,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 1 }),
+      update: legacy,
+    });
+
+    const program = compileEmitter(definition, { neighborGrids: { neighbors } });
+    expect(program.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'NACHI_MODULE_ACCESS_MISMATCH' }),
+    );
+    expect(
+      program.kernels.update.modules
+        .filter(({ type }) => type === 'core/boids')
+        .every(({ access }) => access.reads.includes('Emitter.transform')),
+    ).toBe(true);
+    expect(
+      program.kernels.update.modules
+        .filter(({ type }) => type === 'core/pbd-distance-constraint')
+        .every(({ access }) => access.reads.includes('Emitter.transform')),
+    ).toBe(true);
+    expect(legacy.every(({ access }) => !access.reads.includes('Emitter.transform'))).toBe(true);
   });
 });
 import type {

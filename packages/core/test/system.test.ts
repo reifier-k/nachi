@@ -817,6 +817,154 @@ describe('M12 data-interface capture FIFO', () => {
     });
   });
 
+  it('reports dominant NeighborGrid out-of-bounds once per runtime lifetime and resets for pooled instances', async () => {
+    const renderer = new NeighborGridDiagnosticRenderer();
+    const delivered: string[] = [];
+    const neighbors = defineNeighborGrid({
+      cellCapacity: 1,
+      cellSize: 0.5,
+      origin: [-1, -2, -3],
+      resolution: [2, 1, 1],
+    });
+    const particles = defineEmitter({
+      capacity: 2,
+      integration: 'none',
+      render: computeRender,
+      spawn: burst({ count: 0 }),
+      update: [boids({ grid: 'neighbors', radius: 0 })],
+    });
+    const effect = defineEffect({ elements: { neighbors, particles } });
+    const system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: (diagnostic) => delivered.push(diagnostic.code),
+    });
+    const first = system.spawn(effect);
+    await system.update(0.1);
+
+    const firstView = first.getNeighborGrid('neighbors')!;
+    const [captureA, captureB] = await Promise.all([firstView.capture(), firstView.capture()]);
+    for (const snapshot of [captureA, captureB]) {
+      expect(snapshot.diagnostics.map(({ code }) => code)).toEqual([
+        'NACHI_NEIGHBOR_GRID_CELL_OVERFLOW',
+        'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+      ]);
+    }
+    expect(
+      first.diagnostics.filter(({ code }) => code === 'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT'),
+    ).toEqual([
+      expect.objectContaining({
+        path: 'elements.neighbors.origin',
+        context: {
+          emitterPath: 'elements.particles',
+          kernel: 'neighbor-grid',
+          neighborGrid: {
+            cellCapacity: 1,
+            cellSize: 0.5,
+            inBounds: 2,
+            key: 'neighbors',
+            origin: [-1, -2, -3],
+            outOfBounds: 3,
+            outOfBoundsRatio: 0.6,
+            resolution: [2, 1, 1],
+            total: 5,
+          },
+        },
+      }),
+    ]);
+
+    await system.update(0.1);
+    await firstView.capture();
+    expect(
+      first.diagnostics.filter(({ code }) => code === 'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT'),
+    ).toHaveLength(1);
+    expect(delivered).toEqual(['NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT']);
+
+    renderer.counts = new Uint32Array([1, 0]);
+    renderer.stats = new Uint32Array([0, 1]);
+    await system.update(0.1);
+    expect((await firstView.capture()).diagnostics).toEqual([]);
+    renderer.counts = new Uint32Array([0, 0]);
+    renderer.stats = new Uint32Array([0, 0]);
+    await system.update(0.1);
+    expect((await firstView.capture()).diagnostics).toEqual([]);
+
+    first.release();
+    renderer.counts = new Uint32Array([2, 0]);
+    renderer.stats = new Uint32Array([1, 3]);
+    const pooled = system.spawn(effect);
+    await system.update(0.1);
+    await pooled.getNeighborGrid('neighbors')!.capture();
+    expect(
+      pooled.diagnostics.filter(
+        ({ code }) => code === 'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+      ),
+    ).toHaveLength(1);
+    expect(delivered).toEqual([
+      'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+      'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+    ]);
+  });
+
+  it('supports default, null, and throwing runtime diagnostic delivery without rejecting capture', async () => {
+    const effect = defineEffect({
+      elements: {
+        neighbors: defineNeighborGrid({ cellCapacity: 1, resolution: [2, 1, 1] }),
+        particles: defineEmitter({
+          capacity: 2,
+          integration: 'none',
+          render: computeRender,
+          spawn: burst({ count: 0 }),
+          update: [boids({ grid: 'neighbors', radius: 0 })],
+        }),
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const defaultSystem = new VFXSystem(new NeighborGridDiagnosticRenderer());
+      const defaultInstance = defaultSystem.spawn(effect);
+      await defaultSystem.update(0.1);
+      const defaultView = defaultInstance.getNeighborGrid('neighbors')!;
+      await defaultView.capture();
+      await defaultView.capture();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('[NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT]'),
+      );
+
+      warn.mockClear();
+      const nullSystem = new VFXSystem(new NeighborGridDiagnosticRenderer(), undefined, {
+        onRuntimeDiagnostic: null,
+      });
+      const nullInstance = nullSystem.spawn(effect);
+      await nullSystem.update(0.1);
+      await nullInstance.getNeighborGrid('neighbors')!.capture();
+      expect(warn).not.toHaveBeenCalled();
+      expect(nullInstance.diagnostics.map(({ code }) => code)).toContain(
+        'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+      );
+
+      let handlerCalls = 0;
+      const throwingSystem = new VFXSystem(new NeighborGridDiagnosticRenderer(), undefined, {
+        onRuntimeDiagnostic: () => {
+          handlerCalls += 1;
+          throw new Error('synthetic runtime diagnostic handler failure');
+        },
+      });
+      const throwingInstance = throwingSystem.spawn(effect);
+      await throwingSystem.update(0.1);
+      const throwingView = throwingInstance.getNeighborGrid('neighbors')!;
+      await expect(throwingView.capture()).resolves.toMatchObject({ outOfBounds: 3 });
+      await throwingSystem.update(0.1);
+      await expect(throwingView.capture()).resolves.toMatchObject({ outOfBounds: 3 });
+      expect(handlerCalls).toBe(1);
+      expect(throwingInstance.diagnostics.map(({ code }) => code)).toEqual([
+        'NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT',
+        'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('rejects queued Grid and NeighborGrid operations after their instance is released', async () => {
     const gridRenderer = new DeferredSubmissionRenderer();
     const gridSystem = new VFXSystem(gridRenderer);
@@ -1225,6 +1373,22 @@ class DrawTrackingRuntimeRenderer extends FakeRuntimeRenderer {
 class ZeroReadbackRenderer extends FakeRuntimeRenderer {
   readStorage(): Promise<ArrayBuffer> {
     return Promise.resolve(new Uint32Array(4).buffer);
+  }
+}
+
+class NeighborGridDiagnosticRenderer extends FakeRuntimeRenderer {
+  counts = new Uint32Array([2, 0]);
+  slots = new Uint32Array([0, 0xffff_ffff]);
+  stats = new Uint32Array([1, 3]);
+
+  readStorage(storage: KernelStorageNode): Promise<ArrayBuffer> {
+    const name = (storage as FakeStorage).name;
+    const source = name.includes('Counts')
+      ? this.counts
+      : name.includes('Slots')
+        ? this.slots
+        : this.stats;
+    return Promise.resolve(source.slice().buffer);
   }
 }
 

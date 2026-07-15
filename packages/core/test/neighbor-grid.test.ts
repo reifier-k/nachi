@@ -30,7 +30,7 @@ describe('M12 NeighborGrid CPU mirrors', () => {
     }
   });
 
-  it('uses x-fast hashing and maps world positions through origin/cellSize', () => {
+  it('uses x-fast hashing and maps emitter-local positions through origin/cellSize', () => {
     const grid = defineNeighborGrid({
       cellSize: 0.5,
       origin: [-1, -2, -3],
