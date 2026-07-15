@@ -18,6 +18,7 @@ import type {
   VfxEmitterRuntimeView,
 } from '@nachi-vfx/core';
 import type * as THREE from 'three/webgpu';
+import { loadEffect, serializeEffect } from '@nachi-vfx/format';
 
 import { createPerformanceMonitor } from './perf';
 import { createThreeKernelAdapter, createThreeRuntimeRenderer } from '@nachi-vfx/three';
@@ -43,8 +44,11 @@ type RendererBackendLike = {
 
 type RuntimeInstance = {
   readonly diagnostics: readonly { code: string }[];
+  readonly localTime: number;
+  readonly state: string;
   getEmitter(key: string): VfxEmitterRuntimeView | undefined;
   setTransform(position: readonly [number, number, number]): void;
+  stop(): void;
 };
 
 const root = document.documentElement;
@@ -102,6 +106,7 @@ function smokeEffect(options: {
   readonly duration?: number;
   readonly lifetimeSeconds?: number;
   readonly loopCount?: number;
+  readonly omitDuration?: boolean;
   readonly randomVelocity?: boolean;
   readonly spawn: SpawnModule | readonly SpawnModule[];
 }) {
@@ -122,10 +127,14 @@ function smokeEffect(options: {
           lifetime(options.lifetimeSeconds ?? 10),
         ],
         integration: 'none',
-        lifecycle: {
-          duration: options.duration ?? 1,
-          ...(options.loopCount === undefined ? {} : { loopCount: options.loopCount }),
-        },
+        ...(options.omitDuration
+          ? {}
+          : {
+              lifecycle: {
+                duration: options.duration ?? 1,
+                ...(options.loopCount === undefined ? {} : { loopCount: options.loopCount }),
+              },
+            }),
         render: computeRender,
         spawn: options.spawn,
       }),
@@ -190,6 +199,7 @@ function placementEffect(
   spawn: SpawnModule | readonly SpawnModule[],
   radius: ValueInput<number> = 0,
   capacity = 16,
+  omitDuration = false,
 ) {
   return defineEffect({
     elements: {
@@ -197,7 +207,7 @@ function placementEffect(
         capacity,
         init: [positionSphere({ radius }), lifetime(10)],
         integration: 'none',
-        lifecycle: { duration: 1 },
+        ...(omitDuration ? {} : { lifecycle: { duration: 1 } }),
         render: computeRender,
         spawn,
       }),
@@ -327,16 +337,27 @@ async function runLifecycleScenario(
   } as const;
   // 1. Rate: 30/s for one second must produce exactly 30 particles with fixed timesteps.
   const rateSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
-  const rateInstance = rateSystem.spawn(
-    smokeEffect({ capacity: 64, duration: 1, spawn: rate({ rate: 30 }) }),
-    { seed: 11 },
+  const rateAsset = serializeEffect(
+    smokeEffect({ capacity: 64, omitDuration: true, spawn: rate({ rate: 30 }) }),
   );
+  const loadedRateEffect = loadEffect(rateAsset);
+  const loadedRateEmitter = loadedRateEffect.elements.particles;
+  const formatOmittedDurationPreserved =
+    loadedRateEmitter?.kind === 'emitter' && loadedRateEmitter.lifecycle?.duration === undefined;
+  const rateInstance = rateSystem.spawn(loadedRateEffect, { seed: 11 });
   await rateSystem.update(0);
   for (let frame = 0; frame < 60; frame += 1) {
     await rateSystem.update(FIXED_DELTA_SECONDS);
     await performanceMonitor.resolveGpuTimestamps();
   }
   const rateAlive = await aliveCount(renderer, rateInstance);
+  const rateOmittedLifecycleActive =
+    rateInstance.state === 'active' && emitter(rateInstance).lifecycleState === 'active';
+  const rateTimeBeforeStop = rateInstance.localTime;
+  rateInstance.stop();
+  await rateSystem.update(FIXED_DELTA_SECONDS);
+  const rateStopFreezesTimeline =
+    rateInstance.state === 'stopped' && rateInstance.localTime === rateTimeBeforeStop;
 
   // 2. A one-slot emitter must recycle the same index and advance its particle generation/RNG.
   const recycleSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
@@ -361,20 +382,44 @@ async function runLifecycleScenario(
 
   // 3. Per-distance: the accumulator fires ten particles along one 0.5-unit segment.
   const distanceSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
-  const distanceInstance = distanceSystem.spawn(placementEffect(perDistance({ rate: 20 })), {
-    seed: 23,
-  });
+  const distanceInstance = distanceSystem.spawn(
+    placementEffect(perDistance({ rate: 20 }), 0, 16, true),
+    { seed: 23 },
+  );
   await distanceSystem.update(0);
   distanceInstance.setTransform([0.5, 0, 0]);
   await distanceSystem.update(FIXED_DELTA_SECONDS);
   const distanceAlive = await aliveCount(renderer, distanceInstance);
+  const perDistanceOmittedLifecycleActive =
+    distanceInstance.state === 'active' && emitter(distanceInstance).lifecycleState === 'active';
   const distanceDistribution = lineDistribution(
     await alivePositions(renderer, distanceInstance),
     10,
     1 / 20,
   );
 
-  // 4. Timed births use deterministic midpoints across the same moving segment.
+  // 4. A format-loaded explicit finite duration still wins over continuous derivation.
+  const explicitDurationSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
+  const explicitDurationInstance = explicitDurationSystem.spawn(
+    loadEffect(
+      serializeEffect(
+        smokeEffect({
+          capacity: 32,
+          duration: FIXED_DELTA_SECONDS * 2,
+          spawn: rate(600),
+        }),
+      ),
+    ),
+    { seed: 24 },
+  );
+  await explicitDurationSystem.update(0);
+  await explicitDurationSystem.update(FIXED_DELTA_SECONDS * 2);
+  const explicitDurationAlive = await aliveCount(renderer, explicitDurationInstance);
+  const formatExplicitDurationWins =
+    explicitDurationAlive === 20 &&
+    emitter(explicitDurationInstance).lifecycleState === 'completed';
+
+  // 5. Timed births use deterministic midpoints across the same moving segment.
   const movingRateSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
   const movingRate = movingRateSystem.spawn(placementEffect(rate(600)), { seed: 24 });
   await movingRateSystem.update(0);
@@ -382,7 +427,7 @@ async function runLifecycleScenario(
   await movingRateSystem.update(FIXED_DELTA_SECONDS);
   const rateDistribution = lineDistribution(await alivePositions(renderer, movingRate), 10, 1 / 20);
 
-  // 5. GPU free-list saturation must retain the leading phases of the CPU-clamped rate batch.
+  // 6. GPU free-list saturation must retain the leading phases of the CPU-clamped rate batch.
   // Eight existing particles leave two slots; a ten-birth request therefore keeps phases 0.05
   // and 0.15 rather than redistributing the two successful births across the segment.
   const partialOccupancySystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
@@ -415,7 +460,7 @@ async function runLifecycleScenario(
         Math.abs(z) <= SPAWN_INTERPOLATION_ERROR_BUDGET,
     );
 
-  // 6. interpolationActive=0 must retain the current-transform path bit-for-bit. A static timed
+  // 7. interpolationActive=0 must retain the current-transform path bit-for-bit. A static timed
   // batch and an equivalent static burst therefore produce identical seeded positions.
   const staticDefinition = placementEffect(rate(600), range(0.1, 0.4));
   const staticControlDefinition = placementEffect(burst({ count: 10 }), range(0.1, 0.4));
@@ -429,7 +474,7 @@ async function runLifecycleScenario(
   const staticTimedPositions = await floatStorage(renderer, staticTimed, 'position');
   const staticControlPositions = await floatStorage(renderer, staticControl, 'position');
 
-  // 7. A pooled kernel whose prior generation moved must respawn exactly like a fresh kernel.
+  // 8. A pooled kernel whose prior generation moved must respawn exactly like a fresh kernel.
   const pooledDefinition = placementEffect(burst({ count: 10 }), range(0.1, 0.4));
   const pooledSystem = new VFXSystem(runtimeRenderer, undefined, {
     ...systemOptions,
@@ -454,12 +499,12 @@ async function runLifecycleScenario(
   const pooledRespawnPositions = await floatStorage(renderer, pooledRespawn, 'position');
   const freshPoolControlPositions = await floatStorage(renderer, freshPoolControl, 'position');
 
-  // 8/9. Atomic compaction count, alive flags, and indirect instanceCount must agree.
+  // 9/10. Atomic compaction count, alive flags, and indirect instanceCount must agree.
   const distanceFlags = await uintStorage(renderer, distanceInstance, 'alive');
   const actualAlive = distanceFlags.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
   const indirectAlive = await indirectInstanceCount(renderer, distanceInstance);
 
-  // 10. Exhaustion clamps safely and publishes a stable warning diagnostic.
+  // 11. Exhaustion clamps safely and publishes a stable warning diagnostic.
   const overflowSystem = new VFXSystem(runtimeRenderer, undefined, systemOptions);
   const overflowed = overflowSystem.spawn(
     smokeEffect({ capacity: 2, duration: 0, spawn: burst({ count: 5 }) }),
@@ -468,7 +513,7 @@ async function runLifecycleScenario(
   await overflowSystem.update(0);
   const overflowAlive = await aliveCount(renderer, overflowed);
 
-  // 11. Identical seeds and schedules must produce bit-identical particle state.
+  // 12. Identical seeds and schedules must produce bit-identical particle state.
   const deterministicEffect = smokeEffect({
     capacity: 4,
     randomVelocity: true,
@@ -490,6 +535,8 @@ async function runLifecycleScenario(
     deterministic:
       equalArrays(deterministicVelocityA, deterministicVelocityB) &&
       equalArrays(deterministicGenerationA, deterministicGenerationB),
+    formatExplicitDurationWins,
+    formatOmittedDurationPreserved,
     freeListExhaustionSafe:
       overflowAlive === 2 &&
       overflowed.diagnostics.some(({ code }) => code === 'NACHI_SPAWN_CAPACITY_EXCEEDED'),
@@ -499,12 +546,15 @@ async function runLifecycleScenario(
       distanceDistribution.valid &&
       (distanceDistribution.xs[0] ?? 1) < 0.1 &&
       (distanceDistribution.xs.at(-1) ?? 0) > 0.45,
+    perDistanceOmittedLifecycleActive,
     partialOccupancyKeepsLeadingRatePhases: partialOccupancyPhasesValid,
     rateInterpolated:
       rateDistribution.valid &&
       (rateDistribution.xs[0] ?? 1) < 0.1 &&
       (rateDistribution.xs.at(-1) ?? 0) > 0.4,
     rateSpawnTotal: rateAlive === 30,
+    rateOmittedLifecycleActive,
+    rateStopFreezesTimeline,
     recycledIndexHasNewRandomStream:
       firstGeneration[0] === 1 &&
       secondGeneration[0] === 2 &&
@@ -516,6 +566,7 @@ async function runLifecycleScenario(
     counts: {
       actualAlive,
       distanceAlive,
+      explicitDurationAlive,
       indirectAlive,
       overflowAlive,
       rateAlive,

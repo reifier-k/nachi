@@ -238,11 +238,6 @@ async function run(): Promise<void> {
         }),
   });
   const runtimeRenderer = createThreeRuntimeRenderer(renderer, kernelAdapter, backend.device?.lost);
-  const performanceMonitor = createPerformanceMonitor(renderer, {
-    gpuScopes: ['compute', 'render'],
-    mode: headless ? 'headless' : 'visual',
-    page: 'm3-sprites',
-  });
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x101828);
   const camera = new THREE.OrthographicCamera(-3, 3, 2.25, -2.25, 0.1, 20);
@@ -761,6 +756,65 @@ async function run(): Promise<void> {
       stretchedShape.bounds.height > facingShape.bounds.height * 1.5 &&
       stretchedShape.bounds.height > stretchedShape.bounds.width,
   };
+
+  // Keep timestamp queries isolated from the long correctness/readback sequence above. A compact
+  // renderer runs the same core compute + sprite render path for the warmed performance window.
+  const performanceRenderer = await createPlaygroundRenderer({
+    antialias: false,
+    trackTimestamp: true,
+  });
+  performanceRenderer.setPixelRatio(1);
+  performanceRenderer.setSize(64, 64);
+  await performanceRenderer.init();
+  const performanceBackend = performanceRenderer.backend as BackendLike;
+  if (!performanceBackend.isWebGPUBackend) {
+    throw new Error('M3 performance capture requires WebGPU.');
+  }
+  const performanceRuntimeRenderer = createThreeRuntimeRenderer(
+    performanceRenderer,
+    createThreeKernelAdapter({
+      backend: 'webgpu',
+      linearFloat32Filtering:
+        performanceBackend.device?.features?.has('float32-filterable') === true,
+      ...(performanceBackend.device?.limits?.maxStorageBuffersPerShaderStage === undefined
+        ? {}
+        : {
+            maxStorageBuffersPerShaderStage:
+              performanceBackend.device.limits.maxStorageBuffersPerShaderStage,
+          }),
+    }),
+    performanceBackend.device?.lost,
+  );
+  const performanceSystem = new VFXSystem(performanceRuntimeRenderer, undefined, {
+    fixedTimeStep: { stepSeconds: STEP },
+  });
+  const performanceInstance = performanceSystem.spawn(
+    spriteEffect({ count: 5, duration: 10, spread: 1.1 }),
+    { seed: 41 },
+  ) as RuntimeInstance;
+  const performanceView = emitter(performanceInstance);
+  const performanceMesh = materializeThreeSpriteDraw(
+    performanceView.program,
+    performanceView.kernels,
+    0,
+    { resolveTexture },
+  );
+  const performanceScene = new THREE.Scene();
+  performanceScene.add(performanceMesh);
+  const performanceTarget = new THREE.RenderTarget(64, 64, { depthBuffer: true });
+  const performanceMonitor = createPerformanceMonitor(performanceRenderer, {
+    gpuScopes: ['compute', 'render'],
+    mode: headless ? 'headless' : 'visual',
+    page: 'm3-sprites',
+  });
+  await performanceSystem.update(0);
+  performanceRenderer.setRenderTarget(performanceTarget);
+  await performanceMonitor.captureGpuSamples(async () => {
+    await performanceSystem.update(STEP);
+    performanceRenderer.render(performanceScene, camera);
+    await performanceRenderer.readRenderTargetPixelsAsync(performanceTarget, 0, 0, 1, 1);
+  });
+  performanceRenderer.setRenderTarget(null);
   const result = {
     aliveHistory,
     blendMetrics,
@@ -826,7 +880,6 @@ async function run(): Promise<void> {
     },
     validation,
   };
-  await performanceMonitor.resolveGpuTimestamps();
   performanceMonitor.publish();
   root.dataset.spikeResult = JSON.stringify(result);
   root.dataset.sceneReady = 'true';

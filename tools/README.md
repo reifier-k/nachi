@@ -51,4 +51,5 @@ and 5174:
 pnpm verify:gpu
 ```
 
-It covers Grid2D, WBOIT, VAT, textured ribbons, NeighborGrid, and all six showcase pages.
+It covers M2 lifecycle/continuous-spawn, M3 rendering/burst-envelope, Grid2D, WBOIT, VAT,
+textured ribbons, NeighborGrid, and all six showcase pages.

@@ -11,6 +11,7 @@ import {
   emitTo,
   lifetime,
   marker as coreMarker,
+  rate,
   timeline as coreTimeline,
   type EffectDefinition,
   type EffectInstanceState,
@@ -636,6 +637,86 @@ describe('@nachi-vfx/timeline runtime', () => {
       expect(instance.getElementState('child')).toMatchObject({
         aliveCount: undefined,
         localTime: 0.05,
+        playing: false,
+        visible: false,
+      });
+    } finally {
+      updateSpy.mockRestore();
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it('stops and releases a duration-omitted continuous emitter at the final track boundary', async () => {
+    const child = defineEmitter({
+      capacity: 8,
+      init: [lifetime(0.2)],
+      render: billboard({}),
+      spawn: rate(20),
+    });
+    const effect = defineEffect({
+      elements: { child },
+      timeline: timeline([at(0, play('child'))], { duration: 0.05 }),
+    });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    const updateSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'update')
+      .mockImplementation((deltaSeconds) => {
+        fake.advance(deltaSeconds ?? 0);
+        return Promise.resolve();
+      });
+    try {
+      const system = new VFXSystem({});
+      const instance = system.spawn(effect);
+
+      await system.update(0.05);
+
+      expect(fake.child.state).toBe('released');
+      expect(instance.state).toBe('complete');
+      expect(instance.getElementState('child')).toMatchObject({
+        localTime: 0.05,
+        playing: false,
+        visible: false,
+      });
+    } finally {
+      updateSpy.mockRestore();
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it('truncates a duration-omitted continuous emitter at a positive sub-epsilon boundary', async () => {
+    const child = defineEmitter({
+      capacity: 8,
+      init: [lifetime(0.2)],
+      render: billboard({}),
+      spawn: rate(20),
+    });
+    const effect = defineEffect({
+      elements: { child },
+      timeline: timeline([at(0, play('child'))], { duration: 5e-11 }),
+    });
+    const fake = fakeChildInstance();
+    const spawnSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'spawn')
+      .mockReturnValue(fake.child as never);
+    const updateSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'update')
+      .mockImplementation((deltaSeconds) => {
+        fake.advance(deltaSeconds ?? 0);
+        return Promise.resolve();
+      });
+    try {
+      const system = new VFXSystem({});
+      const instance = system.spawn(effect);
+
+      await system.update(5e-11);
+
+      expect(fake.child.state).toBe('released');
+      expect(instance.state).toBe('complete');
+      expect(instance.getElementState('child')).toMatchObject({
+        localTime: 0,
         playing: false,
         visible: false,
       });

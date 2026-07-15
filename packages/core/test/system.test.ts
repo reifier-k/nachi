@@ -1467,6 +1467,7 @@ describe('emitter lifecycle state machine', () => {
 
   it('rejects invalid lifecycle configurations', () => {
     expect(() => new EmitterLifecycleController({ duration: -1 })).toThrow(RangeError);
+    expect(() => new EmitterLifecycleController({ duration: Infinity })).toThrow(RangeError);
     expect(() => new EmitterLifecycleController({ duration: 1, loopCount: 0 })).toThrow(RangeError);
     expect(() => new EmitterLifecycleController({ duration: 0, loopCount: 'infinite' })).toThrow(
       RangeError,
@@ -2555,7 +2556,6 @@ describe('VFXSystem runtime scheduler', () => {
     const emitter = defineEmitter({
       capacity: 8,
       integration: 'none',
-      lifecycle: { duration: 1 },
       render: computeRender,
       spawn: rate({ rate: 2.5 }),
     });
@@ -2565,6 +2565,61 @@ describe('VFXSystem runtime scheduler', () => {
 
     expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
     expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(1);
+    expect(instance.getEmitter('particles')?.lifecycleState).toBe('active');
+    expect(instance.state).toBe('active');
+
+    const submissionsBeforeStop = renderer.submissions.length;
+    instance.stop();
+    await system.update(0.4);
+    expect(instance.state).toBe('stopped');
+    expect(renderer.submissions).toHaveLength(submissionsBeforeStop);
+  });
+
+  it('keeps a partial lifecycle continuous emitter in its first unbounded activation', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 8,
+      integration: 'none',
+      lifecycle: { loopCount: 2, startDelay: 0.1 },
+      render: computeRender,
+      spawn: rate(10),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await system.update(0.1);
+    expect(instance.getEmitter('particles')).toMatchObject({
+      lifecycleState: 'active',
+      loopIndex: 0,
+    });
+    await system.update(0.2);
+
+    expect(instance.getEmitter('particles')).toMatchObject({
+      lifecycleState: 'active',
+      loopIndex: 0,
+      spawnGeneration: 0,
+    });
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(2);
+  });
+
+  it('keeps an explicit finite duration ahead of continuous derivation', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 8,
+      init: [lifetime(0.1)],
+      integration: 'none',
+      lifecycle: { duration: 0.2, startDelay: 0.1 },
+      render: computeRender,
+      spawn: rate(10),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+
+    await system.update(0.4);
+
+    expect(instance.getEmitter('particles')?.lifecycleState).toBe('completed');
+    expect(instance.state).toBe('complete');
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(2);
   });
 
   it('converts transform distance into per-distance spawn count', async () => {
@@ -2573,7 +2628,6 @@ describe('VFXSystem runtime scheduler', () => {
     const emitter = defineEmitter({
       capacity: 16,
       integration: 'none',
-      lifecycle: { duration: 1 },
       render: computeRender,
       spawn: perDistance({ rate: 2 }),
     });
@@ -2585,6 +2639,7 @@ describe('VFXSystem runtime scheduler', () => {
     expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(
       10,
     );
+    expect(instance.getEmitter('particles')?.lifecycleState).toBe('active');
     expect(
       instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnPhaseStart']?.value,
     ).toBeCloseTo(0.1);
@@ -3600,7 +3655,6 @@ describe('M11 VFXSystem scalability scheduling', () => {
           bounds: { center: [0.2, -0.1, 0], radius: 0.25 },
           capacity: 32,
           init: [lifetime(2)],
-          lifecycle: { duration: 10, loopCount: 'infinite' },
           render: computeRender,
           spawn: rate(10),
         }),
@@ -3626,6 +3680,39 @@ describe('M11 VFXSystem scalability scheduling', () => {
     await system.update(0.1);
     expect(instance.scalability.action).toBe('full');
     expect(instance.localTime).toBeCloseTo(visibleTime + 0.1);
+    expect(instance.getEmitter('particles')?.lifecycleState).toBe('active');
+    expect(instance.state).toBe('active');
+  });
+
+  it('admits a duration-omitted continuous emitter after the significance slot is freed', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      significanceBudget: { maxActiveInstances: 1, maxParticles: 64 },
+    });
+    system.setCamera(camera);
+    const definition = defineEffect({
+      elements: {
+        particles: defineEmitter({
+          capacity: 8,
+          integration: 'none',
+          render: computeRender,
+          spawn: rate(10),
+        }),
+      },
+      scalability: { significance: { priority: 0 } },
+    });
+    const admitted = system.spawn(definition, { priority: 1 });
+    const waiting = system.spawn(definition, { priority: 0 });
+    expect(waiting.scalability.action).toBe('culled');
+
+    admitted.stop();
+    admitted.release();
+    await system.update(0.1);
+
+    expect(waiting.scalability.action).toBe('full');
+    expect(waiting.getEmitter('particles')?.lifecycleState).toBe('active');
+    expect(waiting.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(1);
+    expect(waiting.state).toBe('active');
   });
 
   it('keeps the higher deterministic significance score inside the instance budget', () => {

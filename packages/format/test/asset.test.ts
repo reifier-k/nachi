@@ -46,6 +46,7 @@ import {
   pointAttractor,
   positionSphere,
   pbdDistanceConstraint,
+  rate,
   range,
   sizeOverLife,
   stop,
@@ -235,6 +236,45 @@ describe('effect asset v1', () => {
     expect(serialized).toContain('"stage":"update"');
     expect(serialized).toContain('"stage":"event"');
     expect(serialized).toContain('"stage":"render"');
+  });
+
+  it('keeps omitted and explicit continuous-spawn durations distinct through the asset format', () => {
+    const definition = defineEffect({
+      elements: {
+        explicit: defineEmitter({
+          capacity: 4,
+          lifecycle: { duration: 0.25, startDelay: 0.05 },
+          render: billboard({}),
+          spawn: rate(8),
+        }),
+        omitted: defineEmitter({
+          capacity: 4,
+          render: billboard({}),
+          spawn: rate(8),
+        }),
+      },
+    });
+
+    const document = serializeEffect(definition);
+    const loaded = loadEffect(document);
+
+    expect(loaded.elements.explicit).toMatchObject({
+      lifecycle: { duration: 0.25, startDelay: 0.05 },
+    });
+    expect(loaded.elements.omitted).not.toHaveProperty('lifecycle');
+    expect(serializeEffect(loaded)).toEqual(document);
+    expect(JSON.stringify(document)).not.toContain('Infinity');
+
+    const invalid = structuredClone(document) as unknown as {
+      effect: { elements: { explicit: { lifecycle: { duration: number } } } };
+    };
+    invalid.effect.elements.explicit.lifecycle.duration = Infinity;
+    expect(validateEffectAsset(invalid)).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_ASSET_TYPE_MISMATCH',
+        path: '$.effect.elements.explicit.lifecycle.duration',
+      }),
+    );
   });
 
   it('validates timeline duration and loop semantics in the asset format', () => {

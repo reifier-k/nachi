@@ -897,6 +897,12 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
     if (this.#ended || this.#localTime + EPSILON < duration) return;
     if (this.#cycle + 1 >= loopCount(this.#timeline.loop)) {
       this.#ended = true;
+      // The final track boundary owns the same child truncation as a loop boundary. Without this,
+      // an intentionally unbounded continuous emitter can keep the parent timeline active forever.
+      // Only an exact zero-duration at(0) shorthand has no later boundary and retains its
+      // established behavior of letting the immediately played child determine completion.
+      // Every positive duration owns final-boundary truncation, including sub-epsilon tracks.
+      if (duration > 0) this.#stopAllElements();
       return;
     }
     this.#stopAllElements();

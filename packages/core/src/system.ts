@@ -325,6 +325,21 @@ export interface NormalizedEmitterLifecycle {
   readonly startDelay: number;
 }
 
+const INTERNAL_UNBOUNDED_DURATION = Symbol('nachi.internal-unbounded-emitter-duration');
+
+type InternallyDerivedEmitterLifecycle = EmitterLifecycle & {
+  readonly [INTERNAL_UNBOUNDED_DURATION]: true;
+};
+
+function hasInternallyDerivedUnboundedDuration(
+  lifecycle: EmitterLifecycle | undefined,
+): lifecycle is InternallyDerivedEmitterLifecycle {
+  return (
+    lifecycle !== undefined &&
+    (lifecycle as Partial<InternallyDerivedEmitterLifecycle>)[INTERNAL_UNBOUNDED_DURATION] === true
+  );
+}
+
 function requireNonNegativeFinite(value: number, name: string): number {
   if (!Number.isFinite(value) || value < 0) {
     throw new RangeError(`${name} must be a non-negative finite number.`);
@@ -340,7 +355,12 @@ function throwIfPreparationAborted(signal?: AbortSignal): void {
 export function normalizeEmitterLifecycle(
   lifecycle: EmitterLifecycle | undefined,
 ): NormalizedEmitterLifecycle {
-  const duration = requireNonNegativeFinite(lifecycle?.duration ?? 0, 'duration');
+  // Publicly authored durations remain finite-only. The sole unbounded representation is a
+  // module-private marker created after compilation proves that duration was omitted and a
+  // continuous spawn policy exists; it cannot be serialized or supplied through the public API.
+  const duration = hasInternallyDerivedUnboundedDuration(lifecycle)
+    ? Infinity
+    : requireNonNegativeFinite(lifecycle?.duration ?? 0, 'duration');
   const prewarm = requireNonNegativeFinite(lifecycle?.prewarm ?? 0, 'prewarm');
   const startDelay = requireNonNegativeFinite(lifecycle?.startDelay ?? 0, 'startDelay');
   const loopCount = lifecycle?.loopCount ?? 1;
@@ -802,10 +822,15 @@ function maximumLifetime(program: CompiledEmitterProgram, definition: EmitterDef
   return Math.max(0, maximum);
 }
 
-function defaultSpawnEnvelopeDuration(
+function defaultSpawnDuration(
   program: CompiledEmitterProgram,
   maximumParticleLifetime: number,
 ): number {
+  if (
+    program.spawn.modules.some(({ type }) => type === 'core/rate' || type === 'core/per-distance')
+  ) {
+    return Infinity;
+  }
   let burstEnvelope = 0;
   for (const module of program.spawn.modules) {
     if (module.type !== 'core/burst') continue;
@@ -822,6 +847,17 @@ function defaultSpawnEnvelopeDuration(
   if (burstEnvelope === 0) return 0;
   const lifetimeGrace = Number.isFinite(maximumParticleLifetime) ? maximumParticleLifetime : 0;
   return burstEnvelope + lifetimeGrace;
+}
+
+function lifecycleWithDerivedDuration(
+  lifecycle: EmitterLifecycle | undefined,
+  duration: number,
+): EmitterLifecycle {
+  if (Number.isFinite(duration)) return { ...(lifecycle ?? {}), duration };
+  return {
+    ...(lifecycle ?? {}),
+    [INTERNAL_UNBOUNDED_DURATION]: true,
+  } as InternallyDerivedEmitterLifecycle;
 }
 
 function vector3(input: PositionInput | undefined): readonly [number, number, number] {
@@ -1107,14 +1143,15 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#aliveCountReadbackInterval = aliveCountReadbackInterval;
     this.#onDiagnostic = onDiagnostic;
     this.#onEventAggregate = onEventAggregate;
-    // Missing duration opts into the derived multi-cycle burst envelope while every other authored
-    // lifecycle field composes normally. An explicit numeric duration always wins.
+    // Missing duration opts continuous spawn into an internal unbounded activation and otherwise
+    // derives the multi-cycle burst envelope. Every other lifecycle field composes normally and an
+    // explicit numeric duration always wins.
     const lifecycle =
       definition.lifecycle?.duration === undefined
-        ? {
-            ...(definition.lifecycle ?? {}),
-            duration: defaultSpawnEnvelopeDuration(program, maxLifetime),
-          }
+        ? lifecycleWithDerivedDuration(
+            definition.lifecycle,
+            defaultSpawnDuration(program, maxLifetime),
+          )
         : definition.lifecycle;
     this.controller = new EmitterLifecycleController(lifecycle);
     this.kernels =

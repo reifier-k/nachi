@@ -690,8 +690,7 @@ function createChargeEffect() {
       blending: 'additive',
       map: GLOW_REF,
     }),
-    // rate() instead of cycled bursts: burst cycles that overlap particle deaths
-    // render nothing in a core system (library bug found during this page).
+    // A continuous rate keeps the converging charge stream evenly populated.
     spawn: rate(150),
     update: [
       pointAttractor({ falloff: 1, position: [0, 0, 0], strength: 30 }),

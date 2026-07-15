@@ -5,7 +5,15 @@ const suites = [
   {
     baseUrl: new URL(process.env.VERIFICATION_PLAYGROUND_BASE_URL ?? 'http://127.0.0.1:5173/'),
     name: 'playground',
-    pages: ['m12-grid', 'm10-sort', 'm8-vat', 'm7-ribbons', 'm12-neighbors'],
+    pages: [
+      'm2-runtime',
+      'm3-sprites',
+      'm12-grid',
+      'm10-sort',
+      'm8-vat',
+      'm7-ribbons',
+      'm12-neighbors',
+    ],
   },
   {
     baseUrl: new URL(process.env.VERIFICATION_SHOWCASE_BASE_URL ?? 'http://127.0.0.1:5174/'),

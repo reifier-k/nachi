@@ -189,14 +189,18 @@ export function collectEmitterLifecycleDiagnostics(
       interval > 0
     );
   });
+  const hasContinuousSpawn = (Array.isArray(config.spawn) ? config.spawn : [config.spawn]).some(
+    ({ type }) => type === 'core/rate' || type === 'core/per-distance',
+  );
   if (
-    (lifecycle.duration === 0 || (lifecycle.duration === undefined && !hasDerivedBurstEnvelope)) &&
+    (lifecycle.duration === 0 ||
+      (lifecycle.duration === undefined && !hasDerivedBurstEnvelope && !hasContinuousSpawn)) &&
     (lifecycle.loopCount ?? 1) !== 1
   ) {
     diagnostics.push(
       compileDiagnostic(
         'NACHI_LIFECYCLE_LOOP_DURATION_REQUIRED',
-        'A looping emitter requires a positive explicit duration or a derived multi-cycle burst envelope.',
+        'A looping emitter requires a positive explicit duration, a derived multi-cycle burst envelope, or a duration-omitted continuous spawn policy.',
         'lifecycle.duration',
       ),
     );

@@ -674,8 +674,9 @@ export interface EmitterConfig<
   readonly integration?: EmitterIntegration;
   /**
    * Lifecycle settings. When `duration` is absent—whether this object is omitted or only partially
-   * authored—a multi-cycle burst derives its active duration from the complete cycle envelope plus
-   * statically known particle-lifetime grace. An explicit numeric `duration` always wins.
+   * authored—rate/per-distance spawn derives an unbounded active duration, while a burst-only
+   * emitter derives its finite duration from a complete multi-cycle envelope plus statically known
+   * particle-lifetime grace. An explicit finite numeric `duration` always wins.
    */
   readonly lifecycle?: EmitterLifecycle;
   /** Translates this emitter's local origin inside the effect-instance frame. */
