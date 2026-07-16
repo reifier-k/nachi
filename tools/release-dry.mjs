@@ -100,8 +100,40 @@ async function verifyReleasePlan(packages) {
     const currentVersions = new Map(
       packages.map(({ manifest }) => [manifest.name, manifest.version]),
     );
+    const changesetConfig = JSON.parse(
+      await readFile(path.join(root, '.changeset', 'config.json'), 'utf8'),
+    );
+    const fixedGroups = changesetConfig.fixed ?? [];
+    const fixedGroupOf = new Map();
+    for (const group of fixedGroups) {
+      for (const name of group) fixedGroupOf.set(name, group);
+    }
+    const parseVersion = (version) => {
+      const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+      if (!match) throw new Error(`Unsupported release version format: ${version}`);
+      return match.slice(1).map(Number);
+    };
+    const compareVersions = (left, right) => {
+      const a = parseVersion(left);
+      const b = parseVersion(right);
+      for (let i = 0; i < 3; i += 1) {
+        if (a[i] !== b[i]) return a[i] - b[i];
+      }
+      return 0;
+    };
+    // A fixed group plans from the highest current version among its members, so a lagging member
+    // legitimately reports that shared version as oldVersion instead of its own manifest version.
+    const expectedOldVersion = (name) => {
+      const own = currentVersions.get(name);
+      const group = fixedGroupOf.get(name);
+      if (!group) return own;
+      return group
+        .filter((member) => currentVersions.has(member))
+        .map((member) => currentVersions.get(member))
+        .reduce((max, version) => (compareVersions(version, max) > 0 ? version : max), own);
+    };
     const staleReleases = releases.filter(
-      ({ name, oldVersion }) => currentVersions.get(name) !== oldVersion,
+      ({ name, oldVersion }) => expectedOldVersion(name) !== oldVersion,
     );
     if (staleReleases.length > 0) {
       throw new Error(
@@ -109,6 +141,26 @@ async function verifyReleasePlan(packages) {
           .map(({ name, oldVersion }) => `${name} (${oldVersion})`)
           .join(', ')}.`,
       );
+    }
+    const nonMonotonic = releases.filter(
+      ({ name, newVersion }) => compareVersions(newVersion, currentVersions.get(name)) <= 0,
+    );
+    if (nonMonotonic.length > 0) {
+      throw new Error(
+        `Changeset release plan does not advance package versions: ${nonMonotonic
+          .map(({ name, newVersion }) => `${name} (${currentVersions.get(name)} -> ${newVersion})`)
+          .join(', ')}.`,
+      );
+    }
+    for (const group of fixedGroups) {
+      const groupVersions = new Set(
+        releases.filter(({ name }) => group.includes(name)).map(({ newVersion }) => newVersion),
+      );
+      if (groupVersions.size > 1) {
+        throw new Error(
+          `Fixed version group plans diverging versions: ${[...groupVersions].join(', ')}.`,
+        );
+      }
     }
     console.log(
       releases.length === 0
