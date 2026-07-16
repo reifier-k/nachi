@@ -125,6 +125,67 @@ describe('M11 attribute spreadsheet formatting', () => {
     });
   });
 
+  it('applies physical-slot ordering before pagination across backend membership orders', () => {
+    const capture = (backend: 'webgl2' | 'webgpu', aliveIndices: readonly number[]) =>
+      formatAttributeSnapshot({
+        aliveIndices: Uint32Array.from(aliveIndices),
+        attributes,
+        backend,
+        capacity: 4,
+        emitterId: backend,
+        logicalValues,
+        options: { attributes: ['heat'], limit: 1, offset: 1, order: 'physical-slot' },
+      });
+    const webgpu = capture('webgpu', [3, 0, 2]);
+    const webgl2 = capture('webgl2', [0, 2, 3]);
+
+    expect(webgpu.rows).toEqual([
+      {
+        aliveIndex: 2,
+        attributes: { heat: 30 },
+        physicalSlot: 2,
+        spawnGeneration: 3,
+        spawnOrder: 102,
+      },
+    ]);
+    expect(webgl2.rows).toEqual([
+      {
+        aliveIndex: 1,
+        attributes: { heat: 30 },
+        physicalSlot: 2,
+        spawnGeneration: 3,
+        spawnOrder: 102,
+      },
+    ]);
+    expect(webgpu.truncation).toEqual(webgl2.truncation);
+  });
+
+  it('preserves duplicate physical slots with a compact-index tie-break and warning', () => {
+    const snapshot = formatAttributeSnapshot({
+      aliveIndices: new Uint32Array([2, 0, 2]),
+      attributes,
+      capacity: 4,
+      emitterId: 'hostile-membership',
+      logicalValues,
+      options: { attributes: ['heat'], order: 'physical-slot' },
+    });
+
+    expect(snapshot.rows.map(({ aliveIndex, physicalSlot }) => [physicalSlot, aliveIndex])).toEqual(
+      [
+        [0, 1],
+        [2, 0],
+        [2, 2],
+      ],
+    );
+    expect(snapshot.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_DEBUG_DUPLICATE_PHYSICAL_SLOT',
+        path: 'aliveIndices.2',
+        severity: 'warning',
+      }),
+    );
+  });
+
   it('deduplicates repeated requested columns while preserving first-request order', () => {
     const snapshot = formatAttributeSnapshot({
       aliveIndices: new Uint32Array(),
@@ -149,6 +210,128 @@ describe('M11 attribute spreadsheet formatting', () => {
         options: { attributes: ['missing'] },
       }),
     ).toThrow(VfxDiagnosticError);
+  });
+
+  it('diagnoses every non-enum row order from untyped input instead of defaulting null', () => {
+    for (const order of ['spawn-order', null, 1, {}]) {
+      let thrown: unknown;
+      try {
+        formatAttributeSnapshot({
+          aliveIndices: new Uint32Array(),
+          attributes,
+          capacity: 4,
+          emitterId: 'fixture',
+          logicalValues,
+          options: { order } as never,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(VfxDiagnosticError);
+      expect((thrown as VfxDiagnosticError).diagnostics).toEqual([
+        expect.objectContaining({
+          code: 'NACHI_DEBUG_ATTRIBUTE_ORDER_INVALID',
+          path: 'options.order',
+        }),
+      ]);
+    }
+  });
+
+  it('rejects an out-of-range physical slot on a returned compaction page', () => {
+    let thrown: unknown;
+    try {
+      formatAttributeSnapshot({
+        aliveIndices: new Uint32Array([4, 0]),
+        attributes,
+        capacity: 4,
+        emitterId: 'invalid-membership',
+        logicalValues,
+        options: { attributes: ['heat'], limit: 1 },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(VfxDiagnosticError);
+    expect((thrown as VfxDiagnosticError).diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE',
+        path: 'aliveIndices.0',
+      }),
+    ]);
+  });
+
+  it('keeps default compaction validation page-local without scanning skipped rows', () => {
+    const snapshot = formatAttributeSnapshot({
+      aliveIndices: new Uint32Array([4, 0]),
+      attributes,
+      capacity: 4,
+      emitterId: 'page-local-membership',
+      logicalValues,
+      options: { attributes: ['heat'], limit: 1, offset: 1 },
+    });
+
+    expect(snapshot.rows).toEqual([
+      expect.objectContaining({ attributes: { heat: 10 }, physicalSlot: 0 }),
+    ]);
+  });
+
+  it('validates full physical-slot membership before pagination and sorting', () => {
+    let thrown: unknown;
+    try {
+      formatAttributeSnapshot({
+        aliveIndices: new Uint32Array([0, 4]),
+        attributes,
+        capacity: 4,
+        emitterId: 'invalid-stable-membership',
+        logicalValues,
+        options: { attributes: ['heat'], limit: 1, order: 'physical-slot' },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(VfxDiagnosticError);
+    expect((thrown as VfxDiagnosticError).diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE',
+        path: 'aliveIndices.1',
+      }),
+    ]);
+  });
+
+  it('accepts empty stable membership and rejects the u32 maximum at capacity', () => {
+    expect(
+      formatAttributeSnapshot({
+        aliveIndices: new Uint32Array(),
+        attributes,
+        capacity: 4,
+        emitterId: 'empty-membership',
+        logicalValues,
+        options: { order: 'physical-slot' },
+      }).rows,
+    ).toEqual([]);
+
+    let thrown: unknown;
+    try {
+      formatAttributeSnapshot({
+        aliveIndices: new Uint32Array([0xffff_ffff]),
+        attributes,
+        capacity: 4,
+        emitterId: 'u32-boundary-membership',
+        logicalValues,
+        options: { order: 'physical-slot' },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(VfxDiagnosticError);
+    expect((thrown as VfxDiagnosticError).diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE',
+        path: 'aliveIndices.0',
+      }),
+    ]);
   });
 });
 

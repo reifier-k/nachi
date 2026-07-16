@@ -11,12 +11,17 @@ import {
   emitTo,
   lifetime,
   marker as coreMarker,
+  perDistance,
   rate,
   timeline as coreTimeline,
   type EffectDefinition,
   type EffectInstanceState,
+  type KernelComputeNode,
+  type KernelNode,
+  type KernelTslAdapter,
   type VfxDiagnostic,
   type VfxEffectInstance,
+  type VfxRuntimeRenderer,
   VfxDiagnosticError,
 } from '@nachi-vfx/core';
 import { fxMaterial as meshFxMaterial, ring, slashArc, type MeshFxMesh } from '@nachi-vfx/mesh-fx';
@@ -107,6 +112,75 @@ function fakeChildInstance(
     setState: (value: EffectInstanceState) => {
       state = value;
     },
+  };
+}
+
+function fakeKernelNode(value: unknown = 0): KernelNode {
+  const components = new Set(['a', 'b', 'g', 'r', 'w', 'x', 'xy', 'xyz', 'y', 'z']);
+  let proxy: KernelNode;
+  const target = {
+    value,
+    element: () => proxy,
+    setName: () => proxy,
+    toAtomic: () => proxy,
+  };
+  proxy = new Proxy(target, {
+    get(object, property) {
+      if (property in object) return object[property as keyof typeof object];
+      if (typeof property === 'string' && components.has(property)) return proxy;
+      return () => proxy;
+    },
+  }) as unknown as KernelNode;
+  return proxy;
+}
+
+function fakeRuntimeRenderer(): VfxRuntimeRenderer & { readonly submissions: string[] } {
+  const node = () => fakeKernelNode();
+  const adapterTarget = {
+    capabilities: {
+      atomics: true,
+      backend: 'webgpu' as const,
+      indirectDispatch: true,
+      indirectDraw: true,
+    },
+    instanceIndex: node(),
+    branch: (_condition: KernelNode, whenTrue: () => void) => whenTrue(),
+    constant: (value: unknown) => fakeKernelNode(value),
+    fn: (callback: () => void) => {
+      callback();
+      let compute: KernelComputeNode;
+      const target = {
+        name: '',
+        compute: () => compute,
+        computeKernel: () => compute,
+        setName(name: string) {
+          target.name = name;
+          return compute;
+        },
+      };
+      compute = target as unknown as KernelComputeNode;
+      return compute;
+    },
+    indirectArray: () => Object.assign(node(), { indirectResource: {} }),
+    instancedArray: node,
+    loop: (_parameters: unknown, callback: (index: KernelNode) => void) => callback(node()),
+    uniform: (value: unknown) => fakeKernelNode(value),
+  };
+  const adapter = new Proxy(adapterTarget, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return node;
+    },
+  }) as unknown as KernelTslAdapter;
+  const submissions: string[] = [];
+  const submitCompute = (kernel: KernelComputeNode) => {
+    submissions.push((kernel as unknown as { name: string }).name);
+  };
+  return {
+    kernelAdapter: adapter,
+    submissions,
+    submitCompute,
+    submitComputeIndirect: submitCompute,
   };
 }
 
@@ -412,6 +486,33 @@ describe('@nachi-vfx/timeline authoring', () => {
 });
 
 describe('@nachi-vfx/timeline runtime', () => {
+  it('shares the fixed-step epsilon validation at the timeline system boundary', () => {
+    for (const stepSeconds of [0, 1e-12, 1e-10]) {
+      expect(
+        () =>
+          new VFXSystem({}, undefined, {
+            fixedTimeStep: { stepSeconds },
+          }),
+      ).toThrowError('stepSeconds must be greater than 1e-10 seconds.');
+    }
+    expect(
+      new VFXSystem({}, undefined, {
+        fixedTimeStep: { stepSeconds: 1.000_001e-10 },
+      }).fixedStepDroppedSeconds,
+    ).toBe(0);
+    expect(
+      () =>
+        new VFXSystem({}, undefined, {
+          fixedTimeStep: { maxSubSteps: 2, stepSeconds: Number.MAX_VALUE },
+        }),
+    ).toThrowError('stepSeconds * maxSubSteps must be a finite number.');
+    expect(
+      new VFXSystem({}, undefined, {
+        fixedTimeStep: { maxSubSteps: 2, stepSeconds: Number.MAX_VALUE / 2 },
+      }).fixedStepDroppedSeconds,
+    ).toBe(0);
+  });
+
   it('returns an error instance when an implicit timeline targets an unsupported element', () => {
     const effect = defineCoreEffect({
       elements: {
@@ -1056,6 +1157,149 @@ describe('@nachi-vfx/timeline runtime', () => {
     expect(system.measuredDeltaDroppedSeconds).toBeCloseTo(0.75);
     expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.85);
     expect(system.droppedSeconds).toBeCloseTo(1.6);
+  });
+
+  it('latches core transform history after a timeline-owned fixed-step drop and before retained steps', async () => {
+    const events: string[] = [];
+    const renderer = fakeRuntimeRenderer();
+    const originalDiscard = CoreVFXSystem.prototype.discardTransformBacklog;
+    const discardSpy = vi
+      .spyOn(CoreVFXSystem.prototype, 'discardTransformBacklog')
+      .mockImplementation(function (this: CoreVFXSystem) {
+        events.push('discard');
+        originalDiscard.call(this);
+      });
+    try {
+      let position: readonly [number, number, number] = [0, 0, 0];
+      const system = new VFXSystem(renderer, undefined, {
+        fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+      });
+      const child = defineEmitter({
+        capacity: 32,
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn: perDistance({ rate: 2 }),
+      });
+      const instance = system.spawn(
+        defineEffect({
+          elements: { child },
+          timeline: timeline([at(0, play('child'))], { duration: 3 }),
+        }),
+      );
+      instance.attachTo({
+        getWorldTransform: () => {
+          events.push('sync');
+          return { position };
+        },
+      });
+      await system.update(0);
+
+      position = [10, 0, 0];
+      await system.update(0.05);
+      expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+      events.length = 0;
+      await system.update(0.95);
+
+      expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.8);
+      expect(system.time).toBeCloseTo(0.2);
+      expect(discardSpy).toHaveBeenCalledTimes(1);
+      expect(events.slice(0, 2)).toEqual(['sync', 'discard']);
+      const uniforms = instance.getEmitter('child')!.kernels.uniforms;
+      expect(uniforms['Emitter.previousTransform']?.value).toEqual(
+        uniforms['Emitter.transform']?.value,
+      );
+      expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+
+      position = [11, 0, 0];
+      await system.update(0.1);
+      expect(uniforms['Emitter.spawnCount']?.value).toBe(2);
+      expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
+    } finally {
+      discardSpy.mockRestore();
+    }
+  });
+
+  it('latches every timeline-owned drop after the cumulative counter reaches 2**53', async () => {
+    const renderer = fakeRuntimeRenderer();
+    const discardSpy = vi.spyOn(CoreVFXSystem.prototype, 'discardTransformBacklog');
+    try {
+      let position: readonly [number, number, number] = [0, 0, 0];
+      const system = new VFXSystem(renderer, undefined, {
+        fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+      });
+      const child = defineEmitter({
+        capacity: 32,
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn: perDistance({ rate: 2 }),
+      });
+      const instance = system.spawn(
+        defineEffect({
+          elements: { child },
+          timeline: timeline([at(0, play('child'))], { duration: 3 }),
+        }),
+      );
+      instance.attachTo({ getWorldTransform: () => ({ position }) });
+      await system.update(0);
+
+      await system.update(2 ** 53);
+      expect(system.fixedStepDroppedSeconds).toBe(2 ** 53);
+      expect(discardSpy).toHaveBeenCalledTimes(1);
+
+      position = [10, 0, 0];
+      await system.update(0.05);
+      await system.update(1);
+      expect(system.fixedStepDroppedSeconds).toBe(2 ** 53);
+      expect(discardSpy).toHaveBeenCalledTimes(2);
+      expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+
+      position = [11, 0, 0];
+      await system.update(0.1);
+      expect(instance.getEmitter('child')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(2);
+    } finally {
+      discardSpy.mockRestore();
+    }
+  });
+
+  it('latches an overflow-safe huge timeline drop after retaining a partial frame', async () => {
+    const stepSeconds = Number.MAX_VALUE / 2;
+    const partial = Number.MAX_VALUE / 4;
+    const renderer = fakeRuntimeRenderer();
+    const discardSpy = vi.spyOn(CoreVFXSystem.prototype, 'discardTransformBacklog');
+    try {
+      let position: readonly [number, number, number] = [0, 0, 0];
+      const system = new VFXSystem(renderer, undefined, {
+        fixedTimeStep: { maxSubSteps: 2, stepSeconds },
+      });
+      const child = defineEmitter({
+        capacity: 32,
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn: perDistance({ rate: 2 }),
+      });
+      const instance = system.spawn(
+        defineEffect({
+          elements: { child },
+          timeline: timeline([at(0, play('child'))], { duration: Number.MAX_VALUE }),
+        }),
+      );
+      instance.attachTo({ getWorldTransform: () => ({ position }) });
+      await system.update(0);
+
+      position = [10, 0, 0];
+      await system.update(partial);
+      expect(system.time).toBe(0);
+      await system.update(Number.MAX_VALUE);
+
+      const expectedDrop = Number.MAX_VALUE - (Number.MAX_VALUE - partial);
+      expect(system.fixedStepDroppedSeconds).toBe(expectedDrop);
+      expect(Number.isFinite(system.fixedStepDroppedSeconds)).toBe(true);
+      expect(system.time).toBe(Number.MAX_VALUE);
+      expect(discardSpy).toHaveBeenCalledTimes(1);
+      expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+    } finally {
+      discardSpy.mockRestore();
+    }
   });
 
   it('measures concurrent omitted calls at invocation time and leaves explicit calls clock-neutral', async () => {

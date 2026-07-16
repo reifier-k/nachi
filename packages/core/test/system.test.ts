@@ -1691,6 +1691,71 @@ describe('fixed timestep accumulator', () => {
     const fixed = new FixedStepAccumulator({ maxSubSteps: 2, stepSeconds: 0.1 });
     expect(fixed.advance(1)).toEqual([0.1, 0.1]);
     expect(fixed.droppedSeconds).toBeCloseTo(0.8);
+    expect(fixed.lastAdvanceDroppedSeconds).toBeCloseTo(0.8);
+  });
+
+  it('reports each advance drop after the cumulative counter loses precision or reaches infinity', () => {
+    const saturated = new FixedStepAccumulator({ maxSubSteps: 2, stepSeconds: 0.1 });
+    saturated.advance(2 ** 53);
+    expect(saturated.droppedSeconds).toBe(2 ** 53);
+    saturated.advance(1);
+    expect(saturated.droppedSeconds).toBe(2 ** 53);
+    expect(saturated.lastAdvanceDroppedSeconds).toBeCloseTo(0.8);
+    saturated.advance(0);
+    expect(saturated.lastAdvanceDroppedSeconds).toBe(0);
+
+    const infinite = new FixedStepAccumulator({ maxSubSteps: 2, stepSeconds: 0.1 });
+    infinite.advance(Number.MAX_VALUE);
+    infinite.advance(Number.MAX_VALUE);
+    expect(infinite.droppedSeconds).toBe(Number.POSITIVE_INFINITY);
+    infinite.advance(1);
+    expect(infinite.droppedSeconds).toBe(Number.POSITIVE_INFINITY);
+    expect(infinite.lastAdvanceDroppedSeconds).toBeCloseTo(0.8);
+  });
+
+  it('rejects fixed steps at or below the scheduler epsilon', () => {
+    for (const stepSeconds of [0, 1e-12, 1e-10]) {
+      expect(() => new FixedStepAccumulator({ stepSeconds })).toThrowError(
+        'stepSeconds must be greater than 1e-10 seconds.',
+      );
+    }
+    expect(new FixedStepAccumulator({ stepSeconds: 1.000_001e-10 }).advance(0)).toEqual([]);
+  });
+
+  it('rejects an infinite fixed-step ceiling and accepts the maximum finite product', () => {
+    expect(
+      () =>
+        new FixedStepAccumulator({
+          maxSubSteps: 2,
+          stepSeconds: Number.MAX_VALUE,
+        }),
+    ).toThrowError('stepSeconds * maxSubSteps must be a finite number.');
+    expect(
+      new FixedStepAccumulator({
+        maxSubSteps: 2,
+        stepSeconds: Number.MAX_VALUE / 2,
+      }).stepSeconds,
+    ).toBe(Number.MAX_VALUE / 2);
+  });
+
+  it('retains and drops a huge delta without overflowing a finite ceiling calculation', () => {
+    const stepSeconds = Number.MAX_VALUE / 2;
+    const partial = Number.MAX_VALUE / 4;
+    const fixed = new FixedStepAccumulator({ maxSubSteps: 2, stepSeconds });
+    expect(fixed.advance(partial)).toEqual([]);
+    expect(fixed.accumulator).toBe(partial);
+
+    const expectedDrop = Number.MAX_VALUE - (Number.MAX_VALUE - partial);
+    expect(fixed.advance(Number.MAX_VALUE)).toEqual([stepSeconds, stepSeconds]);
+    expect(fixed.accumulator).toBe(0);
+    expect(fixed.lastAdvanceDroppedSeconds).toBe(expectedDrop);
+    expect(fixed.droppedSeconds).toBe(expectedDrop);
+    expect(Number.isFinite(fixed.lastAdvanceDroppedSeconds)).toBe(true);
+    expect(Number.isNaN(fixed.droppedSeconds)).toBe(false);
+
+    fixed.advance(0);
+    expect(fixed.lastAdvanceDroppedSeconds).toBe(0);
+    expect(Number.isNaN(fixed.droppedSeconds)).toBe(false);
   });
 });
 
@@ -1790,6 +1855,33 @@ describe('emitter lifecycle state machine', () => {
 });
 
 describe('VFXSystem runtime scheduler', () => {
+  it('shares the fixed-step epsilon validation at the core system boundary', () => {
+    for (const stepSeconds of [0, 1e-12, 1e-10]) {
+      expect(
+        () =>
+          new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+            fixedTimeStep: { stepSeconds },
+          }),
+      ).toThrowError('stepSeconds must be greater than 1e-10 seconds.');
+    }
+    expect(
+      new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+        fixedTimeStep: { stepSeconds: 1.000_001e-10 },
+      }).usesFixedTimeStep,
+    ).toBe(true);
+    expect(
+      () =>
+        new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+          fixedTimeStep: { maxSubSteps: 2, stepSeconds: Number.MAX_VALUE },
+        }),
+    ).toThrowError('stepSeconds * maxSubSteps must be a finite number.');
+    expect(
+      new VFXSystem(new FakeRuntimeRenderer(), undefined, {
+        fixedTimeStep: { maxSubSteps: 2, stepSeconds: Number.MAX_VALUE / 2 },
+      }).usesFixedTimeStep,
+    ).toBe(true);
+  });
+
   it('reports spawn-time build diagnostics to the default console handler one line at a time', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -3680,6 +3772,212 @@ describe('VFXSystem runtime scheduler', () => {
     expect(
       instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnPhaseStep']?.value,
     ).toBeCloseTo(0.1);
+  });
+
+  it('discards an unsimulated per-distance transform backlog at a fixed-step drop', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+    });
+    const emitter = defineEmitter({
+      capacity: 32,
+      integration: 'none',
+      render: computeRender,
+      spawn: perDistance({ rate: 2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+
+    instance.setTransform([10, 0, 0], [0, 0, Math.PI / 2]);
+    await system.update(0.05);
+    expect(system.time).toBe(0);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+
+    await system.update(0.95);
+    expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.8);
+    expect(instance.localTime).toBeCloseTo(0.2);
+    const uniforms = instance.getEmitter('particles')!.kernels.uniforms;
+    expect(uniforms['Emitter.previousTransform']?.value).toEqual(
+      uniforms['Emitter.transform']?.value,
+    );
+    expect(uniforms['Emitter.previousRotation']?.value).toEqual(
+      uniforms['Emitter.rotation']?.value,
+    );
+    expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+
+    instance.setTransform([11, 0, 0], [0, 0, Math.PI / 2]);
+    await system.update(0.1);
+    expect(uniforms['Emitter.spawnCount']?.value).toBe(2);
+    expect(uniforms['Emitter.spawnPhaseStart']?.value).toBeCloseTo(0.5);
+    expect(uniforms['Emitter.spawnPhaseStep']?.value).toBeCloseTo(0.5);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
+  });
+
+  it('latches every new drop after the cumulative drop counter reaches 2**53', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+    });
+    const discardSpy = vi.spyOn(system, 'discardTransformBacklog');
+    const emitter = defineEmitter({
+      capacity: 32,
+      integration: 'none',
+      render: computeRender,
+      spawn: perDistance({ rate: 2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+
+    await system.update(2 ** 53);
+    expect(system.fixedStepDroppedSeconds).toBe(2 ** 53);
+    expect(discardSpy).toHaveBeenCalledTimes(1);
+
+    instance.setTransform([10, 0, 0]);
+    await system.update(0.05);
+    await system.update(1);
+    expect(system.fixedStepDroppedSeconds).toBe(2 ** 53);
+    expect(discardSpy).toHaveBeenCalledTimes(2);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+
+    instance.setTransform([11, 0, 0]);
+    await system.update(0.1);
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(2);
+  });
+
+  it('latches an overflow-safe huge finite drop after retaining a partial frame', async () => {
+    const stepSeconds = Number.MAX_VALUE / 2;
+    const partial = Number.MAX_VALUE / 4;
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { maxSubSteps: 2, stepSeconds },
+    });
+    const discardSpy = vi.spyOn(system, 'discardTransformBacklog');
+    const emitter = defineEmitter({
+      capacity: 32,
+      integration: 'none',
+      render: computeRender,
+      spawn: perDistance({ rate: 2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+
+    instance.setTransform([10, 0, 0]);
+    await system.update(partial);
+    expect(system.time).toBe(0);
+    await system.update(Number.MAX_VALUE);
+
+    const expectedDrop = Number.MAX_VALUE - (Number.MAX_VALUE - partial);
+    expect(system.fixedStepDroppedSeconds).toBe(expectedDrop);
+    expect(Number.isFinite(system.fixedStepDroppedSeconds)).toBe(true);
+    expect(system.time).toBe(Number.MAX_VALUE);
+    expect(discardSpy).toHaveBeenCalledTimes(1);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
+  });
+
+  it('fault-isolates fixed-step transform latching from the unchanged time-drop accumulator', async () => {
+    const latchFault = vi
+      .spyOn(VFXSystem.prototype, 'discardTransformBacklog')
+      .mockImplementation(() => undefined);
+    try {
+      const renderer = new FakeRuntimeRenderer();
+      const system = new VFXSystem(renderer, undefined, {
+        fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+      });
+      const emitter = defineEmitter({
+        capacity: 32,
+        integration: 'none',
+        render: computeRender,
+        spawn: perDistance({ rate: 2 }),
+      });
+      const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+      await system.update(0);
+      instance.setTransform([10, 0, 0]);
+      await system.update(0.05);
+      await system.update(0.95);
+
+      expect(latchFault).toHaveBeenCalledTimes(1);
+      expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.8);
+      expect(instance.localTime).toBeCloseTo(0.2);
+      expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(
+        20,
+      );
+      expect(
+        instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnPhaseStart']?.value,
+      ).toBeCloseTo(0.05);
+      expect(
+        instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnPhaseStep']?.value,
+      ).toBeCloseTo(0.05);
+    } finally {
+      latchFault.mockRestore();
+    }
+  });
+
+  it('keeps an unsimulated distance chord when fixed-step backlog reaches but does not exceed the ceiling', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+    });
+    const emitter = defineEmitter({
+      capacity: 8,
+      integration: 'none',
+      render: computeRender,
+      spawn: perDistance({ rate: 2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+
+    instance.setTransform([1, 0, 0]);
+    await system.update(0.05);
+    await system.update(0.15);
+
+    expect(system.fixedStepDroppedSeconds).toBe(0);
+    expect(instance.localTime).toBeCloseTo(0.2);
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(2);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(1);
+  });
+
+  it('keeps time-rate spawning on retained fixed substeps when a transform backlog is discarded', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer, undefined, {
+      fixedTimeStep: { maxSubSteps: 2, stepSeconds: 0.1 },
+    });
+    const emitter = defineEmitter({
+      capacity: 8,
+      integration: 'none',
+      render: computeRender,
+      spawn: rate({ rate: 10 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+    instance.setTransform([10, 0, 0]);
+    await system.update(0.05);
+    await system.update(0.95);
+
+    expect(system.fixedStepDroppedSeconds).toBeCloseTo(0.8);
+    expect(instance.localTime).toBeCloseTo(0.2);
+    expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.spawnCount']?.value).toBe(1);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(2);
+  });
+
+  it('lets an outer scheduler explicitly discard a transform backlog without advancing time', async () => {
+    const renderer = new FakeRuntimeRenderer();
+    const system = new VFXSystem(renderer);
+    const emitter = defineEmitter({
+      capacity: 8,
+      integration: 'none',
+      render: computeRender,
+      spawn: perDistance({ rate: 2 }),
+    });
+    const instance = system.spawn(defineEffect({ elements: { particles: emitter } }));
+    await system.update(0);
+    instance.setTransform([5, 0, 0]);
+
+    system.discardTransformBacklog();
+    await system.update(0.1);
+
+    expect(system.time).toBeCloseTo(0.1);
+    expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(0);
   });
 
   it('discards distance accumulated before delayed activation', async () => {

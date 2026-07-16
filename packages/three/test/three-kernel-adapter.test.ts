@@ -823,6 +823,10 @@ describe('three kernel adapter', () => {
     values[1] = 3;
     const write = (slot: number, physicalIndex: number, spawnOrder: number) => {
       const base = (1 + slot * 3) * 4;
+      values[base] = physicalIndex;
+      values[base + 4] = slot + 0.25;
+      values[base + 5] = slot + 0.5;
+      values[base + 6] = slot + 0.75;
       values[base + 3] = 4;
       values[base + 7] = 4;
       values[base + 8] = 1;
@@ -839,11 +843,22 @@ describe('three kernel adapter', () => {
     } as unknown as THREE.WebGPURenderer;
 
     await draw.update(renderer);
+    const corrected = draw.lights[0]!;
+    corrected.visible = false;
+    corrected.intensity = 99;
+    corrected.distance = 99;
+    corrected.position.set(99, 99, 99);
+    corrected.color.setRGB(1, 1, 1);
     const stats = await draw.update(renderer);
 
     expect(stats.candidateCount).toBe(3);
     expect(stats.selected.map(({ spawnOrder }) => spawnOrder)).toEqual([9, 100]);
     expect(stats.selected.map(({ physicalIndex }) => physicalIndex)).toEqual([7, 1]);
+    expect(corrected.visible).toBe(true);
+    expect(corrected.intensity).toBe(4);
+    expect(corrected.distance).toBe(1);
+    expect(corrected.position.toArray()).toEqual([7, 0, 0]);
+    expect(corrected.color.toArray()).toEqual([1.25, 1.5, 1.75]);
   });
 
   it('rebinds prepared light-limit diagnostics to the live owner without duplicate delivery', async () => {
@@ -1160,10 +1175,12 @@ describe('three kernel adapter', () => {
     const socket = new THREE.Object3D();
     parent.add(socket);
     parent.position.set(1, 2, 3);
+    parent.scale.setScalar(2);
     socket.position.set(0, 0.5, 0);
     const transform = createThreeTransformSource(socket).getWorldTransform();
-    expect(transform.position).toEqual([1, 2.5, 3]);
+    expect(transform.position).toEqual([1, 3, 3]);
     expect(transform.rotation).toHaveLength(4);
+    expect(transform).not.toHaveProperty('scale');
   });
 
   it('advertises scene-depth compute support only when an explicit depth copy is bound', () => {

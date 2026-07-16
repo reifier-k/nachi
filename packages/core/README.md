@@ -24,6 +24,16 @@ quality and significance controls, simulation bake/replay, debug snapshots, Grid
 grids, boids, and PBD constraints. Backend capability failures are explicit diagnostics; core does
 not silently replace WebGPU behavior with CPU simulation.
 
+Debug attribute snapshots preserve backend compaction order by default. Pass
+`{ order: 'physical-slot', offset, limit }` to sort the full alive membership before pagination when
+you need pages independent of compaction order for the same physical membership; each row's
+`aliveIndex` still identifies its original compact membership index. This is physical identity, not
+persistent lineage, and does not promise identical slot allocation between backends. Only omission
+or `undefined` selects the default order; `null` and other non-enum values are invalid. Capture
+rejects a returned compaction row whose physical slot is outside capacity with
+`NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE`; physical-slot order validates the full membership before
+sorting and pagination.
+
 ## Input validation
 
 Built-in module factories reject malformed ordinary `ValueInput` constants, ranges, parameter
@@ -100,7 +110,12 @@ The cumulative `measuredDeltaDroppedSeconds`, `fixedStepDroppedSeconds`, and `dr
 getters expose the measured discard, the existing fixed-step backlog discard, and their sum. The
 measured cap runs before fixed partitioning, so the components do not double-count. See
 [RFC 001](../../docs/rfc/001-api.md) for queue ordering, mixed explicit/measured calls, and clock
-validation.
+validation. `fixedTimeStep.stepSeconds` must be strictly greater than `1e-10` seconds; `0`, `1e-12`,
+and `1e-10` throw `RangeError: stepSeconds must be greater than 1e-10 seconds.` The product
+`stepSeconds * maxSubSteps` must also remain finite or construction throws
+`RangeError: stepSeconds * maxSubSteps must be a finite number.` Fixed accumulation computes retained
+time from the finite remaining capacity, so adding a huge finite delta cannot turn the frame-local
+drop or accumulator into `NaN`; only the cumulative drop may eventually overflow to `Infinity`.
 
 ## Coordinate-space selectors
 

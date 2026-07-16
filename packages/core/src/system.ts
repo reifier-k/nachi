@@ -191,6 +191,7 @@ export interface VfxPrepareOptions<ObjectType = never> {
 
 export interface VfxFixedTimeStepOptions {
   readonly maxSubSteps?: number;
+  /** Must exceed 1e-10 seconds and produce a finite product with maxSubSteps. */
   readonly stepSeconds: number;
 }
 
@@ -592,13 +593,21 @@ export class FixedStepAccumulator {
   readonly stepSeconds: number;
   #accumulator = 0;
   #droppedSeconds = 0;
+  #lastAdvanceDroppedSeconds = 0;
+  readonly #maximum: number;
 
   constructor(options: VfxFixedTimeStepOptions) {
     this.stepSeconds = requireNonNegativeFinite(options.stepSeconds, 'stepSeconds');
-    if (this.stepSeconds === 0) throw new RangeError('stepSeconds must be greater than zero.');
+    if (this.stepSeconds <= TIME_EPSILON) {
+      throw new RangeError('stepSeconds must be greater than 1e-10 seconds.');
+    }
     this.maxSubSteps = options.maxSubSteps ?? DEFAULT_MAX_SUB_STEPS;
     if (!Number.isSafeInteger(this.maxSubSteps) || this.maxSubSteps <= 0) {
       throw new RangeError('maxSubSteps must be a positive safe integer.');
+    }
+    this.#maximum = this.stepSeconds * this.maxSubSteps;
+    if (!Number.isFinite(this.#maximum)) {
+      throw new RangeError('stepSeconds * maxSubSteps must be a finite number.');
     }
   }
 
@@ -610,12 +619,18 @@ export class FixedStepAccumulator {
     return this.#droppedSeconds;
   }
 
+  /** Seconds discarded by the most recent advance, independent of cumulative-counter precision. */
+  get lastAdvanceDroppedSeconds(): number {
+    return this.#lastAdvanceDroppedSeconds;
+  }
+
   advance(deltaSeconds: number): readonly number[] {
     requireNonNegativeFinite(deltaSeconds, 'deltaSeconds');
-    const maximum = this.stepSeconds * this.maxSubSteps;
-    const accumulated = this.#accumulator + deltaSeconds;
-    this.#droppedSeconds += Math.max(0, accumulated - maximum);
-    this.#accumulator = Math.min(accumulated, maximum);
+    const remainingCapacity = this.#maximum - this.#accumulator;
+    const retainedSeconds = Math.min(deltaSeconds, remainingCapacity);
+    this.#lastAdvanceDroppedSeconds = deltaSeconds - retainedSeconds;
+    this.#droppedSeconds += this.#lastAdvanceDroppedSeconds;
+    this.#accumulator = Math.min(this.#maximum, this.#accumulator + retainedSeconds);
     const stepCount = Math.min(
       Math.floor((this.#accumulator + TIME_EPSILON) / this.stepSeconds),
       this.maxSubSteps,
@@ -1591,6 +1606,10 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     this.#simulatedTransform = this.#transform;
   }
 
+  discardTransformBacklog(): void {
+    this.#resetTransformHistory();
+  }
+
   #resetTransformHistory(): void {
     this.#previousTransform = this.#transform;
     this.#simulatedTransform = this.#transform;
@@ -2204,6 +2223,7 @@ type ReleasableEffectInstance = {
 };
 
 type CaptureScheduler = <Value>(capture: () => Promise<Value> | Value) => Promise<Value>;
+const DISCARD_TRANSFORM_BACKLOG = Symbol('discardTransformBacklog');
 
 export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = RuntimeEffectDefinition>
   implements EffectInstance<Definition>
@@ -2614,6 +2634,10 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
 
   commitTransformStep(): void {
     for (const emitter of this.#emitters.values()) emitter.commitTransformStep();
+  }
+
+  [DISCARD_TRANSFORM_BACKLOG](): void {
+    for (const emitter of this.#emitters.values()) emitter.discardTransformBacklog();
   }
 
   on(event: string, callback: EffectEventCallback): () => void {
@@ -3545,6 +3569,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           );
         }
         const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
+        if (this.#fixedStep !== undefined && this.#fixedStep.lastAdvanceDroppedSeconds > 0) {
+          this.discardTransformBacklog();
+        }
         for (const step of steps) {
           this.#systemTime += step;
           const transformStep = step > TIME_EPSILON;
@@ -3590,6 +3617,11 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         backend,
       );
     });
+  }
+
+  /** @internal Latches current transforms after an outer scheduler discards a time backlog. */
+  discardTransformBacklog(): void {
+    for (const instance of this.#instances.values()) instance[DISCARD_TRANSFORM_BACKLOG]();
   }
 
   #scheduleCapture<Value>(capture: () => Promise<Value> | Value): Promise<Value> {

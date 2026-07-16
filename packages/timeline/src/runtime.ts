@@ -1420,8 +1420,12 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
         this.#advanceInstance(instance, () => instance.beginUpdate());
       }
       const steps = this.#fixedStep ? this.#fixedStep.advance(delta) : [delta];
+      const discardTransformBacklog =
+        this.#fixedStep !== undefined && this.#fixedStep.lastAdvanceDroppedSeconds > 0;
       if (delta === 0) await this.#core.update(0);
-      for (const step of steps) await this.#advanceStep(step);
+      for (let index = 0; index < steps.length; index += 1) {
+        await this.#advanceStep(steps[index]!, discardTransformBacklog && index === 0);
+      }
       this.#deleteReleasedInstances();
     };
     const scheduled = this.#updateQueue.then(run, run);
@@ -1450,7 +1454,7 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
     return delta;
   }
 
-  async #advanceStep(deltaSeconds: number): Promise<void> {
+  async #advanceStep(deltaSeconds: number, discardTransformBacklog = false): Promise<void> {
     let remaining = deltaSeconds;
     let iterations = 0;
     while (remaining > EPSILON) {
@@ -1477,6 +1481,10 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
       );
       for (const instance of activeInstances) {
         this.#advanceInstance(instance, () => instance.syncAttachment());
+      }
+      if (discardTransformBacklog) {
+        this.#core.discardTransformBacklog();
+        discardTransformBacklog = false;
       }
       const healthyInstances = activeInstances.filter((instance) => instance.state === 'active');
       const boundary = Math.min(

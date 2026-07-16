@@ -34,6 +34,16 @@ Timeline owns this measurement and its optional fixed-step accumulator, then sen
 loop/mesh/VAT boundary segments to core. Its cumulative `measuredDeltaDroppedSeconds`,
 `fixedStepDroppedSeconds`, and `droppedSeconds` getters therefore report each discard once. See
 [RFC 001](../../docs/rfc/001-api.md) for clock mixing and FIFO invocation semantics.
+Like core, timeline requires `fixedTimeStep.stepSeconds` to be strictly greater than `1e-10`
+seconds; smaller values conflict with scheduler boundary precision and synchronously throw
+`RangeError: stepSeconds must be greater than 1e-10 seconds.`
+The shared accumulator also requires a finite `stepSeconds * maxSubSteps` ceiling and throws
+`RangeError: stepSeconds * maxSubSteps must be a finite number.` Timeline therefore inherits core's
+overflow-safe retained/drop accounting for huge finite deltas.
+If `maxSubSteps` drops backlog, timeline samples the current attachment, latches that transform in
+core, and only then submits retained boundary segments. Per-distance children therefore discard the
+same dropped-time movement as a core-owned fixed-step system; rate children still advance on every
+retained segment.
 
 Timeline accepts core's `onRuntimeDiagnostic` option. Omission reports timeline-owned validation,
 action/callback, attachment/update, boundary, companion, cleanup, and mesh-preparation diagnostics

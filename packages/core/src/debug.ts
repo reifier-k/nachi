@@ -108,7 +108,11 @@ function runtimeDiagnostic(
 function validateCaptureOptions(
   options: CaptureAttributesOptions | undefined,
   attributes: readonly ResolvedAttribute[],
-): { readonly limit: number | undefined; readonly offset: number } {
+): {
+  readonly limit: number | undefined;
+  readonly offset: number;
+  readonly order: NonNullable<CaptureAttributesOptions['order']>;
+} {
   const offset = options?.offset ?? 0;
   if (!Number.isSafeInteger(offset) || offset < 0) {
     throw new VfxDiagnosticError([
@@ -129,6 +133,16 @@ function validateCaptureOptions(
       ),
     ]);
   }
+  const order = options?.order === undefined ? 'compaction' : options.order;
+  if (order !== 'compaction' && order !== 'physical-slot') {
+    throw new VfxDiagnosticError([
+      runtimeDiagnostic(
+        'NACHI_DEBUG_ATTRIBUTE_ORDER_INVALID',
+        'Attribute capture order must be "compaction" or "physical-slot".',
+        'options.order',
+      ),
+    ]);
+  }
   const known = new Set(attributes.map(({ name }) => name));
   const unknown = options?.attributes?.filter((name) => !known.has(name)) ?? [];
   if (unknown.length > 0) {
@@ -142,7 +156,7 @@ function validateCaptureOptions(
       ),
     );
   }
-  return { limit, offset };
+  return { limit, offset, order };
 }
 
 function rowValue(
@@ -158,9 +172,20 @@ function rowValue(
   return Array.from(values.subarray(start, start + attribute.components));
 }
 
+function validatePhysicalSlot(physicalSlot: number, aliveIndex: number, capacity: number): void {
+  if (physicalSlot >= 0 && physicalSlot < capacity) return;
+  throw new VfxDiagnosticError([
+    runtimeDiagnostic(
+      'NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE',
+      `Alive membership physical slot ${physicalSlot} at compact index ${aliveIndex} must be less than capacity ${capacity}.`,
+      `aliveIndices.${aliveIndex}`,
+    ),
+  ]);
+}
+
 /** Pure table formatter used by the GPU capture path and CPU-only regression tests. */
 export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): AttributeSnapshot {
-  const { limit, offset } = validateCaptureOptions(input.options, input.attributes);
+  const { limit, offset, order } = validateCaptureOptions(input.options, input.attributes);
   const selectedNames = input.options?.attributes;
   const attributesByName = new Map(
     input.attributes.map((attribute) => [attribute.name, attribute]),
@@ -175,6 +200,30 @@ export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): At
       : [],
   );
   const totalAlive = input.aliveIndices.length;
+  let orderedAliveEntries:
+    | Array<{ readonly aliveIndex: number; readonly physicalSlot: number }>
+    | undefined;
+  let duplicatePhysicalSlots: Set<number> | undefined;
+  if (order === 'physical-slot') {
+    for (let aliveIndex = 0; aliveIndex < input.aliveIndices.length; aliveIndex += 1) {
+      validatePhysicalSlot(input.aliveIndices[aliveIndex]!, aliveIndex, input.capacity);
+    }
+    orderedAliveEntries = Array.from(input.aliveIndices, (physicalSlot, aliveIndex) => ({
+      aliveIndex,
+      physicalSlot,
+    }));
+    orderedAliveEntries.sort(
+      (left, right) => left.physicalSlot - right.physicalSlot || left.aliveIndex - right.aliveIndex,
+    );
+    duplicatePhysicalSlots = new Set<number>();
+    for (let index = 1; index < orderedAliveEntries.length; index += 1) {
+      const previous = orderedAliveEntries[index - 1]!;
+      const current = orderedAliveEntries[index]!;
+      if (current.physicalSlot === previous.physicalSlot) {
+        duplicatePhysicalSlots.add(current.physicalSlot);
+      }
+    }
+  }
   const end = Math.min(totalAlive, limit === undefined ? totalAlive : offset + limit);
   const first = Math.min(offset, totalAlive);
   const rows: AttributeSnapshotRow[] = [];
@@ -182,8 +231,13 @@ export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): At
   const orderAttribute = attributesByName.get('spawnOrder');
   const generationValues = input.logicalValues.get('spawnGeneration');
   const orderValues = input.logicalValues.get('spawnOrder');
-  for (let aliveIndex = first; aliveIndex < end; aliveIndex += 1) {
-    const physicalSlot = input.aliveIndices[aliveIndex]!;
+  for (let rowIndex = first; rowIndex < end; rowIndex += 1) {
+    const ordered = orderedAliveEntries?.[rowIndex];
+    const aliveIndex = ordered?.aliveIndex ?? rowIndex;
+    const physicalSlot = ordered?.physicalSlot ?? input.aliveIndices[aliveIndex]!;
+    if (orderedAliveEntries === undefined) {
+      validatePhysicalSlot(physicalSlot, aliveIndex, input.capacity);
+    }
     const values = Object.fromEntries(
       selected.map((attribute) => {
         const logical = input.logicalValues.get(attribute.name);
@@ -208,6 +262,26 @@ export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): At
       ...(typeof order === 'number' ? { spawnOrder: order } : {}),
     });
   }
+  const diagnostics = [...aliasedNames].map((name) =>
+    runtimeDiagnostic(
+      'NACHI_DEBUG_WEBGL2_ATTRIBUTE_ALIASED',
+      `Logical attribute Particles.${name} aliases the corresponding packed group-0 component in the WebGL2 transform-feedback fallback.`,
+      `Particles.${name}`,
+      'warning',
+    ),
+  );
+  if (duplicatePhysicalSlots) {
+    for (const physicalSlot of duplicatePhysicalSlots) {
+      diagnostics.push(
+        runtimeDiagnostic(
+          'NACHI_DEBUG_DUPLICATE_PHYSICAL_SLOT',
+          `Alive membership contains duplicate physical slot ${physicalSlot}; stable ordering preserves duplicates and breaks ties by original compact index.`,
+          `aliveIndices.${physicalSlot}`,
+          'warning',
+        ),
+      );
+    }
+  }
   return {
     aliveCount: totalAlive,
     capacity: input.capacity,
@@ -217,14 +291,7 @@ export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): At
       logicalType,
       name,
     })),
-    diagnostics: [...aliasedNames].map((name) =>
-      runtimeDiagnostic(
-        'NACHI_DEBUG_WEBGL2_ATTRIBUTE_ALIASED',
-        `Logical attribute Particles.${name} aliases the corresponding packed group-0 component in the WebGL2 transform-feedback fallback.`,
-        `Particles.${name}`,
-        'warning',
-      ),
-    ),
+    diagnostics,
     emitterId: input.emitterId,
     latencyFrames: 1,
     rows,

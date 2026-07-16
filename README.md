@@ -134,8 +134,8 @@ materialization example is in [`@nachi-vfx/react`](./packages/react/README.md).
 `useEffectInstance()` is the hook form. Live `parameters`, transform, time scale, and attachment are
 forwarded to core; changing seed or priority creates a fresh instance. Keep `definition` at module
 scope (or otherwise referentially stable), because changing its reference respawns the instance.
-`attachTo` owns the complete live transform and overwrites spawn/prop position and rotation on each
-scheduled step.
+`attachTo` owns the complete v1 live position/rotation and overwrites spawn/prop values on each
+scheduled step. `EffectWorldTransform` has no scale; Three attachment world scale is not forwarded.
 
 ## Assets and advanced simulation
 
@@ -152,7 +152,12 @@ neighbor-grid declarations, built-in fluid stages, boids, and PBD constraints ar
 declarative model; inline custom grid/neighbor TSL remains code-only.
 
 Simulation caches use `bakeSimulation()` and `replaySimulation()`. Runtime debugging uses
-`instance.debug.captureAttributes()` and `system.debug.captureProfile()`.
+`instance.debug.captureAttributes()` and `system.debug.captureProfile()`. Attribute capture keeps
+backend compaction order by default; use `{ order: 'physical-slot', offset, limit }` for stable
+physical-identity pagination when comparing snapshots with the same slot membership. It removes
+compaction-order differences, not backend allocation differences; `aliveIndex` remains the original
+compact index. `order` defaults only when omitted or `undefined`; invalid values and out-of-capacity
+membership are structured diagnostics rather than rows containing fabricated zero attributes.
 
 Three draw objects are lifetime-bound to their emitter kernels. Reuse an existing materialized mesh
 or dispose/unmaterialize it before replacement; releasing an instance cleans registered draws before

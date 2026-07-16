@@ -73,6 +73,13 @@ helpers for matching core modules. Light materialization returns a bounded Point
 `update()` method is driven by the host. These APIs expose ordinary Three objects so scene
 ownership, render targets, cameras, and disposal remain explicit application responsibilities.
 
+`createThreeTransformSource(object)` adapts attachment world position and quaternion only, matching
+core's v1 `EffectWorldTransform`. It intentionally does not forward `object` world scale. A scaled
+parent can move a child's sampled world position, but attachment scale does not scale the emitter
+basis, emitter offset, per-distance units, particle sizes, grids, or colliders. Use authored particle
+size/geometry controls in v1; full transform scale and its interpolation/physics semantics are a v2
+residual, not an implicit Three-only behavior.
+
 Sprite, mesh, decal, and light materialization results expose `setUserVisible(visible)`. Final draw
 visibility is `runtimeVisible && userVisible`, where runtime visibility continues to own culling,
 completion, stop, and pooling transitions. The user component defaults to `true`, so existing hosts
@@ -81,6 +88,16 @@ visibility update overwrites that field. Use `setUserVisible(false)` for a persi
 `setUserVisible(true)` to return control to the current runtime state. Light draws apply the same
 contract to their returned `group` while keeping every pooled child PointLight shader-stably
 visible.
+
+The light pool also owns each child PointLight's selection-driven `visible`, `intensity` (and Three's
+derived `power`), `distance`, `position`, and `color`. Every successful selection readback forces
+`visible = true`, writes intensity/distance or zero for inactive slots, and overwrites position/color
+when a slot receives a selected particle. Direct edits to those properties may remain visible only
+until the next readback application and are not persistent correction controls. The pool group uses
+the separate `setUserVisible()` composition above. V1 has no equivalent composition API for child
+light values; a v2 candidate is a persistent base-plus-user modifier object for intensity scale,
+distance scale, position offset, and color multiplier, following `setRenderOrderBase()` ownership
+rather than making direct Three property writes authoritative.
 
 Sprite, mesh, and decal draws also expose `setRenderOrderBase(base)`. The adapter composes that
 persistent host base with the renderer-v2 module's signed `renderOrderOffset` and core's fractional

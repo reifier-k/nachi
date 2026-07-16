@@ -1095,13 +1095,16 @@ export type EffectEventCallback = (summary: EffectEventSummary) => void;
 
 export type DebugAttributeScalar = boolean | number;
 export type DebugAttributeValue = DebugAttributeScalar | readonly number[];
+export type DebugAttributeOrder = 'compaction' | 'physical-slot';
 
 export interface CaptureAttributesOptions {
   /** Logical attribute names without the Particles. prefix. Omission captures the full schema. */
   readonly attributes?: readonly string[];
   /** Maximum rows returned after offset. Omission means every remaining alive particle. */
   readonly limit?: number;
-  /** Zero-based offset in compact alive order. Defaults to zero. */
+  /** Row order before pagination. `physical-slot` orders identities independently of compaction. */
+  readonly order?: DebugAttributeOrder;
+  /** Zero-based offset in the selected row order. Defaults to zero. */
   readonly offset?: number;
 }
 
@@ -1114,6 +1117,7 @@ export interface AttributeSnapshotColumn {
 }
 
 export interface AttributeSnapshotRow {
+  /** Original compact membership index, even when rows use physical-slot ordering. */
   readonly aliveIndex: number;
   readonly attributes: Readonly<Record<string, DebugAttributeValue>>;
   readonly physicalSlot: number;
