@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/trails",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "GPU ribbon and trail renderer integration for nachi",
   "keywords": [
     "three.js",

@@ -1,5 +1,15 @@
 # @nachi-vfx/post
 
+## 0.2.3
+
+### Patch Changes
+
+- 47eeb84: Documentation-only release. Add the effect authoring guide and Agent Skills-format skill
+  (`skills/nachi-effect-authoring`: bootstrap recipe, full module catalog, and scale-based
+  skill-effect production recipes), installable into consuming projects via
+  `npx skills add reifier-k/nachi --skill nachi-effect-authoring`. README (EN/JA) and the
+  development guide link the guide. No functional changes.
+
 ## 0.2.2
 
 ## 0.2.1
