@@ -14,4 +14,4 @@ export {
   type LoadedEffectDefinition,
 } from './types.js';
 
-export const VERSION = '0.2.1' as const;
+export const VERSION = '0.2.2' as const;

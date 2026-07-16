@@ -1,5 +1,11 @@
 # @nachi-vfx/react
 
+## 0.2.2
+
+### Patch Changes
+
+- @nachi-vfx/core@0.2.2
+
 ## 0.2.1
 
 ### Patch Changes

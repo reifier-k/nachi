@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/timeline",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Deterministic effect-local sequencing, hit stop, camera shake, and mesh-fx composition for nachi",
   "keywords": [
     "three.js",

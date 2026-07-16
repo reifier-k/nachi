@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/mesh-fx",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Procedural Three.js VFX meshes and declarative NodeMaterial composition",
   "keywords": [
     "three.js",
