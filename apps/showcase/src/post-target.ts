@@ -57,13 +57,15 @@ function projectCurrentWorldTarget(
     .set(worldTarget[0], worldTarget[1], worldTarget[2])
     .applyMatrix4(camera.matrixWorldInverse);
   projectedTarget.set(worldTarget[0], worldTarget[1], worldTarget[2]).project(camera);
-  center[0] = 0.5 + projectedTarget.x * 0.5;
-  center[1] = 0.5 - projectedTarget.y * 0.5;
+  const projectedX = 0.5 + projectedTarget.x * 0.5;
+  const projectedY = 0.5 - projectedTarget.y * 0.5;
   const depth = -cameraSpaceTarget.z;
+  if (!Number.isFinite(projectedX) || !Number.isFinite(projectedY) || !Number.isFinite(depth)) {
+    return false;
+  }
+  center[0] = projectedX;
+  center[1] = projectedY;
   return (
-    Number.isFinite(center[0]) &&
-    Number.isFinite(center[1]) &&
-    Number.isFinite(depth) &&
     depth >= camera.near &&
     depth <= camera.far &&
     center[0] >= 0 &&

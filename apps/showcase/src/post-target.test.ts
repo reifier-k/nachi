@@ -61,6 +61,23 @@ describe('showcase world shockwave projection', () => {
     expect(setShockwave.mock.calls[2]?.[1].center.every(Number.isFinite)).toBe(true);
   });
 
+  it('keeps the last finite center when a target reaches the camera plane', () => {
+    const view = camera();
+    const binding = worldShockwave(view, [0, 0, 0], SOURCE);
+    const previousCenter = [...binding.source.center];
+    const setShockwave = vi.fn();
+
+    view.position.set(0, 0, 0);
+    view.lookAt(0, 0, -1);
+    updateWorldShockwaves(view, { setShockwave }, [binding]);
+
+    expect(setShockwave).toHaveBeenCalledWith(
+      0,
+      expect.objectContaining({ center: previousCenter, enabled: 0 }),
+    );
+    expect(setShockwave.mock.lastCall?.[1].center.every(Number.isFinite)).toBe(true);
+  });
+
   it('does not rewrite post controls while a fixed projection is unchanged', () => {
     const view = camera();
     const binding = worldShockwave(view, [0, 0, 0], SOURCE);

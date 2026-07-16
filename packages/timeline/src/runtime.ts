@@ -760,6 +760,11 @@ export class TimelineEffectInstance<Definition extends RuntimeDefinition = Runti
   /** Persists a user visibility override across mesh-fx lifecycle and replay transitions. */
   setUserVisible(key: TimelineMeshFxElementKey<Definition>, visible: boolean): void {
     this.#assertNotReleased();
+    if (this.#state === 'error') {
+      throw new RangeError(
+        'Timeline mesh-fx visibility is unavailable while the instance is in the error or released state.',
+      );
+    }
     if (typeof visible !== 'boolean') {
       throw new TypeError('Timeline mesh-fx visibility must be a boolean.');
     }

@@ -89,6 +89,10 @@ node tools/scan-input-validation-sites.mjs
 | runtime mutation | 224 | 32 | property call `.spawn()` / `.setTransform()` / `.attachTo()` |
 | diagnostic opt-out | 16 | 8 | `onBuildDiagnostic: null` 6式/4 files + `onRuntimeDiagnostic: null` 10式/5 files |
 
+上表の`553 / 163 / 224`はcommit `f9e8f1d`時点の再現snapshotである。現HEAD (`db962e3`)で同じ
+scannerを再実行した値は`555 / 164 / 225`で、H2-14が追加したfactory、直接constructor、runtime mutationの
+validation call siteがそれぞれ2件 / 1件 / 1件増えた差分による。履歴証拠と現行棚卸しを混同しない。
+
 対象rootはscript内に固定した`apps/playground/src`、`apps/showcase/src`、core/format/post/trails/mesh-fx/
 timelineの各`packages/*/src`である。review修正によるopt-out追加は0件。canonical browser走査で新warningが
 顕在化した`m10-sort`のdecal manifest/quality fixtureは診断opt-outを追加せず、`lifetime(1)`を所有させた。

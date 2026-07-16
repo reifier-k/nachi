@@ -10,3 +10,7 @@ selection statistics expose that spawn order. These changes affect exact ties an
 or light winner selection while keeping public effect IDs compatible. The coarse-sort helper uses
 numeric sequence ties only when every entry provides a safe integer, otherwise preserving its
 stable-key ordering for the whole collection.
+
+Compile historical five-read light-renderer manifests with the current `spawnOrder` dependency so
+old effect JSON materializes the same deterministic light schema and draw instead of silently
+dropping it.

@@ -2831,7 +2831,7 @@ describe('VFXSystem runtime scheduler', () => {
     expect(system.getPooledInstanceCount(stopped.definition)).toBe(1);
   });
 
-  it('delivers release-time pool warnings and retains non-recursive handler failures', () => {
+  it('delivers release-time pool warnings without recording handler failures after release', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let handlerCalls = 0;
     try {
@@ -2852,13 +2852,9 @@ describe('VFXSystem runtime scheduler', () => {
       expect(overflow.state).toBe('released');
       expect(overflow.diagnostics.map(({ code }) => code)).toEqual([
         'NACHI_EFFECT_POOL_LIMIT_EXCEEDED',
-        'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
       ]);
       expect(handlerCalls).toBe(1);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining('[NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED]'),
-      );
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }
@@ -3584,6 +3580,17 @@ describe('VFXSystem runtime scheduler', () => {
         }),
       );
     }
+    const diagnosticsBeforeHandlerFailure = instance.diagnostics;
+    expect(
+      instance.recordRuntimeDiagnosticHandlerFailure({
+        code: 'NACHI_RUNTIME_DIAGNOSTIC_HANDLER_FAILED',
+        message: 'late handler failure',
+        path: 'VFXSystem.onRuntimeDiagnostic',
+        phase: 'runtime',
+        severity: 'warning',
+      }),
+    ).toBe(false);
+    expect(instance.diagnostics).toBe(diagnosticsBeforeHandlerFailure);
     expect(() => instance.release()).not.toThrow();
   });
 
@@ -3636,6 +3643,36 @@ describe('VFXSystem runtime scheduler', () => {
     );
     expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
     store.mockRestore();
+  });
+
+  it('does not let a preparation spawn consume late device-loss delivery', async () => {
+    let loseDevice!: (info: VfxDeviceLossInfo) => void;
+    const deviceLost = new Promise<VfxDeviceLossInfo>((resolve) => {
+      loseDevice = resolve;
+    });
+    const base = new FakeRuntimeRenderer();
+    const renderer: VfxRuntimeRenderer = {
+      deviceLost,
+      kernelAdapter: base.kernelAdapter,
+      submitCompute: (kernel) => base.submitCompute(kernel),
+    };
+    const delivered: string[] = [];
+    const system = new VFXSystem(renderer, undefined, {
+      onRuntimeDiagnostic: ({ code }) => delivered.push(code),
+    });
+    loseDevice({ reason: 'destroyed' });
+    await deviceLost;
+    await Promise.resolve();
+
+    await expect(system.prepare(runtimeEffect({ duration: 1 }))).rejects.toMatchObject({
+      diagnostics: [expect.objectContaining({ code: 'NACHI_DEVICE_LOST' })],
+    });
+    expect(delivered).toEqual([]);
+
+    const live = system.spawn(runtimeEffect({ duration: 1 }));
+    expect(live.state).toBe('error');
+    expect(live.diagnostics.map(({ code }) => code)).toEqual(['NACHI_DEVICE_LOST']);
+    expect(delivered).toEqual(['NACHI_DEVICE_LOST']);
   });
 
   it('latches zero-live device loss before the first late-spawn handler reentrantly spawns', async () => {
@@ -6543,6 +6580,22 @@ describe('M11 VFXSystem scalability scheduling', () => {
       definition,
       { compression: 'quantized-u16', frames: 1 },
     );
+    const birthOrderCache = await bakeSimulation(
+      new VFXSystem(new CacheRuntimeRenderer()),
+      defineEffect({
+        elements: {
+          particles: defineEmitter({
+            capacity: 4,
+            render: {
+              ...computeRender,
+              access: { reads: ['Particles.spawnOrder'], writes: [] },
+            },
+            spawn: burst({ count: 0 }),
+          }),
+        },
+      }),
+      { frames: 1 },
+    );
     const corrupt = (
       source: typeof floatCache,
       mutate: (metadata: typeof floatCache.metadata, data: ArrayBuffer) => void,
@@ -6552,6 +6605,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
       mutate(metadata, data);
       return { data, diagnostics: source.diagnostics, kind: 'simulation-cache' as const, metadata };
     };
+    let hostileSomeCalls = 0;
     const fixtures = [
       corrupt(floatCache, (metadata, data) => {
         Object.assign(metadata.emitters[0]!, { aliveCounts: [2] });
@@ -6601,6 +6655,17 @@ describe('M11 VFXSystem scalability scheduling', () => {
           minimum: quantization.minimum.map(() => 1),
         });
       }),
+      corrupt(birthOrderCache, (metadata) => {
+        Object.assign(metadata.emitters[0]!, {
+          nextSpawnOrders: {
+            length: 1,
+            some: () => {
+              hostileSomeCalls += 1;
+              return false;
+            },
+          },
+        });
+      }),
     ];
 
     for (const fixture of fixtures) {
@@ -6610,6 +6675,7 @@ describe('M11 VFXSystem scalability scheduling', () => {
         }),
       );
     }
+    expect(hostileSomeCalls).toBe(0);
   });
 
   it('rejects v1 and missing cache metadata before reading v2 lineage fields', async () => {

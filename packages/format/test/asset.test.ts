@@ -40,6 +40,7 @@ import {
   hitStop,
   lifetime,
   lightIntensity,
+  lightRenderer,
   linearForce,
   marker,
   meshRenderer,
@@ -470,6 +471,56 @@ describe('effect asset v2 and v1 compatibility', () => {
       (migrated.effect as { elements: { particles: { render: { version: number } } } }).elements
         .particles.render.version,
     ).toBe(1);
+  });
+
+  it('loads pre-H2-4 light manifests into the current schema and preserves format round-trips', () => {
+    const current = serializeEffect(
+      defineEffect({
+        elements: {
+          lights: defineEmitter({
+            capacity: 4,
+            integration: 'none',
+            render: lightRenderer({ maxLights: 2 }),
+            spawn: burst({ count: 1 }),
+          }),
+        },
+      }),
+    );
+    const legacy = structuredClone(current) as unknown as {
+      effect: {
+        elements: {
+          lights: { render: { access: { reads: string[] }; version: number } };
+        };
+      };
+      format: 'nachi-effect';
+      version: 1;
+    };
+    legacy.version = 1;
+    legacy.effect.elements.lights.render.access.reads =
+      legacy.effect.elements.lights.render.access.reads.filter(
+        (read) => read !== 'Particles.spawnOrder',
+      );
+    const sourceBeforeLoad = structuredClone(legacy);
+
+    const loaded = loadEffect(JSON.stringify(legacy));
+    const loadedEmitter = loaded.elements.lights;
+    expect(loadedEmitter?.kind).toBe('emitter');
+    if (loadedEmitter?.kind !== 'emitter') throw new Error('Expected a light emitter.');
+    const program = compileEmitter(loadedEmitter);
+
+    expect(legacy).toEqual(sourceBeforeLoad);
+    expect(program.diagnostics).toEqual([]);
+    expect(program.attributeSchema.byName.spawnOrder).toBeDefined();
+    expect(program.draws).toContainEqual(expect.objectContaining({ kind: 'light' }));
+    const canonical = serializeEffect(loaded);
+    expect(
+      (
+        canonical.effect as {
+          elements: { lights: { render: { access: { reads: string[] } } } };
+        }
+      ).elements.lights.render.access.reads,
+    ).not.toContain('Particles.spawnOrder');
+    expect(serializeEffect(loadEffect(canonical))).toEqual(canonical);
   });
 
   it('keeps v1 renderer configs generic but closes built-in renderer@2 configs in v2', () => {

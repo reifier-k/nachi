@@ -21,3 +21,7 @@ cannot change validated values or reentrantly restore a stale pose during commit
 Spawn clock options are also single-read snapshots: core snapshots `timeScale` and `priority`, while
 timeline builds a frozen own-data record from all constructor-consumed options before ID allocation
 and preserves direct-constructor validation.
+
+Harden hostile simulation-cache and debug membership metadata, including non-array birth-order
+state, fractional physical slots, and duplicate-slot diagnostic paths. Timeline visibility mutation
+now reports the terminal error/released state after mesh cleanup instead of misclassifying the key.

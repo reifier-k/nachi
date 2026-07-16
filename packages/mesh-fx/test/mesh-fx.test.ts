@@ -7,13 +7,14 @@ import {
   RGBAFormat,
 } from 'three';
 import type Node from 'three/src/nodes/core/Node.js';
-import { context, float } from 'three/tsl';
+import { context, float, vec3 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
   MeshFxDiagnosticError,
   applyVat,
+  cloneVatBindings,
   cone,
   createConeGeometry,
   createCylinderGeometry,
@@ -29,6 +30,7 @@ import {
   slashArc,
   uvFlow,
 } from '../src';
+import { getVatControls } from '../src/vat.js';
 
 function texture(): DataTexture {
   const result = new DataTexture(
@@ -237,7 +239,10 @@ describe('@nachi-vfx/mesh-fx Blender VAT runtime', () => {
     return result;
   }
 
-  function vatMesh(width = 3): THREE.Mesh {
+  function vatMesh(
+    width = 3,
+    material: THREE.Material = new THREE.MeshStandardNodeMaterial(),
+  ): THREE.Mesh {
     const geometry = new BufferGeometry();
     geometry.setAttribute('position', new BufferAttribute(new Float32Array(width * 3), 3));
     geometry.setAttribute(
@@ -249,7 +254,7 @@ describe('@nachi-vfx/mesh-fx Blender VAT runtime', () => {
         2,
       ),
     );
-    return new THREE.Mesh(geometry, new THREE.MeshStandardNodeMaterial());
+    return new THREE.Mesh(geometry, material);
   }
 
   it('resolves nearest and linear frame playback over an inclusive looping range', () => {
@@ -324,6 +329,45 @@ describe('@nachi-vfx/mesh-fx Blender VAT runtime', () => {
     });
     expect(external.time).toBeNull();
     expect(() => external.setTime(0.5)).toThrow(MeshFxDiagnosticError);
+  });
+
+  it.each([
+    ['ordinary NodeMaterial', () => new THREE.MeshStandardNodeMaterial(), 'source-before-vat'],
+    ['fxMaterial', () => fxMaterial(), 'cloned-material'],
+  ] as const)('retains an installed normal binding across a replaced position chain for %s clones', (_label, createMaterial, baseGraph) => {
+    const mesh = vatMesh(3, createMaterial());
+    const material = mesh.material as THREE.MeshStandardNodeMaterial;
+    const normalControls = applyVat(mesh, {
+      fps: 8,
+      frameCount: 4,
+      normalTexture: vatTexture(),
+      positionTexture: vatTexture(),
+    });
+    const installedNormal = material.normalNode;
+    material.positionNode = vec3(4, 5, 6);
+    const positionControls = applyVat(mesh, {
+      fps: 12,
+      frameCount: 4,
+      positionTexture: vatTexture(),
+    });
+    normalControls.setTime(0.25);
+    positionControls.setTime(0.125);
+
+    expect(material.normalNode).toBe(installedNormal);
+    expect(getVatControls(mesh)).toEqual([normalControls, positionControls]);
+
+    const clone = mesh.clone();
+    clone.material = material.clone();
+    const clonedControls = cloneVatBindings(mesh, clone, baseGraph);
+    const clonedMaterial = clone.material as THREE.MeshStandardNodeMaterial;
+
+    expect(clonedControls).toHaveLength(2);
+    expect(clonedControls.map(({ time }) => time?.value)).toEqual([0.25, 0.125]);
+    expect(clonedControls[0]?.time).not.toBe(normalControls.time);
+    expect(clonedMaterial.normalNode).not.toBe(material.normalNode);
+    clonedControls[0]!.setTime(0.375);
+    expect(clonedControls[0]?.time?.value).toBe(0.375);
+    expect(normalControls.time?.value).toBe(0.25);
   });
 
   it.each([

@@ -11,3 +11,7 @@ attachment, device-loss, preparation, capacity, and readback-observed overflow s
 delivers its own failures without duplicating child-core reports; and prepared Three light draws
 rebind light-limit warnings to their live owner. React documents and verifies mutable instance error
 observation after a resolved provider update.
+
+Do not let hidden preparation instances consume the one-shot late device-loss delivery intended for
+the first caller-owned spawn, and do not append diagnostic-handler failures after an instance has
+already reached the released state.

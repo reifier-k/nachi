@@ -412,11 +412,11 @@ function validateCacheStructureUnchecked(cache: SimulationCache): void {
       hasBirthOrder !== (emitter.nextSpawnOrders !== undefined) ||
       (hasBirthOrder &&
         (emitter.birthIndicesFrameStrideBytes !== emitter.capacity * 4 ||
+          !Array.isArray(emitter.nextSpawnOrders) ||
           emitter.nextSpawnOrders!.length !== frameCount ||
           emitter.nextSpawnOrders!.some(
             (value: number) => !Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff,
-          ) ||
-          !Array.isArray(emitter.nextSpawnOrders)))
+          )))
     ) {
       throw cacheDiagnostic(
         'NACHI_SIM_CACHE_METADATA_INVALID',

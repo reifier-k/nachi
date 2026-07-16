@@ -440,7 +440,7 @@ describe('@nachi-vfx/timeline authoring', () => {
     );
     expect(scene.children).toHaveLength(0);
     expect(() => instance.setUserVisible('addedFirst', false)).toThrow(
-      'is not an adapted mesh-fx element',
+      'instance is in the error or released state',
     );
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(dispose.mock.contexts[0]).not.toBe(sourceMaterial);

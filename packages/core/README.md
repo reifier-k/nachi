@@ -34,6 +34,15 @@ rejects a returned compaction row whose physical slot is outside capacity with
 `NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE`; physical-slot order validates the full membership before
 sorting and pagination.
 
+## Simulation-cache format
+
+Simulation caches use format version 2. This is a breaking cache-file boundary: every cached
+emitter carries lossless u32 `spawnOrder` lineage for alive births (and the next spawn-order state
+when that attribute is materialized), so interpolation and loop continuity cannot confuse a reused
+physical slot with the particle that previously occupied it. Version-1 caches are not inferred or
+migrated; re-bake them with the current runtime. Loading an old cache fails explicitly with
+`NACHI_SIM_CACHE_VERSION_UNSUPPORTED`.
+
 ## Input validation
 
 Built-in module factories reject malformed ordinary `ValueInput` constants, ranges, parameter

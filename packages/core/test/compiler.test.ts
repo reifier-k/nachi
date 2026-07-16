@@ -2171,6 +2171,38 @@ describe('emitter kernel compiler', () => {
     ).toThrowError('The light renderer requires WebGPU storage selection');
   });
 
+  it('supplements spawnOrder for pre-H2-4 light access manifests without mutating them', () => {
+    const current = lightRenderer({ maxLights: 2 });
+    const legacy = {
+      ...current,
+      access: {
+        ...current.access!,
+        reads: current.access!.reads.filter((read) => read !== 'Particles.spawnOrder'),
+      },
+    };
+    const definition = defineEmitter({
+      capacity: 4,
+      integration: 'none',
+      render: legacy,
+      spawn: burst({ count: 1 }),
+    });
+
+    const program = compileEmitter(definition);
+
+    expect(legacy.access.reads).not.toContain('Particles.spawnOrder');
+    expect(program.diagnostics).toEqual([]);
+    expect(program.attributeSchema.byName.spawnOrder).toBeDefined();
+    expect(program.draws).toContainEqual(
+      expect.objectContaining({
+        kind: 'light',
+        vertex: expect.objectContaining({
+          attributes: ['alive', 'color', 'intensity', 'position', 'size', 'spawnOrder'],
+        }),
+      }),
+    );
+    expect(() => program.buildKernels(fakeAdapter())).not.toThrow();
+  });
+
   it('does not publish a light draw after invalid pool-bound diagnostics', () => {
     const program = compileEmitter(
       defineEmitter({
@@ -4455,6 +4487,43 @@ describe('emitter kernel compiler', () => {
     expect(boids({ grid: 'neighbors' }).access?.reads).toContain('Emitter.transform');
     expect(boids({ grid: 'neighbors' }).access?.reads).not.toContain(
       'Emitter.updateInterpolatedTransform',
+    );
+  });
+
+  it('does not share the update midpoint node with a custom non-update kernel graph', () => {
+    const access = { reads: ['Emitter.updateInterpolatedTransform'] as const, writes: [] };
+    const registry = createCoreKernelModuleRegistry();
+    registry.register({
+      access,
+      build: (context) => {
+        context.uniform('Emitter.updateInterpolatedTransform');
+      },
+      stage: 'init',
+      type: 'test/init-midpoint-read',
+      version: 1,
+    });
+    const program = compileEmitter(
+      defineEmitter({
+        capacity: 1,
+        init: [
+          {
+            access,
+            config: {},
+            kind: 'module',
+            stage: 'init',
+            type: 'test/init-midpoint-read',
+            version: 1,
+          },
+        ],
+        integration: 'none',
+        render: billboard({ blending: 'additive' }),
+        spawn: burst({ count: 1 }),
+      }),
+      { registry },
+    );
+
+    expect(() => program.buildKernels(fakeAdapter())).toThrowError(
+      'Compiled uniform "Emitter.updateInterpolatedTransform" is missing.',
     );
   });
 

@@ -2842,6 +2842,7 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
 
   /** @internal Prevents a failed runtime handler from recursively calling itself. */
   recordRuntimeDiagnosticHandlerFailure(diagnostic: VfxDiagnostic): boolean {
+    if (this.#state === 'released') return false;
     const key = diagnostic.code;
     if (this.#diagnosticKeys.has(key)) return false;
     this.#diagnosticKeys.add(key);
@@ -3243,7 +3244,9 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
 
     if (this.#deviceLossDiagnostic) {
       instance.markErrorWithoutRuntimeDelivery(this.#deviceLossDiagnostic);
-      if (!this.#deviceLossReported) {
+      if (!preparationSpawn && !this.#deviceLossReported) {
+        // Preparation instances are invisible implementation details. Preserve the one-shot
+        // late-spawn delivery for the first caller-owned instance that can observe the loss.
         this.#deviceLossReported = true;
         instance.deliverRuntimeDiagnostic(this.#deviceLossDiagnostic);
       }

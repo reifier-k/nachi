@@ -4,6 +4,7 @@ This report is the FA re-verification index for the 33 completed rows in the
 [ROADMAP parity matrix](../ROADMAP.md#niagaraパリティマトリクス). It consolidates the implementation,
 existing smoke/test evidence, and the residual difference from Niagara recorded by the M0–M12
 audits. It does not turn those residuals into a release-gate decision; FA owns that decision.
+The implementation facts below are current as of 2026-07-16.
 
 ## 1. System/emitter hierarchy and emitter inheritance
 
@@ -47,7 +48,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 ## 5. Spawn: rate, burst, and per-distance
 
 - **Implementation:** `@nachi-vfx/core` `rate()`, `burst()`, and `perDistance()` feed GPU allocation and
-  capacity diagnostics.
+  capacity diagnostics. Omitting `lifecycle.duration` on a rate/per-distance emitter derives an
+  unbounded active spawn window rather than a zero-duration emitter.
 - **Verification:** `/m2-runtime/` plus compiler/system tests cover fractional accumulation,
   timestep splitting, distance accumulation, overflow, and indirect dispatch.
 - **Residual:** WebGL2 supports only the explicitly reduced single-burst path when its transform-
@@ -55,8 +57,9 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 6. Emitter lifecycle
 
-- **Implementation:** `@nachi-vfx/core` lifecycle config supports start delay, duration, finite/infinite
-  loops, and deterministic prewarm through `VFXSystem`.
+- **Implementation:** `@nachi-vfx/core` lifecycle config supports start delay, explicit duration,
+  continuous-spawn derived infinite duration, finite/infinite loops, and deterministic prewarm
+  through `VFXSystem`.
 - **Verification:** `/m2-runtime/` and system tests cover boundaries, loop generations, prewarm
   bit identity, stop, release, and pooling.
 - **Residual:** `stop()` is immediate rather than graceful particle drain, and there are no editor
@@ -66,6 +69,8 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 - **Implementation:** `@nachi-vfx/core` effect clocks, fixed-step scheduling, `setTimeScale()`, and
   `applyHitStop()` separate effect/emitter time from host time; `@nachi-vfx/timeline` sequences them.
+  Measured `update()` calls default to a 0.25-second delta clamp with explicit dropped-time counters;
+  caller-supplied deltas are not clamped.
 - **Verification:** `/m2-runtime/`, `/m9-timeline/`, system tests, and timeline tests cover split-step
   invariance, fixed-step limits, hit stop, and independent instances.
 - **Residual:** Reverse playback and general time seeking are absent; culled effects pause without
@@ -102,9 +107,10 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 ## 11. Forces
 
 - **Implementation:** `@nachi-vfx/core` provides `gravity()`, `drag()`, `vortex()`, `pointAttractor()`,
-  `linearForce()`, `curlNoise()`, and `turbulence()`.
-- **Verification:** `/m4-behaviors/` and compiler tests compare module mathematics, deterministic
-  simplex curl, access declarations, and GPU results.
+  `linearForce()`, `curlNoise()`, and `turbulence()`. Directional/positional H2-6 modules expose
+  explicit world/emitter selectors and emitter-space Update consumers sample the motion midpoint.
+- **Verification:** `/m4-behaviors/`, `/m12-space/`, and compiler tests compare module mathematics,
+  selector transforms, deterministic simplex curl, access declarations, and GPU results.
 - **Residual:** Particle mass does not alter the built-in force modules, rotational drag is absent,
   and Niagara's broader solver/module catalog requires custom TSL.
 
@@ -119,10 +125,11 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 13. Orientation, rotation, and kill volumes
 
-- **Implementation:** `@nachi-vfx/core` exposes orientation/rotation modules and `killVolume()` with
-  sphere/box tests in emitter-local space.
-- **Verification:** `/m4-behaviors/` and compiler tests cover shortest-arc quaternion mathematics,
-  degenerate cases, rotation evolution, and volume boundaries.
+- **Implementation:** `@nachi-vfx/core` exposes orientation/rotation modules, world/emitter selectors
+  on analytic colliders, and emitter-local `killVolume()` sphere/box tests. Moving emitter-space
+  Update selectors use translation lerp plus shortest-path quaternion slerp at phase 0.5.
+- **Verification:** `/m4-behaviors/`, `/m12-space/`, and compiler tests cover shortest-arc quaternion
+  mathematics, selector motion, degenerate cases, rotation evolution, and volume boundaries.
 - **Residual:** Kill volumes are fixed emitter-local primitives; there are no scene-query volumes,
   skinned volumes, or Niagara's full orientation module set.
 
@@ -187,9 +194,9 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
   adapter updates a bounded `PointLight` pool one frame later.
 - **Verification:** `/golden-slash/`, `/golden-charge/`, `/m10-lit/`, and compiler/adapter tests cover
   selection, limits, pool reuse, and offscreen lighting.
-- **Residual:** No inverse-square mode switch, translucency/volumetric flags, arbitrary attribute
-  binding, or stable logical-ID tie-break; the bounded CPU light pool differs from Niagara's
-  renderer integration.
+- **Residual:** No inverse-square mode switch, translucency/volumetric flags, or arbitrary attribute
+  binding; equal-priority selection is deterministic by `(priority desc, spawnOrder asc)`, while the
+  bounded CPU light pool still differs from Niagara's renderer integration.
 
 ## 21. Decal renderer
 
@@ -212,16 +219,20 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 ## 23. VAT runtime
 
 - **Implementation:** `@nachi-vfx/mesh-fx` decodes flement Blender VAT position/normal textures with
-  frame selection and interpolation.
-- **Verification:** `/m8-vat/` and mesh-fx tests compare CPU/GPU branches, mirrored-axis convention,
-  normal transforms, frame boundaries, and both backends.
+  frame selection and interpolation. Timeline cloning rebuilds independently active position and
+  normal graphs with clone-owned clocks; replacing one channel root retires only that channel.
+- **Verification:** `/m8-vat/`, mesh-fx tests, and timeline tests compare CPU/GPU branches,
+  mirrored-axis convention, normal transforms, frame boundaries, channel-crossing clone ownership,
+  and both backends.
 - **Residual:** No atlas crop/wrap controls, variable topology, tangent VAT, automatic bounds, or
   general Houdini VAT format matrix.
 
 ## 24. Timeline/Sequencer integration
 
 - **Implementation:** `@nachi-vfx/timeline` provides `at()`, play/stop/marker/callback actions, loops,
-  speed, camera shake, hit stop, and mesh-fx lifecycle on an effect-local timeline.
+  speed, camera shake, hit stop, and mesh-fx lifecycle on an effect-local timeline. Its
+  `setUserVisible()` override persists across play/expiry/stop/loop/reuse; direct writes to the
+  adapted clone's `Object3D.visible` are runtime output and are overwritten rather than persisted.
 - **Verification:** `/m9-timeline/`, `/golden-slash/`, `/golden-ultimate/`, and timeline tests cover
   boundary splitting, deterministic shake, loop invariance, errors, and cleanup.
 - **Residual:** No keyframe property tracks, seeking, reverse playback, editor Sequencer, or direct
@@ -249,12 +260,15 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 ## 27. Alpha sorting and OIT
 
 - **Implementation:** `@nachi-vfx/core` combines emitter coarse order and GPU bitonic particle sort;
-  `@nachi-vfx/post` provides weighted blended OIT.
+  `@nachi-vfx/post` provides weighted blended OIT. Version-2 alpha/premultiplied billboard, mesh,
+  and decal modules default to sorting with `sorted:false` opt-out; low/medium tiers gate sorting off
+  and high/epic retain it.
 - **Verification:** `/m10-sort/`, `/golden-explosion/`, compiler/post tests, exhaustive 0-1 sort
   probes, reverse-order OIT checks, and status regression tests verify the three layers.
-- **Residual:** No custom sort key or translucency priority, sorted capacity is 65,536, sort is
-  WebGPU-only and camera-z based, ribbons are outside the rank, and WBOIT lacks opaque-depth
-  occlusion in its standalone target.
+- **Residual:** There is no per-particle custom sort key or arbitrary translucency-priority
+  expression. Coarse draw buckets can be adjusted with `renderOrderOffset` and the Three adapter's
+  `setRenderOrderBase()` (RFC 006); sorted capacity is 65,536, sorting is WebGPU-only/camera-z based,
+  ribbons are outside the automatic rank, and standalone WBOIT lacks opaque-depth occlusion.
 
 ## 28. Scalability, significance, and pooling
 
@@ -268,7 +282,9 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 ## 29. Simulation caching
 
 - **Implementation:** `@nachi-vfx/core` `bakeSimulation()` and `replaySimulation()` store renderer-read
-  attributes and alive indirection in Float32 or bounded-error u16 cache frames.
+  attributes, alive indirection, and lossless u32 `spawnOrder` birth lineage in format-v2 Float32 or
+  bounded-error u16 cache frames. Format v1 is rejected with
+  `NACHI_SIM_CACHE_VERSION_UNSUPPORTED` and must be re-baked.
 - **Verification:** `/m11-cache/`, sim-cache/system tests, and independent analytic GPU probes cover
   endianness, interpolation, loop endpoints, backend checks, and replay without simulation passes.
 - **Residual:** No texture/volume baker output, all-attribute cache, Sequencer scrubbing, world-space
@@ -277,7 +293,9 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 ## 30. Debugger and profiler
 
 - **Implementation:** `instance.debug.captureAttributes()` and `system.debug.captureProfile()`
-  expose queued snapshots, logical decoding, counters, and shared perf timestamp values.
+  expose queued snapshots, logical decoding, counters, and shared perf timestamp values. Runtime
+  diagnostics default to one-line console delivery, with function replacement and explicit `null`
+  silence while instance storage remains authoritative.
 - **Verification:** `/m11-debug/`, debug/system tests, and backend probes cover FIFO consistency,
   truncation, aliases, unavailable metrics, and one-frame-late frame semantics.
 - **Residual:** No continuous spreadsheet stream, System namespace watch, expression filters, FX
@@ -285,12 +303,13 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 
 ## 31. Asset format and loader
 
-- **Implementation:** `@nachi-vfx/format` owns strict `{ format: 'nachi-effect', version: 1, effect }`
-  documents, schema, serializer/loader, migration registry, resources, and referenced inheritance.
+- **Implementation:** `@nachi-vfx/format` owns strict `{ format: 'nachi-effect', version: 2, effect }`
+  documents, schema, serializer/loader, migration registry, resources, and referenced inheritance;
+  historical v1 uses the default envelope-only migration.
 - **Verification:** `/golden-ultimate/`, `/m9-compose/`, format tests, schema validation, and JSON→GPU
   audit probes cover closed shapes, paths, references, registrations, and round trips.
 - **Residual:** Inline TSL must be registered by design, sim-cache embedding/references are not in
-  format v1, and there is no GUI asset editor.
+  effect format v2, and there is no GUI asset editor.
 
 ## 32. Grid2D/3D fluids
 
@@ -305,10 +324,12 @@ audits. It does not turn those residuals into a release-gate decision; FA owns t
 ## 33. Neighbor grid, boids, and PBD
 
 - **Implementation:** `@nachi-vfx/core` `defineNeighborGrid()`, `boids()`, `pbdDistanceConstraint()`, and
-  `neighborGridTslModule()` use atomic bounded buckets, snapshot neighbors, and submit-separated
-  Jacobi constraints.
+  `neighborGridTslModule()` use emitter-local origins/cell lookup, atomic bounded buckets, snapshot
+  neighbors, and submit-separated Jacobi constraints. Capture reports overflow and dominant
+  out-of-bounds insertion through structured diagnostics.
 - **Verification:** `/m12-neighbors/`, neighbor-grid/compiler/system tests, and GPU kernel probes
-  cover dynamic loops, overflow, module ordering, snapshots, storage limits, and PBD iterations.
+  cover dynamic loops, overflow, `NACHI_NEIGHBOR_GRID_OUT_OF_BOUNDS_DOMINANT`, module ordering,
+  emitter-local transforms, snapshots, storage limits, and PBD iterations.
 - **Residual:** One emitter owns each grid in v1, neighbor snapshots contain position/velocity only,
   cells have fixed capacity, and XPBD compliance, masses, pins, and collision constraints are absent;
   WebGL2 is unsupported.

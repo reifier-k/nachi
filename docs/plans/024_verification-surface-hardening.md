@@ -130,6 +130,10 @@
 
 ### 最終ゲート
 
+CIの常設GPU jobにはrepository variable `NACHI_SKIP_GPU_VERIFICATION=1`の管理用escapeがあり、その場合
+`verification-surface` job自体がskipされる。これは環境上の一時退避であってPASS証拠ではなく、変数未設定の
+既定経路で19面を完走することが通常の受入条件である。
+
 - `pnpm build`: PASS。
 - `pnpm typecheck`: PASS。
 - `pnpm lint`: PASS。

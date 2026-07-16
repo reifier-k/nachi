@@ -97,6 +97,7 @@ type VatBindingMetadata = {
   appliedNormalNode: Node<'vec3'> | null | undefined;
   appliedPositionNode: Node<'vec3'> | null | undefined;
   normalBindingIndex: number;
+  positionBindingStartIndex: number;
 };
 
 type VatBindingActivity = Readonly<{
@@ -119,6 +120,10 @@ export function applyVat(mesh: THREE.Mesh, config: VatConfig): VatControls {
   const previous = vatBindings.get(mesh);
   const continuesTrackedPosition =
     previous?.material === material && previous.appliedPositionNode === material.positionNode;
+  const continuesTrackedNormal =
+    previous?.material === material &&
+    previous.normalBindingIndex >= 0 &&
+    previous.appliedNormalNode === material.normalNode;
   if (
     continuesTrackedPosition &&
     previous.normalBindingIndex >= 0 &&
@@ -129,16 +134,21 @@ export function applyVat(mesh: THREE.Mesh, config: VatConfig): VatControls {
     // into a timeline-owned binding.
     previous.normalBindingIndex = -1;
   }
+  const inheritedNormalBinding =
+    !continuesTrackedPosition && !config.normalTexture && continuesTrackedNormal
+      ? previous.bindings[previous.normalBindingIndex]
+      : undefined;
   const metadata: VatBindingMetadata = continuesTrackedPosition
     ? previous
     : {
-        baseNormalNode: material.normalNode,
+        baseNormalNode: inheritedNormalBinding ? previous!.baseNormalNode : material.normalNode,
         basePositionNode: material.positionNode,
-        bindings: [],
+        bindings: inheritedNormalBinding ? [inheritedNormalBinding] : [],
         material,
         appliedNormalNode: material.normalNode,
         appliedPositionNode: material.positionNode,
-        normalBindingIndex: -1,
+        normalBindingIndex: inheritedNormalBinding ? 0 : -1,
+        positionBindingStartIndex: inheritedNormalBinding ? 1 : 0,
       };
   const timeUniform = config.time === undefined ? uniform(0) : null;
   const timeNode = config.time ?? timeUniform!;
@@ -197,6 +207,7 @@ export function applyVat(mesh: THREE.Mesh, config: VatConfig): VatControls {
   });
   const bindingIndex = metadata.bindings.length;
   metadata.bindings.push(Object.freeze({ config: snapshotVatConfig(config), controls }));
+  if (validated.positionMode === 'absolute') metadata.positionBindingStartIndex = bindingIndex;
   if (config.normalTexture) metadata.normalBindingIndex = bindingIndex;
   metadata.appliedNormalNode = material.normalNode;
   metadata.appliedPositionNode = material.positionNode;
@@ -236,8 +247,19 @@ export function cloneVatBindings(
     material.positionNode = metadata.basePositionNode ?? material.positionNode;
     material.normalNode = metadata.baseNormalNode ?? material.normalNode;
   }
+  const cloneBasePositionNode = material.positionNode;
   const frustumCulled = source.frustumCulled;
   for (const index of reachableVatBindingIndices(activity)) {
+    if (
+      index === metadata.positionBindingStartIndex &&
+      activity.normalActive &&
+      activity.normalBindingIndex < metadata.positionBindingStartIndex
+    ) {
+      // An independently retained normal binding is replayed first so its graph belongs to the
+      // clone. Its obsolete position half must not leak into the newer position chain.
+      material.positionNode = cloneBasePositionNode;
+      material.needsUpdate = true;
+    }
     const binding = metadata.bindings[index]!;
     const cloned = applyVat(clone, binding.config);
     if (cloned.time && binding.controls.time) {
@@ -306,11 +328,13 @@ function reachableVatBindingIndices(activity: VatBindingActivity): number[] {
   const indices = new Set<number>();
   const { bindings } = activity.metadata;
   if (activity.positionActive) {
-    let positionStart = 0;
-    for (let index = 0; index < bindings.length; index += 1) {
-      if (bindings[index]!.config.positionMode === 'absolute') positionStart = index;
+    for (
+      let index = activity.metadata.positionBindingStartIndex;
+      index < bindings.length;
+      index += 1
+    ) {
+      indices.add(index);
     }
-    for (let index = positionStart; index < bindings.length; index += 1) indices.add(index);
   }
   if (activity.normalActive) indices.add(activity.normalBindingIndex);
   return [...indices].sort((left, right) => left - right);
@@ -322,6 +346,9 @@ function compactVatBindings(activity: VatBindingActivity): void {
   const activeNormalBinding = activity.normalActive
     ? metadata.bindings[activity.normalBindingIndex]
     : undefined;
+  const activePositionStartIndex = activity.positionActive
+    ? indices.indexOf(metadata.positionBindingStartIndex)
+    : -1;
   const reachableBindings = indices.map((index) => {
     const binding = metadata.bindings[index]!;
     if (binding === activeNormalBinding || binding.config.normalTexture === undefined)
@@ -336,6 +363,8 @@ function compactVatBindings(activity: VatBindingActivity): void {
   metadata.bindings.splice(0, metadata.bindings.length, ...reachableBindings);
   metadata.normalBindingIndex =
     activeNormalBinding === undefined ? -1 : reachableBindings.indexOf(activeNormalBinding);
+  metadata.positionBindingStartIndex =
+    activePositionStartIndex < 0 ? reachableBindings.length : activePositionStartIndex;
   if (!activity.positionActive) {
     metadata.basePositionNode = metadata.material.positionNode;
     metadata.appliedPositionNode = undefined;

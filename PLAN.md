@@ -219,6 +219,12 @@ apps/
 - 2026-07-14: **H1マイルストーン完了(監査込みPASS)**。実効果オーサリング瑕疵ハードニング全10項目+監査を1セッションで完遂(H1-2〜H1-10+監査、各項目の詳細はROADMAPセッションログ)。主要な確定知見: ①コンパイル面の変更はFakeAdapterテストが構造的に素通りする=Three実codegen(WGSLNodeBuilder.build)回帰の併設とヘッドレススパイク実測を検収の一次根拠とする(H1-3のProxy残留BLOCKERで実証) ②GPU数値チェックの公差はWGSL仕様の演算誤差許容(sin/cos=2^-11)から予算導出する(f32 ulp基準は仕様準拠バックエンドで原理的に不成立) ③新機能同士の相互作用は各機能の回帰ピンが検出する=受入済みチェックの緩和は原則却下し干渉は設計位相の低い側(ページ/振付)で解消(H1-8×H1-7) ④「見た目の変化」と「見た目の退行」の弁別がレビューの中核=checksが緑でも基準との構造比較で退行を検出し再記録前に止める(H1-6 beam白熱コア、H1-10 beam二重offset) ⑤playgroundはdist解決=スパイク検収は必ずpnpm build後 ⑥飽和時スポーンの意味論は「時間的先着順ドロップ」で統一(rate位相・perDistance発火点とも再分配しない=Niagara整合、監査裁定) ⑦init乱数はspawnOrderキー(スロット再利用下の決定性と分布正しさ。beam2.2〜4.6%→≤0.007%、ice0.7〜0.8%→≤0.013%)
 - 2026-07-14: **クロスレビュー原則(ユーザー指示)**。レビューは常に実装者と異なる系統: Codex実装→Claudeレビュー / Claude実装→Codexレビュー。GPU実測・目視などCodexで物理不可能な検証は統括が実測補完しログに残す
 - 2026-07-14: **H1-1で新規コア瑕疵を発見(plan 011 / H1-10)**。init乱数がスロットキーのため、rate系のスロット再利用で①ラン間非決定(スクショ2〜5%揺れ)②「凍結パターン」分布歪み(再利用スロットが同一乱数を再現し、名目分布より疎で構造的な見た目になる)。恒久修正はspawnOrder+シードキー化(H1-10)。暫定でshowcase-beamにページローカル`stableRateInit`(hash(spawnOrder+salt+stream))を適用し決定化
+- 2026-07-15: **H2-2 連続spawnのduration省略規約を確定**。`rate()` / `perDistance()`を含み`lifecycle.duration`が省略されたemitterは、部分lifecycle objectを含めて無限activeを導出する。JSONへ`Infinity`は書かず、省略をそのままround-tripし、明示finite durationだけが有限発生窓を所有する。
+- 2026-07-15: **H2-3 Update乱数キーを確定**。Updateの`context.random()`はphysical slotでなく`Emitter.seed + Particles.spawnOrder + Emitter.updateRandomStep`をstable keyとし、再利用slot/compaction順から独立させる。compile-purpose preparationは実simulation ordinalを消費しない。
+- 2026-07-15: **H2-7 renderer module / effect envelope v2を確定(BREAKING)**。alpha/premultiplied billboard・mesh・decal v2はsorted既定ON、`sorted:false`でopt-out、low/medium tierはsorted-offとする。canonical `nachi-effect` envelopeはv2へ移行し、historical v1はpayload/module versionを変えないdefault migrationで受理する。
+- 2026-07-15: **H2-8 simulation-cache format v2を確定(BREAKING)**。各alive particleのlossless u32 `spawnOrder` lineageとframeごとの次spawn orderを必須化し、補間・loop continuityをlogical birth identityで判定する。v1 cacheは推測移行せず`NACHI_SIM_CACHE_VERSION_UNSUPPORTED`で拒否し再ベイクする。
+- 2026-07-16: **H2-11 measured delta既定上限を確定**。引数省略`system.update()`のwall-clock deltaは既定0.25秒でclampし、discardを公開counterへ累積する。明示deltaはclampせず、`maxMeasuredDeltaSeconds: Infinity`を明示opt-outとする。
+- 2026-07-16: **H2-12 runtime診断配送を確定**。`onRuntimeDiagnostic`省略時はseverityに応じてconsoleへ既定配送し、functionは置換、`null`は明示silentとする。診断はinstanceに保持し、device-loss等のshared sourceは1回だけ配送、handler failureは再帰させない。
 
 ## 未決事項
 

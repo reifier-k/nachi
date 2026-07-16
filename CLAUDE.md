@@ -30,6 +30,8 @@ pnpm typecheck  # all workspace TypeScript projects
 pnpm lint       # Biome recommended rules
 pnpm format:check # Biome formatting check
 pnpm build      # all workspace builds
+pnpm golden:regress # seven committed golden screenshot regressions
+pnpm verify:gpu # permanent 19-entry suite: 13 playground + 6 showcase pages
 pnpm docs:build # static documentation artifact in apps/docs/dist
 pnpm changeset  # record independently versioned package changes
 pnpm release:dry # build + all package ESM gates + npm publish --dry-run; never publishes
@@ -82,6 +84,7 @@ node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-grid/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/m12-neighbors/?backend=webgl
+node tools/spike-runner.mjs http://127.0.0.1:5173/m12-space/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgpu
 node tools/spike-runner.mjs http://127.0.0.1:5173/golden-fluid/?backend=webgl
 node tools/spike-runner.mjs http://127.0.0.1:5174/slash/?backend=webgpu  # showcase pages need pnpm showcase:dev
@@ -94,16 +97,20 @@ node tools/screenshot.mjs http://127.0.0.1:5173/spike-depth/ artifacts/depth.png
 `webgpu-probe` serves its own localhost page. `spike-runner` adds `headless=1` and reads `data-spike-result` plus the `nachi.perf-baseline` record in `data-perf-result`. Screenshot regression defaults to WebGL2 because headless WebGPU cannot present a canvas.
 When localhost binding is unavailable, build first and use an intercepted secure origin without a
 listener: `node tools/spike-runner.mjs 'https://nachi.local/m11-cache/?backend=webgpu' --dist apps/playground/dist`.
-For pages that publish artifact screenshots, existing PNGs pass when the exact changed-pixel ratio is below `0.5%`; use `--update-screenshots` to intentionally re-record the baselines.
+For pages that publish artifact screenshots, existing PNGs pass when the exact changed-pixel ratio
+is below `0.5%`; use `--update-screenshots` to intentionally re-record the baselines. All 23
+committed PNGs live under `tools/baselines`; a missing tracked baseline is an immediate failure and
+is never created by an ordinary verification run.
 
 Core `defineEffect()` composes elements and parameters but deliberately does not runtime-validate
 timeline targets or timeline values. That validation belongs to `@nachi-vfx/timeline` authoring and its
 defensive runtime normalization, including for definitions created through the core compatibility
 factories.
 
-Alpha render modules can opt into WebGPU particle sorting with `sorted: true`; core preserves the
-non-deterministic compaction array and sorts a separate draw indirection after every compaction.
-Use `sortCenter` for emitter-level coarse ordering. WBOIT materials assign
+Version-2 alpha/premultiplied billboard, mesh, and decal render modules default to WebGPU particle
+sorting; use `sorted: false` to opt out. Low/medium quality tiers gate sorting off, while high/epic
+retain it. Core preserves the non-deterministic compaction array and sorts a separate draw
+indirection after every compaction. Use `sortCenter` for emitter-level coarse ordering. WBOIT materials assign
 `createWboitOutput()` to `NodeMaterial.mrtNode`, not `outputNode`; WBOIT and bitonic sorting are
 normally alternatives.
 
@@ -120,11 +127,13 @@ live structural state and emits `NACHI_QUALITY_RESTART_REQUIRED` when the next s
 compile/pool variant. Fully culled effects pause local time and GPU simulation. Significance budget
 decisions and their distance/screen/priority components are exposed on `instance.scalability`.
 
-M11 simulation caches record only logical attributes declared by render reads plus lossless alive
-indirection. `bakeSimulation()` advances a constant frame step and returns metadata+ArrayBuffer;
+M11 simulation-cache format v2 records only logical attributes declared by render reads plus
+lossless alive indirection and required u32 `spawnOrder` lineage. `bakeSimulation()` advances a
+constant frame step and returns metadata+ArrayBuffer;
 `replaySimulation()` restores the existing packed GPU buffers without scheduling simulation kernels.
 Float interpolation applies only to slots alive in both frames. Loop caches require a continuous
-duplicated endpoint. Keep the v1 per-frame upload path and WebGL2 replay diagnostic aligned with RFC
+duplicated endpoint. Cache v1 is intentionally rejected with `NACHI_SIM_CACHE_VERSION_UNSUPPORTED`
+and must be re-baked. Keep the per-frame upload path and WebGL2 replay diagnostic aligned with RFC
 §10.5 unless a later RFC explicitly adds all-frame residency or a WebGL2 alive-index renderer path.
 On WebGL2, any behavioral spawn/init/update access to packed group 1 or above is a build error
 (`NACHI_BACKEND_PACKED_STORAGE_UNSUPPORTED`), because Three r185 transform feedback would alias it
@@ -141,7 +150,7 @@ logical packing, retain explicit truncation, and report one-frame-late asynchron
 WebGL2 capture may mark a declared higher-group column `aliased` when only the compiler defaults pass
 materialized it; that inspection warning coexists with, and does not bypass, the behavioral build
 gate above.
-Profiler counters reset per top-level system update. Feed it the cached `nachi.perf-baseline` v1 GPU
+Profiler counters reset per top-level system update. Feed it the cached `nachi.perf-baseline` v2 GPU
 record; do not add another timestamp resolver or infer GPU time from CPU duration. Keep long-run
 correctness renderers timestamp-free and use a separate short perf capture when dispatch counts are
 large.
@@ -152,8 +161,10 @@ for the total. SwiftShader values remain smoke observations rather than performa
 performance budgets must use robust aggregates such as the median from warmed samples on the
 relevant hardware.
 
-M12 effect JSON is owned by `@nachi-vfx/format`. The v1 envelope is exactly
-`{ format: 'nachi-effect', version: 1, effect }`. Keep format-owned structures strict and
+M12 effect JSON is owned by `@nachi-vfx/format`. The current envelope is
+`{ format: 'nachi-effect', version: 2, effect }` (`EFFECT_ASSET_VERSION === 2`). The loader accepts
+historical v1 through the default non-mutating envelope-only v1-to-v2 migration. Keep format-owned
+structures strict and
 path-diagnostic, while leaving registered module `config` fields to their module-version validator.
 `loadEffect()` must return an ordinary normalized `EffectDefinition` or throw `NACHI_ASSET_*`; it
 must not pass through partial/unknown data. Inline functions and live engine resources remain
@@ -177,8 +188,9 @@ particle deposition, and density-to-particle sampling all retain invocation rang
 `NACHI_GRID3D_STORAGE_LIMIT_EXCEEDED`. `/golden-fluid/` runs the 32³ Golden #7 reference and a
 separate tiny 600-frame stability gate. WebGL2 must report `NACHI_GRID3D_WEBGL2_UNSUPPORTED`.
 
-M12 NeighborGrid is an effect element consumed by exactly one emitter. It uses atomic u32 cell
-counts plus fixed cell-major particle-index slots and rebuilds before each particle update.
+M12 NeighborGrid is an emitter-local effect element consumed by exactly one emitter; its origin and
+cell lookup are transformed with that owning emitter. It uses atomic u32 cell counts plus fixed
+cell-major particle-index slots and rebuilds before each particle update.
 `cellCapacity` defaults to 32; overflow drops later atomic reservations and is visible through
 `getNeighborGrid().capture()`. Keep radius in integer cell units and account for the
 `(2r+1)^3 * cellCapacity` scan. PBD iterations require clear/bucket/constraint submit separation;

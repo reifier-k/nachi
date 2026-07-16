@@ -74,7 +74,7 @@
 - m10-lit実GPU: capacity 5の独立2 runでphysical `[4,3]`のままlogical
   `[0,1] -> [4,5] -> [8,9]`、capacity 6ではphysical `[5,4]`でも同じlogical列を選択した。
   candidate 4 / maxLights 2で3回のdeath/reuseを通す。変更前後PNG SHA-256はともに
-  `624182aa5f9ca134f36498f69274a4a4a140b2ebe9668fb4be987a798b4084`で、視覚差は0。
+  `624182aa5f9ca134f36498f69274a4a4a4a140b2ebe9668fb4be987a798b4084`で、視覚差は0。
   この実selector面を恒常化するためm10-litをGPU suiteへ追加し、suiteはplayground 8 + showcase 6
   の14ページとなった。
 - m3実GPU: forward/reversedとも`alive=1, dropped=1, positionX=-0.75, spawnOrder=0`で、alpha sourceが

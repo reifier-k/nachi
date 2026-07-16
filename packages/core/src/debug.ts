@@ -173,7 +173,7 @@ function rowValue(
 }
 
 function validatePhysicalSlot(physicalSlot: number, aliveIndex: number, capacity: number): void {
-  if (physicalSlot >= 0 && physicalSlot < capacity) return;
+  if (Number.isInteger(physicalSlot) && physicalSlot >= 0 && physicalSlot < capacity) return;
   throw new VfxDiagnosticError([
     runtimeDiagnostic(
       'NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE',
@@ -203,7 +203,7 @@ export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): At
   let orderedAliveEntries:
     | Array<{ readonly aliveIndex: number; readonly physicalSlot: number }>
     | undefined;
-  let duplicatePhysicalSlots: Set<number> | undefined;
+  let duplicatePhysicalSlots: Map<number, number> | undefined;
   if (order === 'physical-slot') {
     for (let aliveIndex = 0; aliveIndex < input.aliveIndices.length; aliveIndex += 1) {
       validatePhysicalSlot(input.aliveIndices[aliveIndex]!, aliveIndex, input.capacity);
@@ -215,12 +215,14 @@ export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): At
     orderedAliveEntries.sort(
       (left, right) => left.physicalSlot - right.physicalSlot || left.aliveIndex - right.aliveIndex,
     );
-    duplicatePhysicalSlots = new Set<number>();
+    duplicatePhysicalSlots = new Map<number, number>();
     for (let index = 1; index < orderedAliveEntries.length; index += 1) {
       const previous = orderedAliveEntries[index - 1]!;
       const current = orderedAliveEntries[index]!;
       if (current.physicalSlot === previous.physicalSlot) {
-        duplicatePhysicalSlots.add(current.physicalSlot);
+        if (!duplicatePhysicalSlots.has(current.physicalSlot)) {
+          duplicatePhysicalSlots.set(current.physicalSlot, current.aliveIndex);
+        }
       }
     }
   }
@@ -271,12 +273,12 @@ export function formatAttributeSnapshot(input: FormatAttributeSnapshotInput): At
     ),
   );
   if (duplicatePhysicalSlots) {
-    for (const physicalSlot of duplicatePhysicalSlots) {
+    for (const [physicalSlot, aliveIndex] of duplicatePhysicalSlots) {
       diagnostics.push(
         runtimeDiagnostic(
           'NACHI_DEBUG_DUPLICATE_PHYSICAL_SLOT',
           `Alive membership contains duplicate physical slot ${physicalSlot}; stable ordering preserves duplicates and breaks ties by original compact index.`,
-          `aliveIndices.${physicalSlot}`,
+          `aliveIndices.${aliveIndex}`,
           'warning',
         ),
       );

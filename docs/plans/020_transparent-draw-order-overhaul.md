@@ -372,6 +372,15 @@ schema signoffのREJECT 0B / 0S / 1Nはtest display nameだけの残余だった
 compatibility、NeighborGrid testをcanonical v2 envelope内のv1 payload保持と正確に改名した。format test内の
 類似名を横断し、その他のv1表現は実際のcompatibility/module semanticsを示すことを確認した。
 
+### 既知残差
+
+- `packages/trails/src/three.ts:39,68`には旧`@nachi-vfx/three/render-order` symbolとその初期反映が残る。
+  現行draw registry/order assignmentとの互換shimとして動作しているが、H2-7後の所有権へ完全統合するcleanupは
+  未実施である。
+- `packages/core/src/compiler.ts:4707-4713`近傍ではcompiler-owned decal spawn-rotation Initと先頭authored
+  Initがともに`stageIndex: 1`を受け得る。path/sourceは別だがfallback slotの重複余地が残るため、module slot
+  identityを一元化する将来修正まで既知残差として保持する。
+
 ### fresh最終独立受入(2026-07-15)
 
 最後の修正後は実装・初回レビュー・各fresh再レビューのいずれとも異なる担当が全差分をread-onlyで再監査し、

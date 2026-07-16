@@ -1322,6 +1322,18 @@ function withUpdateInterpolatedTransformRead<Stage extends ModuleDefinition['sta
   });
 }
 
+function withLightRendererSpawnOrderRead(module: RenderModule): RenderModule {
+  if (module.type !== 'core/light-renderer') return module;
+  const access = module.access ?? { reads: [], writes: [] };
+  if (access.reads.includes('Particles.spawnOrder')) return module;
+  // Pre-H2-4 assets serialized the five-read light manifest. Supplement the deterministic
+  // tie-break input for schema and draw compilation without mutating the loaded round-trip data.
+  return withAccess(module, {
+    ...access,
+    reads: [...access.reads, 'Particles.spawnOrder'],
+  }) as RenderModule;
+}
+
 function defaultsModule(schema: ResolvedAttributeSchema): InitModule {
   const config = {
     attributes: schema.attributes
@@ -3489,7 +3501,7 @@ function createBuildKernels(
           ? spawnInterpolatedTransform(spawnIndex)
           : path === 'Emitter.spawnInterpolatedRotation'
             ? spawnInterpolatedRotation(spawnIndex)
-            : path === 'Emitter.updateInterpolatedTransform'
+            : path === 'Emitter.updateInterpolatedTransform' && module.stage === 'update'
               ? updateInterpolatedTransform()
               : uniformNode(path),
       value: (input, type, sampleOffset = 0) =>
@@ -4634,9 +4646,13 @@ export function compileEmitter<
     }
   }
 
+  const renderModules = (
+    Array.isArray(definition.render) ? definition.render : [definition.render]
+  ).map(withLightRendererSpawnOrderRead);
   const authorDefinition = {
     ...definition,
     init: normalized.init,
+    render: Array.isArray(definition.render) ? renderModules : renderModules[0]!,
     update: normalized.update,
   } as EmitterDefinition<AttributeSchema, ParameterSchema>;
   const authorAttributeResult = resolveAttributeSchema(authorDefinition);

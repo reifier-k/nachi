@@ -10,3 +10,7 @@ existing fxMaterial lifecycle controls retain their prior contracts. Authored fi
 replacement is preserved without reviving detached VAT graphs or stale timeline-owned clocks.
 Absolute position and last-write normal composition now clone and drive only their ordered
 graph-reachable control union.
+
+Keep a still-installed VAT normal binding active when authored position replacement starts a new
+position chain and the next application is position-only. Timeline clones rebuild that normal graph
+with clone-owned clocks; a newly supplied normal texture still replaces the prior binding.

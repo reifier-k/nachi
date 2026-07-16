@@ -186,6 +186,24 @@ describe('M11 attribute spreadsheet formatting', () => {
     );
   });
 
+  it('reports duplicate physical slots at the original duplicate compact index', () => {
+    const snapshot = formatAttributeSnapshot({
+      aliveIndices: new Uint32Array([3, 3]),
+      attributes,
+      capacity: 4,
+      emitterId: 'duplicate-path-membership',
+      logicalValues,
+      options: { attributes: ['heat'], order: 'physical-slot' },
+    });
+
+    expect(snapshot.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'NACHI_DEBUG_DUPLICATE_PHYSICAL_SLOT',
+        path: 'aliveIndices.1',
+      }),
+    );
+  });
+
   it('deduplicates repeated requested columns while preserving first-request order', () => {
     const snapshot = formatAttributeSnapshot({
       aliveIndices: new Uint32Array(),
@@ -247,6 +265,29 @@ describe('M11 attribute spreadsheet formatting', () => {
         emitterId: 'invalid-membership',
         logicalValues,
         options: { attributes: ['heat'], limit: 1 },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(VfxDiagnosticError);
+    expect((thrown as VfxDiagnosticError).diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'NACHI_DEBUG_PHYSICAL_SLOT_OUT_OF_RANGE',
+        path: 'aliveIndices.0',
+      }),
+    ]);
+  });
+
+  it('rejects an in-range non-integer physical slot from hostile membership input', () => {
+    let thrown: unknown;
+    try {
+      formatAttributeSnapshot({
+        aliveIndices: new Float64Array([2.5]) as never,
+        attributes,
+        capacity: 4,
+        emitterId: 'fractional-membership',
+        logicalValues,
       });
     } catch (error) {
       thrown = error;
