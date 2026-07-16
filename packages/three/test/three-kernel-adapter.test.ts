@@ -1018,6 +1018,11 @@ describe('three kernel adapter', () => {
     expect(draw.mesh.visible).toBe(false);
     draw.setUserVisible(true);
     expect(draw.mesh.visible).toBe(true);
+    // The ribbon registration shares the three draw registry, so the render-order composition pass
+    // must accept it. Before base/offset/drawIndex were mirrored onto the trails registration this
+    // threw NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID; ribbons opt out of rank so the base holds.
+    expect(() => runtime.setRenderOrder?.(kernels, [{ drawIndex: 0, rank: 0 }])).not.toThrow();
+    expect(draw.mesh.renderOrder).toBe(17);
     expect(runtime.getRenderableIndirectDrawCount?.(kernels)).toBe(1);
     runtime.prepareKernelsForPooling?.(kernels);
     expect(released).toHaveLength(4);

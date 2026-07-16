@@ -39,10 +39,20 @@ const THREE_DRAW_REGISTRY = Symbol.for('@nachi-vfx/three/materialized-draw-regis
 const THREE_RENDER_ORDER = Symbol.for('@nachi-vfx/three/render-order');
 const THREE_VISIBILITY = Symbol.for('@nachi-vfx/three/visibility');
 
+// Ribbon draws share the exact kernel-owned registry as @nachi-vfx/three built-in draws: both key
+// it by Symbol.for('@nachi-vfx/three/materialized-draw-registry') so trails ribbons ride the same
+// runtime visibility/culling path. The three runtime also composes host renderOrder for EVERY
+// registry entry via composeThreeRenderOrder(base, offset, rank), so an entry missing these fields
+// throws NACHI_THREE_RENDER_ORDER_COMPOSITION_INVALID the moment it is re-composed (draw pooling
+// activation or a setRenderOrder pass). Mirror three's registerDrawObject shape: a ribbon carries
+// no bucket offset and opts out of transparent draw-order rank with drawIndex -1.
 type ThreeDrawRegistration = {
   readonly attributes: readonly THREE.BufferAttribute[];
+  base: number;
   readonly dispose: () => void;
+  readonly drawIndex: number;
   readonly object: THREE.Object3D;
+  readonly offset: number;
   userVisible: boolean;
 };
 
@@ -58,14 +68,18 @@ function registerRibbonDraw(
     [THREE_VISIBILITY]?: boolean;
   };
   owner[THREE_DRAW_REGISTRY] ??= new Set();
+  const base = owner[THREE_RENDER_ORDER] ?? object.renderOrder;
   const registration: ThreeDrawRegistration = {
     attributes,
+    base,
     dispose,
+    drawIndex: -1,
     object,
+    offset: 0,
     userVisible: true,
   };
   owner[THREE_DRAW_REGISTRY].add(registration);
-  object.renderOrder = owner[THREE_RENDER_ORDER] ?? object.renderOrder;
+  object.renderOrder = base;
   const applyVisibility = () => {
     object.visible = (owner[THREE_VISIBILITY] ?? true) && registration.userVisible;
   };
