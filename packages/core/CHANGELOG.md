@@ -1,5 +1,14 @@
 # @nachi-vfx/core
 
+## 0.2.1
+
+### Patch Changes
+
+- e0efe43: Align every public package on a single shared version line. All nine packages now form one
+  Changesets fixed group (RFC 003 §1) and release together with the same version; this release
+  converges `@nachi-vfx/react` (previously 0.1.1) and `@nachi-vfx/tsl-kit` (previously 0.1.0) onto
+  the shared line. No functional changes.
+
 ## 0.2.0
 
 ### Minor Changes

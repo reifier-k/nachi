@@ -357,4 +357,4 @@ export function registerTrails(registry: KernelModuleRegistry): KernelModuleRegi
   return registry;
 }
 
-export const VERSION = '0.2.0' as const;
+export const VERSION = '0.2.1' as const;
