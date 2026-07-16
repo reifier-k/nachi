@@ -8,7 +8,10 @@
 
 ## 1. Version lines and the meaning of 1.0
 
-Nachi packages use Semantic Versioning and remain independently versioned. A package's `0.x`
+Nachi packages use Semantic Versioning. Since the 0.2.0 release all public packages form one
+Changesets `fixed` group: every release bumps the whole group to a single shared version, including
+packages without changes of their own (releases before this policy left `@nachi-vfx/react` at
+`0.1.1` and `@nachi-vfx/tsl-kit` at `0.1.0`; the next release converges them). A package's `0.x`
 line is an implementation and contract-development line: minor releases may contain breaking
 changes when a changeset identifies them. Moving a package from `0.x` to `1.0.0` means that every
 export reachable through that package's `exports` map is covered by the compatibility contract in
@@ -30,9 +33,9 @@ perform a version bump.
   semantic change, documentation, and additional validation of inputs that were already invalid.
 - **Minor:** additive exports, optional configuration fields, new modules/actions/diagnostics, and
   expanded backend support whose defaults preserve existing behavior.
-- **Major:** any breaking change defined in §3. Each independently versioned package receives the
-  required bump. A dependent package also bumps when its public types or runtime compatibility
-  range must change.
+- **Major:** any breaking change defined in §3. The fixed group receives the highest bump among its
+  members' changesets, so one package's breaking change moves the shared version for all. Changesets
+  still name the packages whose contracts actually changed.
 
 For pre-1.0 packages, breaking changes use a `minor` changeset so the resulting numeric version
 stays on the `0.x` line; compatible fixes use `patch`. The changeset text must still identify the

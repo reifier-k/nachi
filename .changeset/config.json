@@ -5,7 +5,19 @@
   "bumpVersionsWithWorkspaceProtocolOnly": true,
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [],
+  "fixed": [
+    [
+      "@nachi-vfx/core",
+      "@nachi-vfx/format",
+      "@nachi-vfx/mesh-fx",
+      "@nachi-vfx/post",
+      "@nachi-vfx/react",
+      "@nachi-vfx/three",
+      "@nachi-vfx/timeline",
+      "@nachi-vfx/trails",
+      "@nachi-vfx/tsl-kit"
+    ]
+  ],
   "ignore": ["@nachi-vfx/docs", "@nachi-vfx/playground"],
   "linked": [],
   "privatePackages": {

@@ -202,7 +202,8 @@ the Jacobi snapshot is position/velocity only in v1. WebGL2 must report
 parameter props must be validated and forwarded by core before the binding records them. React,
 R3F, and Three are peers, with Three fixed to 0.185.1 for this release.
 
-Release metadata uses Changesets with independent package versions (`fixed`/`linked` are empty).
+Release metadata uses Changesets with all nine public packages in one `fixed` group (single shared
+version per release; policy adopted after 0.2.0, RFC 003 §1).
 The release gate imports every built public export in plain Node ESM and runs `npm publish
 --dry-run` for every public package. Do not replace `release:dry` with a real publish command.
 
