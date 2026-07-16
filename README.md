@@ -163,6 +163,22 @@ Three draw objects are lifetime-bound to their emitter kernels. Reuse an existin
 or dispose/unmaterialize it before replacement; releasing an instance cleans registered draws before
 its kernels enter the pool, and a respawn must attach the newly materialized draw.
 
+## Effect authoring guide and agent skill
+
+A practical authoring guide lives in [`skills/nachi-effect-authoring/`](./skills/nachi-effect-authoring/SKILL.md):
+the library usage catalog ([library-usage.md](./skills/nachi-effect-authoring/references/library-usage.md))
+and scale-based skill-effect recipes ([effect-recipes.md](./skills/nachi-effect-authoring/references/effect-recipes.md)).
+It is packaged in the [Agent Skills](https://agentskills.io) format, so coding agents (Claude Code,
+Codex, Cursor, GitHub Copilot, …) can install it into a consuming project with the
+[skills CLI](https://github.com/vercel-labs/skills) — no extra tooling beyond Node.js:
+
+```sh
+npx skills add reifier-k/nachi --skill nachi-effect-authoring
+```
+
+Use `-a <agent>` to target specific agents and `-g` for a user-wide install. The `skills/*/SKILL.md`
+layout is also compatible with `gh skill install` (GitHub CLI v2.90.0+).
+
 ## Development and release checks
 
 ```sh

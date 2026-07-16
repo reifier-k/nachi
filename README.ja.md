@@ -158,6 +158,22 @@ Threeの描画オブジェクトは、そのエミッターカーネルにライ
 そのカーネルがプールに戻る前に登録済みの描画がクリーンアップされるため、再spawn時には新しく
 マテリアライズされた描画をアタッチする必要があります。
 
+## エフェクト制作ガイドとエージェントスキル
+
+実践的な制作ガイドは [`skills/nachi-effect-authoring/`](./skills/nachi-effect-authoring/SKILL.md) にあります:
+ライブラリ使用法カタログ（[library-usage.md](./skills/nachi-effect-authoring/references/library-usage.md)）と、
+規模別のスキルエフェクト制作レシピ（[effect-recipes.md](./skills/nachi-effect-authoring/references/effect-recipes.md)）です。
+[Agent Skills](https://agentskills.io) 形式でパッケージ化されているため、コーディングエージェント
+（Claude Code・Codex・Cursor・GitHub Copilot など）が使うプロジェクトへは
+[skills CLI](https://github.com/vercel-labs/skills) でインストールできます（Node.js 以外の追加ツール不要）:
+
+```sh
+npx skills add reifier-k/nachi --skill nachi-effect-authoring
+```
+
+特定エージェント向けは `-a <agent>`、ユーザー全体へのインストールは `-g` を付けます。
+`skills/*/SKILL.md` レイアウトは `gh skill install`（GitHub CLI v2.90.0 以降）とも互換です。
+
 ## 開発とリリースチェック
 
 ```sh

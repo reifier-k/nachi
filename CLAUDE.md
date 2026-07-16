@@ -19,6 +19,10 @@ This monorepo is building a Niagara-parity VFX library around Three Shading Lang
 - `apps/docs`: lightweight Vite static documentation and seven-effect demo gallery.
 - `tools`: Playwright-based WebGPU probes, spike collection, and screenshots.
 - `docs/rfc`: normative design RFCs; keep implementation and RFC terminology aligned.
+- `skills/nachi-effect-authoring`: Agent Skills-format effect authoring guide (bootstrap, module
+  catalog, scale-based recipes). When authoring or tuning an effect, read its SKILL.md and
+  references first instead of surveying package sources; installable elsewhere via
+  `npx skills add reifier-k/nachi --skill nachi-effect-authoring`. Keep it aligned with API changes.
 
 ## Commands
 
