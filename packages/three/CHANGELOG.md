@@ -1,5 +1,55 @@
 # @nachi-vfx/three
 
+## 0.2.0
+
+### Minor Changes
+
+- 1762675: Use numeric effect creation order for equal-significance budgets and equal-depth coarse alpha
+  ordering, and canonicalize routing between multiple event producers and one target. Equal-priority
+  light candidates now use logical particle spawn order instead of physical storage slots; light
+  selection statistics expose that spawn order. These changes affect exact ties and saturated event
+  or light winner selection while keeping public effect IDs compatible. The coarse-sort helper uses
+  numeric sequence ties only when every entry provides a safe integer, otherwise preserving its
+  stable-key ordering for the whole collection.
+
+  Compile historical five-read light-renderer manifests with the current `spawnOrder` dependency so
+  old effect JSON materializes the same deterministic light schema and draw instead of silently
+  dropping it.
+
+- 0379e0c: Deliver contained runtime diagnostics through a default one-line console reporter, replacement
+  handler, or explicit null opt-out while retaining instance diagnostics. Core now covers GPU,
+  attachment, device-loss, preparation, capacity, and readback-observed overflow sources; timeline
+  delivers its own failures without duplicating child-core reports; and prepared Three light draws
+  rebind light-limit warnings to their live owner. React documents and verifies mutable instance error
+  observation after a resolved provider update.
+
+  Do not let hidden preparation instances consume the one-shot late device-loss delivery intended for
+  the first caller-owned spawn, and do not append diagnostic-handler failures after an instance has
+  already reached the released state.
+
+- 9f610d5: BREAKING: introduce renderer module v2 and the `nachi-effect` v2 envelope. Alpha and premultiplied
+  billboard, mesh, and decal helpers now default to particle sorting; transparent v2 mesh draws no
+  longer write depth; v2 decals capture emitter rotation at spawn; and automatic draw order composes
+  host base, `renderOrderOffset`, and a fractional coarse rank. Use `sorted: false` for the explicitly
+  unordered path, `setRenderOrderBase()` for persistent Three order changes, and renderer module v1
+  when loading preserved legacy semantics. Format migrates v1 envelopes without upgrading module
+  versions and strictly validates renderer-v2 configs.
+
+### Patch Changes
+
+- Updated dependencies [be240d0]
+- Updated dependencies [1762675]
+- Updated dependencies [db962e3]
+- Updated dependencies [f9e8f1d]
+- Updated dependencies [14b9704]
+- Updated dependencies [62aab5e]
+- Updated dependencies [0379e0c]
+- Updated dependencies [1d390ce]
+- Updated dependencies [4097480]
+- Updated dependencies [9f610d5]
+- Updated dependencies [b03ac85]
+  - @nachi-vfx/core@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

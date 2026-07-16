@@ -1,5 +1,33 @@
 # @nachi-vfx/react
 
+## 0.1.1
+
+### Patch Changes
+
+- 0379e0c: Deliver contained runtime diagnostics through a default one-line console reporter, replacement
+  handler, or explicit null opt-out while retaining instance diagnostics. Core now covers GPU,
+  attachment, device-loss, preparation, capacity, and readback-observed overflow sources; timeline
+  delivers its own failures without duplicating child-core reports; and prepared Three light draws
+  rebind light-limit warnings to their live owner. React documents and verifies mutable instance error
+  observation after a resolved provider update.
+
+  Do not let hidden preparation instances consume the one-shot late device-loss delivery intended for
+  the first caller-owned spawn, and do not append diagnostic-handler failures after an instance has
+  already reached the released state.
+
+- Updated dependencies [be240d0]
+- Updated dependencies [1762675]
+- Updated dependencies [db962e3]
+- Updated dependencies [f9e8f1d]
+- Updated dependencies [14b9704]
+- Updated dependencies [62aab5e]
+- Updated dependencies [0379e0c]
+- Updated dependencies [1d390ce]
+- Updated dependencies [4097480]
+- Updated dependencies [9f610d5]
+- Updated dependencies [b03ac85]
+  - @nachi-vfx/core@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

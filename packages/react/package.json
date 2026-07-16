@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thin React Three Fiber lifecycle bindings for nachi VFX systems",
   "keywords": [
     "react",
