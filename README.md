@@ -3,11 +3,11 @@
 > Language: English (this page) / [日本語](./README.ja.md)
 
 > [!WARNING]
-> **HEAVY EXPERIMENTAL — v0.1.0 is not production-ready.** APIs, behavior, performance,
+> **HEAVY EXPERIMENTAL — v0.2.2 is not production-ready.** APIs, behavior, performance,
 > compatibility, and package boundaries may change significantly between releases.
 
 Code-first, TSL/WebGPU-native VFX for Three.js, designed around Niagara's staged simulation model.
-Nachi v0.1.0 is an experimental preview; M12 includes JSON assets, advanced simulation, React Three
+Nachi v0.2.2 is an experimental preview; M12 includes JSON assets, advanced simulation, React Three
 Fiber bindings, release automation, and a buildable documentation gallery.
 
 ## Packages

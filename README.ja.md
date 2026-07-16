@@ -3,11 +3,11 @@
 > Language: [English](./README.md) / 日本語 (このページ)
 
 > [!WARNING]
-> **HEAVY EXPERIMENTAL — v0.1.0は本番利用できる段階ではありません。** API、挙動、性能、互換性、
+> **HEAVY EXPERIMENTAL — v0.2.2は本番利用できる段階ではありません。** API、挙動、性能、互換性、
 > パッケージ境界はリリース間で大きく変わる可能性があります。
 
 Three.js向けのコードファーストかつTSL/WebGPUネイティブなVFXライブラリで、Niagaraのステージ型シミュレーションモデルを基に設計されています。
-Nachi v0.1.0は実験的なプレビューです。M12ではJSONアセット、高度なシミュレーション、React Three
+Nachi v0.2.2は実験的なプレビューです。M12ではJSONアセット、高度なシミュレーション、React Three
 Fiberバインディング、リリース自動化、ビルド可能なドキュメントギャラリーが含まれています。
 
 ## パッケージ
