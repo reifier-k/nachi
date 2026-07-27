@@ -51,7 +51,7 @@
   },
   "devDependencies": {
     "@nachi-vfx/trails": "workspace:^",
-    "@types/three": "0.185.0",
+    "@types/three": "0.185.1",
     "three": "0.185.1"
   }
 }
