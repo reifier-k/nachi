@@ -85,6 +85,12 @@ export interface ThreeKernelAdapterOptions {
   readonly maxBufferSize?: number;
   readonly maxStorageBufferBindingSize?: number;
   readonly backend?: 'webgl2' | 'webgpu';
+  /**
+   * Emit numeric constants as WGSL literals instead of uniforms. Default false on WebGPU (shared
+   * shader text across emitters = far fewer pipeline compiles); always true on WebGL2. Useful for
+   * pinning or reading generated shader text in tests.
+   */
+  readonly literalConstants?: boolean;
   readonly linearFloat32Filtering?: boolean;
   readonly maxStorageBuffersPerShaderStage?: number;
   readonly maxTransformFeedbackSeparateAttribs?: number;
@@ -344,7 +350,7 @@ function vectorValues(value: unknown, length: number): number[] {
   return value.map(Number);
 }
 
-function constantNode(
+function literalConstantNode(
   value: unknown,
   type: Parameters<KernelTslAdapter['constant']>[1],
 ): KernelNode {
@@ -370,6 +376,49 @@ function constantNode(
     case 'vec4': {
       const values = vectorValues(value, 4);
       return asNode(vec4(values[0], values[1], values[2], values[3]));
+    }
+    default:
+      throw new Error(`Unsupported constant type "${type}".`);
+  }
+}
+
+/**
+ * Numeric literals are emitted as uniforms rather than shader constants. Author parameters
+ * (sizes, lifetimes, colors, curve values) and layout constants (capacities, word offsets) differ
+ * between emitters that are otherwise structurally identical; as literals they made every emitter
+ * a unique compute/vertex shader (354 modules for 54 structures on a 34-effect game), each paid
+ * for in GPU-process compile time. As uniforms the WGSL text is shared and Three's program cache
+ * hits. The values never change after kernel build, so the uniform buffer is written once. Bools
+ * stay literal: they feed `If`/`select` conditions that need a boolean expression, and never vary.
+ */
+function constantNode(
+  value: unknown,
+  type: Parameters<KernelTslAdapter['constant']>[1],
+): KernelNode {
+  switch (type) {
+    case 'bool':
+      return asNode(uint(value ? 1 : 0));
+    case 'i32':
+      return asNode(createUniform(Number(value), 'int'));
+    case 'u32':
+      return asNode(createUniform(Number(value), 'uint'));
+    case 'f32':
+      return asNode(createUniform(Number(value), 'float'));
+    case 'vec2': {
+      const values = vectorValues(value, 2);
+      return asNode(createUniform(new THREE.Vector2(values[0], values[1]), 'vec2'));
+    }
+    case 'vec3': {
+      const values = vectorValues(value, 3);
+      return asNode(createUniform(new THREE.Vector3(values[0], values[1], values[2]), 'vec3'));
+    }
+    case 'color':
+    case 'quat':
+    case 'vec4': {
+      const values = vectorValues(value, 4);
+      return asNode(
+        createUniform(new THREE.Vector4(values[0], values[1], values[2], values[3]), 'vec4'),
+      );
     }
     case 'mat3': {
       const values = vectorValues(value, 9);
@@ -698,6 +747,7 @@ export function createThreeKernelAdapter(
   }
   const sceneDepthSampleCount =
     configuredSceneDepthSampleCount === 0 ? 1 : configuredSceneDepthSampleCount;
+  const literalConstants = options.backend === 'webgl2' || options.literalConstants === true;
   const base: KernelTslAdapter = {
     capabilities: {
       atomics: options.backend !== 'webgl2',
@@ -736,7 +786,9 @@ export function createThreeKernelAdapter(
         });
       }
     },
-    constant: constantNode,
+    // WebGL2 keeps literals: its transform-feedback resources are isolated by shader identity
+    // (webgl2ResourceIdentity baked into the text), and GLSL uniform slots are scarcer.
+    constant: literalConstants ? literalConstantNode : constantNode,
     cos: (value) => asNode(cos(value as never)),
     dataTexture: (lut) => createDataTexture(lut, options.linearFloat32Filtering ?? false),
     fn: (callback) => Fn(callback)() as unknown as ReturnType<KernelTslAdapter['fn']>,
@@ -906,7 +958,11 @@ export function createThreeKernelAdapter(
     sin: (value) => asNode(sin(value as never)),
     uniform: (value, type) =>
       createUniform(uniformValue(value, type), type) as ReturnType<KernelTslAdapter['uniform']>,
-    uint: (value) => asNode(uint(value as never)),
+    // Plain numbers become uniforms for the same reason as constantNode (layout constants).
+    uint: (value) =>
+      typeof value === 'number' && !literalConstants
+        ? asNode(createUniform(value, 'uint'))
+        : asNode(uint(value as never)),
     vec2: (x, y) => asNode(vec2(x as never, y as never)),
     vec3: (x, y, z) => asNode(vec3(x as never, y as never, z as never)),
     vec4: (x, y, z, w) => asNode(vec4(x as never, y as never, z as never, w as never)),

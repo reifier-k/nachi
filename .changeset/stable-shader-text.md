@@ -15,3 +15,8 @@ Stable shader text across draw materializations so Three's program/pipeline cach
 
 Measured on a 34-effect game: preload render pipelines 357 → 93, spawn-time synchronous
 `createRenderPipeline` calls for particle draws 208 → 0.
+- Numeric constants (`constant()` and plain-number `uint()`) are emitted as uniforms on WebGPU
+  instead of shader literals, so structurally identical emitters share compute shader text too
+  (354 → 117 unique compute modules on the same game). WebGL2 keeps literals (its transform-feedback
+  resources are isolated by shader identity); `createThreeKernelAdapter({ literalConstants: true })`
+  restores literals on WebGPU for tests that pin or inspect WGSL text.

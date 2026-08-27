@@ -209,7 +209,7 @@ describe('three kernel adapter', () => {
 
     const legacyShader = shaderFor(positionSphere({ radius: 1 }));
     expect(createHash('sha256').update(legacyShader).digest('hex')).toBe(
-      '1caf028fc8005f58531b31f85f8c4847b1330b4d50c4776cf878e505e2bdb343',
+      'b625cb7b4ed4538bf7676454694592ec9d24a8250a1d3896009f5c73a6917e6b',
     );
     expect(() =>
       shaderFor(
@@ -252,7 +252,7 @@ describe('three kernel adapter', () => {
     builder.build();
 
     expect(createHash('sha256').update(builder.computeShader).digest('hex')).toBe(
-      '138c12265a60f2db722ec488ef11822c40f6d0f1763ddbc47c8f6ec5f93ade3d',
+      '6333f8489d6ea3259ae48eddefa53e633eed7cc4f5c9a2f381c03e22d4043f1d',
     );
   });
 
@@ -300,7 +300,7 @@ describe('three kernel adapter', () => {
     const builder = new NodeBuilder(kernels.update, renderer);
     builder.build();
     expect(createHash('sha256').update(builder.computeShader).digest('hex')).toBe(
-      '05c9a7baec6516f8714e2cc63e65f27b50f57d9e060b4b5cdb639d6da65e70f0',
+      'e9cc9cc2e295117d8d66536e6963bb546856cc2b9dc8b5927cf7aa8517d4e383',
     );
 
     const stableAccess: ModuleAccess = {
@@ -426,8 +426,8 @@ describe('three kernel adapter', () => {
     expect(explicit).toEqual(omitted);
     expect(legacy).toEqual(omitted);
     expect(omitted).toEqual({
-      initialize: '995776cef488f7ef5a096c8d536c5d1615ad8ef879d083e19c7cd85339da3872',
-      update: '2b4577d2bc2ee750d5bd9882c4f115a56aa5905b301facbb6ec3aebca3a15e43',
+      initialize: '36ccab21c73b84bf808d4fa5d11fe694dba9ad4758f68b4cb92d44f0e53f1ad3',
+      update: '2c020803858a1b690cd47ca66e25172d190139eca13f865bb3032818673079a1',
     });
   });
 
@@ -551,11 +551,11 @@ describe('three kernel adapter', () => {
 
     // Captured from the pre-H1-5 omitted-selector (world-space) implementation.
     expect(hashes).toEqual([
-      'f32a84278aba8c428a216e0017c32f2bcc9b7eba95d4a097f53f6d80c192f8b6',
-      'b325810702c408ce0fe74e08cf5101ac72bf5826562d1558ac3441cb7d0589f1',
-      '8f447bd903cc1adea5f818c60c78ba2d40d459eb1a11c52de2a1599fcd15263d',
-      '310a7586c021522b5f81e3a94b17dc35237150878fdb6e78de65d1066d50090b',
-      'e730cef6a5c64a57a90000f8ed54ef801af0958288fcb59be1cd70d698ce9e73',
+      'fd568a63fd7a98ed12931b5af92da26764fc7a1612ca94a9b6e6f82eaa03ecd8',
+      '92ba6d31e4f67b7e87f2383fd853246643cbb0033bbc36b5d79aeb10e99053d5',
+      '67b128c1cc0248a6bef99096635c403b97a6a7097a437002f443b86e23e7ac36',
+      'cd7f31ddd17800f27c5431ddee47f61f4adcb98c8c9c8b0a3f093d312550d76f',
+      '5fb93bd77b8a7a952372212c21aedeb9588e7b007c18807132374aaf8cc03e8e',
     ]);
   });
 

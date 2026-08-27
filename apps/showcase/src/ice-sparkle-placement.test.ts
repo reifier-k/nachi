@@ -125,7 +125,7 @@ describe('ice sparkle local placement', () => {
 
     expect(builder.computeShader).not.toMatch(/inverse/i);
     expect(createHash('sha256').update(builder.computeShader).digest('hex')).toBe(
-      '5c6dd287cddcc41513ece6899b5b8ea1768068180bc24b5055259541fa40f554',
+      'ae61f4767aefc6981a2f394ca4f0c9ea9e35830e6ed8066135aebca4742112bf',
     );
   });
 

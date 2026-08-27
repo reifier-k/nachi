@@ -163,7 +163,9 @@ describe('M12 NeighborGrid Three r185 materialization', () => {
     });
     const program = compileEmitter(emitter, { neighborGrids: { neighbors: grid } });
     const shader = kernelShader(
-      program.buildKernels(createThreeKernelAdapter({ backend: 'webgpu' })).update,
+      // literalConstants: this test locates the gravity term by its literal in the WGSL text.
+      program.buildKernels(createThreeKernelAdapter({ backend: 'webgpu', literalConstants: true }))
+        .update,
     );
 
     expect(shader).toContain('-9.8');
