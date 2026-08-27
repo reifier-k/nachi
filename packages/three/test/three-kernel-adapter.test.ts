@@ -775,7 +775,8 @@ describe('three kernel adapter', () => {
     });
     const decalIndirect = decalKernels.drawIndirect!
       .indirectResource as THREE.IndirectStorageBufferAttribute;
-    expect(decal.geometry).toBeInstanceOf(THREE.BoxGeometry);
+    expect(decal.geometry).toBeInstanceOf(THREE.InstancedBufferGeometry);
+    expect(decal.geometry.getIndex()?.count).toBe(36);
     expect(decal.geometry.getIndirect()).toBeDefined();
     expect(decal.renderOrder).toBe(27);
     expect(decal.visible).toBe(false);
@@ -1340,7 +1341,7 @@ describe('three kernel adapter', () => {
     expect(attribute.array.byteLength).toBe(48);
   });
 
-  it('materializes a packed sprite InstancedMesh and primes indirect indexCount', () => {
+  it('materializes a packed sprite instanced Mesh and primes indirect indexCount', () => {
     const program = compileEmitter(
       defineEmitter({
         capacity: 4,
@@ -1354,7 +1355,9 @@ describe('three kernel adapter', () => {
     const words = (kernels.drawIndirect!.indirectResource as { array: Uint32Array }).array;
     const indirect = kernels.drawIndirect!.indirectResource as THREE.IndirectStorageBufferAttribute;
 
-    expect(mesh.isInstancedMesh).toBe(true);
+    expect(mesh.isMesh).toBe(true);
+    expect(mesh.geometry).toBeInstanceOf(THREE.InstancedBufferGeometry);
+    expect(mesh.geometry.instanceCount).toBe(4);
     expect(mesh.geometry.getIndex()?.count).toBe(6);
     expect(mesh.geometry.getIndirect()).toBe(kernels.drawIndirect!.indirectResource);
     expect(words[offset]).toBe(6);
@@ -1380,10 +1383,11 @@ describe('three kernel adapter', () => {
       expect(renderTarget).toBe(compileTarget);
       expect(mrt).toBeNull();
       object.traverse((child) => {
-        if (child instanceof THREE.InstancedMesh) compiledObject = child;
+        if (child instanceof THREE.Mesh && child.geometry instanceof THREE.InstancedBufferGeometry)
+          compiledObject = child;
       });
-      expect(compiledObject).toBeInstanceOf(THREE.InstancedMesh);
-      const material = (compiledObject as THREE.InstancedMesh).material as THREE.Material;
+      expect(compiledObject).toBeInstanceOf(THREE.Mesh);
+      const material = (compiledObject as THREE.Mesh).material as THREE.Material;
       if (!materialDispose) {
         materialDispose = vi.fn<() => void>(material.dispose.bind(material));
         material.dispose = materialDispose as () => void;

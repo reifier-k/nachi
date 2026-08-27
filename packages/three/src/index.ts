@@ -1278,8 +1278,12 @@ function createThreeParticleStorageBindings(
   const vertexStorages = program.attributeSchema.storageArrays.map((description) => {
     const computeStorage = kernels.storages[description.name];
     if (!computeStorage) throw new Error(`Particle storage "${description.name}" is missing.`);
+    // Stable WGSL binding names: Three names storage bindings `NodeBuffer_<node.id>` by default, so a
+    // freshly materialized draw would emit different shader text each time (see instancedDrawGeometry).
     return (
-      storage(computeStorage.value as never, description.type, description.length) as unknown as {
+      storage(computeStorage.value as never, description.type, description.length).setName(
+        `NachiAttr${description.index}`,
+      ) as unknown as {
         toReadOnly(): KernelStorageNode;
       }
     ).toReadOnly();
@@ -1327,7 +1331,7 @@ function createThreeParticleVertexBindings(
       kernels.aliveIndices.value as never,
       'uint',
       program.meta.lifecycleStorage.buffers.state.wordCount,
-    ) as unknown as { toReadOnly(): KernelStorageNode }
+    ).setName('NachiAlive') as unknown as { toReadOnly(): KernelStorageNode }
   ).toReadOnly();
   if (indirect.physicalIndex === 'sorted-indices') {
     if (
@@ -1338,23 +1342,23 @@ function createThreeParticleVertexBindings(
       throw new Error('Compiled sorted draw is missing its padded indirection buffer.');
     }
     const sortedRead = (
-      storage(
-        kernels.sortedIndices.value as never,
-        'uint',
-        kernels.sortPaddedCapacity,
+      storage(kernels.sortedIndices.value as never, 'uint', kernels.sortPaddedCapacity).setName(
+        'NachiSorted',
       ) as unknown as {
         toReadOnly(): KernelStorageNode;
       }
     ).toReadOnly();
     const aliveCount = lifecycleRead.element(asNode(uint(kernels.counterOffsets.aliveCount)));
     // Valid sorted entries occupy [P - aliveCount, P); instanceIndex is relative to that suffix.
-    const sortedIndex = asNode(uint(kernels.sortPaddedCapacity))
+    // Uniform rather than literal: the padded capacity is per-emitter layout data, and baking it
+    // into shader text made structurally identical draws compile separate pipelines.
+    const sortedIndex = asNode(uniform(kernels.sortPaddedCapacity, 'uint'))
       .sub(aliveCount)
       .add(asNode(uint(instanceIndex)));
     return { compactedIndex: sortedRead.element(sortedIndex), logicalAttribute };
   }
   const aliveIndex = asNode(uint(instanceIndex)).add(
-    asNode(uint(indirect.aliveIndicesOffsetWords)),
+    asNode(uniform(indirect.aliveIndicesOffsetWords, 'uint')), // uniform: see sortedIndex above
   );
   return { compactedIndex: lifecycleRead.element(aliveIndex), logicalAttribute };
 }
@@ -1365,8 +1369,8 @@ export function materializeThreeSpriteDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeSpriteMaterializationOptions = {},
-): THREE.InstancedMesh<
-  THREE.BufferGeometry,
+): THREE.Mesh<
+  THREE.InstancedBufferGeometry,
   THREE.SpriteNodeMaterial | ThreeLitSpriteNodeMaterial
 > &
   ThreeDrawRenderOrderControl {
@@ -1558,12 +1562,10 @@ export function materializeThreeSpriteDraw(
   );
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
 
-  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
-  const identity = new THREE.Matrix4();
-  for (let index = 0; index < program.attributeSchema.capacity; index += 1) {
-    mesh.setMatrixAt(index, identity);
-  }
-  mesh.instanceMatrix.needsUpdate = true;
+  const mesh = new THREE.Mesh(
+    instancedDrawGeometry(geometry, program.attributeSchema.capacity),
+    material,
+  );
   mesh.frustumCulled = false;
   return Object.assign(
     mesh,
@@ -1573,6 +1575,31 @@ export function materializeThreeSpriteDraw(
       offset: draw.renderOrderOffset,
     }),
   );
+}
+
+/**
+ * Wraps a draw geometry as InstancedBufferGeometry so instancing comes from the geometry, not
+ * from THREE.InstancedMesh. InstancedMesh injects an `instanceMatrix` uniform buffer whose WGSL
+ * name embeds the node id and whose array length embeds the capacity, so every materialized draw
+ * produced unique shader text and Three's program/pipeline caches never hit across instances
+ * (each spawn recompiled its render pipeline synchronously). Particle transforms are computed
+ * from storage in the vertex stage, so the identity instance matrix carried no information.
+ * The actual instance count comes from the indirect draw arguments; instanceCount is the ceiling.
+ */
+function instancedDrawGeometry(
+  source: THREE.BufferGeometry,
+  capacity: number,
+): THREE.InstancedBufferGeometry {
+  const geometry = new THREE.InstancedBufferGeometry();
+  // BufferGeometry.copy handles index/attributes/groups; the typing only accepts the subclass.
+  geometry.copy(source as THREE.InstancedBufferGeometry);
+  // copy() does not carry the indirect draw binding; materializers set it on the source first.
+  const indirect = source.getIndirect();
+  if (indirect) {
+    geometry.setIndirect(indirect, (source as { indirectOffset?: number }).indirectOffset ?? 0);
+  }
+  geometry.instanceCount = capacity;
+  return geometry;
 }
 
 function indexedGeometry(source: THREE.BufferGeometry): THREE.BufferGeometry {
@@ -1620,7 +1647,7 @@ export function materializeThreeMeshDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeMeshMaterializationOptions,
-): THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial> &
+): THREE.Mesh<THREE.InstancedBufferGeometry, THREE.MeshBasicNodeMaterial> &
   ThreeDrawRenderOrderControl {
   const draw = program.draws[drawIndex];
   if (draw?.kind !== 'mesh') {
@@ -1688,12 +1715,10 @@ export function materializeThreeMeshDraw(
   primeIndirectIndexCount(indirect, draw.indirect.drawArgumentsOffsetBytes, indexCount);
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
 
-  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
-  const identity = new THREE.Matrix4();
-  for (let index = 0; index < program.attributeSchema.capacity; index += 1) {
-    mesh.setMatrixAt(index, identity);
-  }
-  mesh.instanceMatrix.needsUpdate = true;
+  const mesh = new THREE.Mesh(
+    instancedDrawGeometry(geometry, program.attributeSchema.capacity),
+    material,
+  );
   mesh.frustumCulled = false;
   return Object.assign(
     mesh,
@@ -2008,7 +2033,7 @@ export function materializeThreeDecalDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeDecalMaterializationOptions,
-): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicNodeMaterial> &
+): THREE.Mesh<THREE.InstancedBufferGeometry, THREE.MeshBasicNodeMaterial> &
   ThreeDrawRenderOrderControl {
   const draw = program.draws[drawIndex];
   if (draw?.kind !== 'decal') throw new Error(`Compiled decal draw ${drawIndex} is missing.`);
@@ -2098,11 +2123,10 @@ export function materializeThreeDecalDraw(
     geometry.getIndex()?.count ?? 36,
   );
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
-  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
-  const identity = new THREE.Matrix4();
-  for (let index = 0; index < program.attributeSchema.capacity; index += 1)
-    mesh.setMatrixAt(index, identity);
-  mesh.instanceMatrix.needsUpdate = true;
+  const mesh = new THREE.Mesh(
+    instancedDrawGeometry(geometry, program.attributeSchema.capacity),
+    material,
+  );
   mesh.frustumCulled = false;
   return Object.assign(
     mesh,

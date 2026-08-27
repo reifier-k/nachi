@@ -1,0 +1,17 @@
+---
+'@nachi-vfx/three': patch
+---
+
+Stable shader text across draw materializations so Three's program/pipeline caches hit.
+
+- Sprite/mesh/decal draws are now `THREE.Mesh` + `InstancedBufferGeometry` (instance ceiling =
+  capacity; the actual count still comes from the indirect draw arguments) instead of
+  `THREE.InstancedMesh`. InstancedMesh injected an `instanceMatrix` uniform buffer whose WGSL name
+  embeds the node id and whose array length embeds the capacity, so every materialized draw had
+  unique shader text and every spawn recompiled its render pipeline synchronously.
+- Draw-side storage bindings get fixed names (`NachiAttr<n>`, `NachiAlive`, `NachiSorted`)
+  instead of Three's `NodeBuffer_<id>`.
+- The alive-index offset and sorted padded capacity are uniforms rather than literals.
+
+Measured on a 34-effect game: preload render pipelines 357 → 93, spawn-time synchronous
+`createRenderPipeline` calls for particle draws 208 → 0.
