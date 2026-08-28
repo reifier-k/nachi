@@ -1,5 +1,12 @@
 # @nachi-vfx/timeline
 
+## 0.3.0
+
+### Patch Changes
+
+- @nachi-vfx/core@0.3.0
+- @nachi-vfx/mesh-fx@0.3.0
+
 ## 0.2.3
 
 ### Patch Changes
