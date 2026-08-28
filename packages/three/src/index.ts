@@ -85,6 +85,12 @@ export interface ThreeKernelAdapterOptions {
   readonly maxBufferSize?: number;
   readonly maxStorageBufferBindingSize?: number;
   readonly backend?: 'webgl2' | 'webgpu';
+  /**
+   * Emit numeric constants as WGSL literals instead of uniforms. Default false on WebGPU (shared
+   * shader text across emitters = far fewer pipeline compiles); always true on WebGL2. Useful for
+   * pinning or reading generated shader text in tests.
+   */
+  readonly literalConstants?: boolean;
   readonly linearFloat32Filtering?: boolean;
   readonly maxStorageBuffersPerShaderStage?: number;
   readonly maxTransformFeedbackSeparateAttribs?: number;
@@ -344,7 +350,7 @@ function vectorValues(value: unknown, length: number): number[] {
   return value.map(Number);
 }
 
-function constantNode(
+function literalConstantNode(
   value: unknown,
   type: Parameters<KernelTslAdapter['constant']>[1],
 ): KernelNode {
@@ -370,6 +376,49 @@ function constantNode(
     case 'vec4': {
       const values = vectorValues(value, 4);
       return asNode(vec4(values[0], values[1], values[2], values[3]));
+    }
+    default:
+      throw new Error(`Unsupported constant type "${type}".`);
+  }
+}
+
+/**
+ * Numeric literals are emitted as uniforms rather than shader constants. Author parameters
+ * (sizes, lifetimes, colors, curve values) and layout constants (capacities, word offsets) differ
+ * between emitters that are otherwise structurally identical; as literals they made every emitter
+ * a unique compute/vertex shader (354 modules for 54 structures on a 34-effect game), each paid
+ * for in GPU-process compile time. As uniforms the WGSL text is shared and Three's program cache
+ * hits. The values never change after kernel build, so the uniform buffer is written once. Bools
+ * stay literal: they feed `If`/`select` conditions that need a boolean expression, and never vary.
+ */
+function constantNode(
+  value: unknown,
+  type: Parameters<KernelTslAdapter['constant']>[1],
+): KernelNode {
+  switch (type) {
+    case 'bool':
+      return asNode(uint(value ? 1 : 0));
+    case 'i32':
+      return asNode(createUniform(Number(value), 'int'));
+    case 'u32':
+      return asNode(createUniform(Number(value), 'uint'));
+    case 'f32':
+      return asNode(createUniform(Number(value), 'float'));
+    case 'vec2': {
+      const values = vectorValues(value, 2);
+      return asNode(createUniform(new THREE.Vector2(values[0], values[1]), 'vec2'));
+    }
+    case 'vec3': {
+      const values = vectorValues(value, 3);
+      return asNode(createUniform(new THREE.Vector3(values[0], values[1], values[2]), 'vec3'));
+    }
+    case 'color':
+    case 'quat':
+    case 'vec4': {
+      const values = vectorValues(value, 4);
+      return asNode(
+        createUniform(new THREE.Vector4(values[0], values[1], values[2], values[3]), 'vec4'),
+      );
     }
     case 'mat3': {
       const values = vectorValues(value, 9);
@@ -698,6 +747,7 @@ export function createThreeKernelAdapter(
   }
   const sceneDepthSampleCount =
     configuredSceneDepthSampleCount === 0 ? 1 : configuredSceneDepthSampleCount;
+  const literalConstants = options.backend === 'webgl2' || options.literalConstants === true;
   const base: KernelTslAdapter = {
     capabilities: {
       atomics: options.backend !== 'webgl2',
@@ -736,7 +786,9 @@ export function createThreeKernelAdapter(
         });
       }
     },
-    constant: constantNode,
+    // WebGL2 keeps literals: its transform-feedback resources are isolated by shader identity
+    // (webgl2ResourceIdentity baked into the text), and GLSL uniform slots are scarcer.
+    constant: literalConstants ? literalConstantNode : constantNode,
     cos: (value) => asNode(cos(value as never)),
     dataTexture: (lut) => createDataTexture(lut, options.linearFloat32Filtering ?? false),
     fn: (callback) => Fn(callback)() as unknown as ReturnType<KernelTslAdapter['fn']>,
@@ -906,7 +958,11 @@ export function createThreeKernelAdapter(
     sin: (value) => asNode(sin(value as never)),
     uniform: (value, type) =>
       createUniform(uniformValue(value, type), type) as ReturnType<KernelTslAdapter['uniform']>,
-    uint: (value) => asNode(uint(value as never)),
+    // Plain numbers become uniforms for the same reason as constantNode (layout constants).
+    uint: (value) =>
+      typeof value === 'number' && !literalConstants
+        ? asNode(createUniform(value, 'uint'))
+        : asNode(uint(value as never)),
     vec2: (x, y) => asNode(vec2(x as never, y as never)),
     vec3: (x, y, z) => asNode(vec3(x as never, y as never, z as never)),
     vec4: (x, y, z, w) => asNode(vec4(x as never, y as never, z as never, w as never)),
@@ -1278,8 +1334,12 @@ function createThreeParticleStorageBindings(
   const vertexStorages = program.attributeSchema.storageArrays.map((description) => {
     const computeStorage = kernels.storages[description.name];
     if (!computeStorage) throw new Error(`Particle storage "${description.name}" is missing.`);
+    // Stable WGSL binding names: Three names storage bindings `NodeBuffer_<node.id>` by default, so a
+    // freshly materialized draw would emit different shader text each time (see instancedDrawGeometry).
     return (
-      storage(computeStorage.value as never, description.type, description.length) as unknown as {
+      storage(computeStorage.value as never, description.type, description.length).setName(
+        `NachiAttr${description.index}`,
+      ) as unknown as {
         toReadOnly(): KernelStorageNode;
       }
     ).toReadOnly();
@@ -1327,7 +1387,7 @@ function createThreeParticleVertexBindings(
       kernels.aliveIndices.value as never,
       'uint',
       program.meta.lifecycleStorage.buffers.state.wordCount,
-    ) as unknown as { toReadOnly(): KernelStorageNode }
+    ).setName('NachiAlive') as unknown as { toReadOnly(): KernelStorageNode }
   ).toReadOnly();
   if (indirect.physicalIndex === 'sorted-indices') {
     if (
@@ -1338,23 +1398,23 @@ function createThreeParticleVertexBindings(
       throw new Error('Compiled sorted draw is missing its padded indirection buffer.');
     }
     const sortedRead = (
-      storage(
-        kernels.sortedIndices.value as never,
-        'uint',
-        kernels.sortPaddedCapacity,
+      storage(kernels.sortedIndices.value as never, 'uint', kernels.sortPaddedCapacity).setName(
+        'NachiSorted',
       ) as unknown as {
         toReadOnly(): KernelStorageNode;
       }
     ).toReadOnly();
     const aliveCount = lifecycleRead.element(asNode(uint(kernels.counterOffsets.aliveCount)));
     // Valid sorted entries occupy [P - aliveCount, P); instanceIndex is relative to that suffix.
-    const sortedIndex = asNode(uint(kernels.sortPaddedCapacity))
+    // Uniform rather than literal: the padded capacity is per-emitter layout data, and baking it
+    // into shader text made structurally identical draws compile separate pipelines.
+    const sortedIndex = asNode(uniform(kernels.sortPaddedCapacity, 'uint'))
       .sub(aliveCount)
       .add(asNode(uint(instanceIndex)));
     return { compactedIndex: sortedRead.element(sortedIndex), logicalAttribute };
   }
   const aliveIndex = asNode(uint(instanceIndex)).add(
-    asNode(uint(indirect.aliveIndicesOffsetWords)),
+    asNode(uniform(indirect.aliveIndicesOffsetWords, 'uint')), // uniform: see sortedIndex above
   );
   return { compactedIndex: lifecycleRead.element(aliveIndex), logicalAttribute };
 }
@@ -1365,8 +1425,8 @@ export function materializeThreeSpriteDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeSpriteMaterializationOptions = {},
-): THREE.InstancedMesh<
-  THREE.BufferGeometry,
+): THREE.Mesh<
+  THREE.InstancedBufferGeometry,
   THREE.SpriteNodeMaterial | ThreeLitSpriteNodeMaterial
 > &
   ThreeDrawRenderOrderControl {
@@ -1558,12 +1618,10 @@ export function materializeThreeSpriteDraw(
   );
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
 
-  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
-  const identity = new THREE.Matrix4();
-  for (let index = 0; index < program.attributeSchema.capacity; index += 1) {
-    mesh.setMatrixAt(index, identity);
-  }
-  mesh.instanceMatrix.needsUpdate = true;
+  const mesh = new THREE.Mesh(
+    instancedDrawGeometry(geometry, program.attributeSchema.capacity),
+    material,
+  );
   mesh.frustumCulled = false;
   return Object.assign(
     mesh,
@@ -1573,6 +1631,31 @@ export function materializeThreeSpriteDraw(
       offset: draw.renderOrderOffset,
     }),
   );
+}
+
+/**
+ * Wraps a draw geometry as InstancedBufferGeometry so instancing comes from the geometry, not
+ * from THREE.InstancedMesh. InstancedMesh injects an `instanceMatrix` uniform buffer whose WGSL
+ * name embeds the node id and whose array length embeds the capacity, so every materialized draw
+ * produced unique shader text and Three's program/pipeline caches never hit across instances
+ * (each spawn recompiled its render pipeline synchronously). Particle transforms are computed
+ * from storage in the vertex stage, so the identity instance matrix carried no information.
+ * The actual instance count comes from the indirect draw arguments; instanceCount is the ceiling.
+ */
+function instancedDrawGeometry(
+  source: THREE.BufferGeometry,
+  capacity: number,
+): THREE.InstancedBufferGeometry {
+  const geometry = new THREE.InstancedBufferGeometry();
+  // BufferGeometry.copy handles index/attributes/groups; the typing only accepts the subclass.
+  geometry.copy(source as THREE.InstancedBufferGeometry);
+  // copy() does not carry the indirect draw binding; materializers set it on the source first.
+  const indirect = source.getIndirect();
+  if (indirect) {
+    geometry.setIndirect(indirect, (source as { indirectOffset?: number }).indirectOffset ?? 0);
+  }
+  geometry.instanceCount = capacity;
+  return geometry;
 }
 
 function indexedGeometry(source: THREE.BufferGeometry): THREE.BufferGeometry {
@@ -1620,7 +1703,7 @@ export function materializeThreeMeshDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeMeshMaterializationOptions,
-): THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial> &
+): THREE.Mesh<THREE.InstancedBufferGeometry, THREE.MeshBasicNodeMaterial> &
   ThreeDrawRenderOrderControl {
   const draw = program.draws[drawIndex];
   if (draw?.kind !== 'mesh') {
@@ -1688,12 +1771,10 @@ export function materializeThreeMeshDraw(
   primeIndirectIndexCount(indirect, draw.indirect.drawArgumentsOffsetBytes, indexCount);
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
 
-  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
-  const identity = new THREE.Matrix4();
-  for (let index = 0; index < program.attributeSchema.capacity; index += 1) {
-    mesh.setMatrixAt(index, identity);
-  }
-  mesh.instanceMatrix.needsUpdate = true;
+  const mesh = new THREE.Mesh(
+    instancedDrawGeometry(geometry, program.attributeSchema.capacity),
+    material,
+  );
   mesh.frustumCulled = false;
   return Object.assign(
     mesh,
@@ -2008,7 +2089,7 @@ export function materializeThreeDecalDraw(
   kernels: BuiltEmitterKernels,
   drawIndex = 0,
   options: ThreeDecalMaterializationOptions,
-): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicNodeMaterial> &
+): THREE.Mesh<THREE.InstancedBufferGeometry, THREE.MeshBasicNodeMaterial> &
   ThreeDrawRenderOrderControl {
   const draw = program.draws[drawIndex];
   if (draw?.kind !== 'decal') throw new Error(`Compiled decal draw ${drawIndex} is missing.`);
@@ -2098,11 +2179,10 @@ export function materializeThreeDecalDraw(
     geometry.getIndex()?.count ?? 36,
   );
   geometry.setIndirect(indirect, draw.indirect.drawArgumentsOffsetBytes);
-  const mesh = new THREE.InstancedMesh(geometry, material, program.attributeSchema.capacity);
-  const identity = new THREE.Matrix4();
-  for (let index = 0; index < program.attributeSchema.capacity; index += 1)
-    mesh.setMatrixAt(index, identity);
-  mesh.instanceMatrix.needsUpdate = true;
+  const mesh = new THREE.Mesh(
+    instancedDrawGeometry(geometry, program.attributeSchema.capacity),
+    material,
+  );
   mesh.frustumCulled = false;
   return Object.assign(
     mesh,

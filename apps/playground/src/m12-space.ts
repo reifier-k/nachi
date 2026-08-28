@@ -747,8 +747,8 @@ async function run(): Promise<void> {
       ? { explicit: await selectorWgslHashes(true), omitted: await selectorWgslHashes(false) }
       : undefined;
     const oldHashes = {
-      initialize: '995776cef488f7ef5a096c8d536c5d1615ad8ef879d083e19c7cd85339da3872',
-      update: '2b4577d2bc2ee750d5bd9882c4f115a56aa5905b301facbb6ec3aebca3a15e43',
+      initialize: '36ccab21c73b84bf808d4fa5d11fe694dba9ad4758f68b4cb92d44f0e53f1ad3',
+      update: '2c020803858a1b690cd47ca66e25172d190139eca13f865bb3032818673079a1',
     };
 
     const validationBeforePerformance = {
