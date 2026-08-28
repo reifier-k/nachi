@@ -1,8 +1,14 @@
 ---
-'@nachi-vfx/three': patch
+'@nachi-vfx/three': minor
 ---
 
 Stable shader text across draw materializations so Three's program/pipeline caches hit.
+
+Breaking (types): `materializeThreeSpriteDraw`, `materializeThreeMeshDraw`, and
+`materializeThreeDecalDraw` now return `THREE.Mesh<THREE.InstancedBufferGeometry, …>` instead of
+`THREE.InstancedMesh`. Code that read `.count`, `.instanceMatrix`, or called `setMatrixAt()` on the
+returned object must stop: instancing is driven by the indirect draw arguments and
+`geometry.instanceCount` (the capacity ceiling).
 
 - Sprite/mesh/decal draws are now `THREE.Mesh` + `InstancedBufferGeometry` (instance ceiling =
   capacity; the actual count still comes from the indirect draw arguments) instead of
