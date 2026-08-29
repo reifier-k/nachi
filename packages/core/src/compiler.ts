@@ -6100,10 +6100,17 @@ export function createCoreKernelModuleRegistry(): KernelModuleRegistry {
         .clamp(0, 1);
       const currentScale = context.sampleLut(context.module.lutId, normalizedAge).r;
       const previousScale = context.sampleLut(context.module.lutId, previousAge).r;
+      // A zero-length Update (the settle pass after a dt=0 birth) must not touch velocity: with
+      // deltaTime = 0 the two samples coincide, and a curve that starts at 0 would otherwise zero
+      // the birth velocity for good instead of scaling it on the first real step.
       const scale = context.adapter.select(
-        previousScale.mul(previousScale).greaterThanEqual(1e-12),
-        currentScale.div(previousScale),
-        currentScale,
+        context.uniform('Emitter.deltaTime').lessThanEqual(0),
+        context.adapter.constant(1, 'f32'),
+        context.adapter.select(
+          previousScale.mul(previousScale).greaterThanEqual(1e-12),
+          currentScale.div(previousScale),
+          currentScale,
+        ),
       );
       context.write('velocity', context.attribute('velocity').mul(scale));
     },

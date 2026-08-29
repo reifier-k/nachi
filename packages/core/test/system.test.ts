@@ -2449,12 +2449,14 @@ describe('VFXSystem runtime scheduler', () => {
     const lastConsumedStep = () => emitter.kernels.uniforms['Emitter.updateRandomStep']?.value;
 
     await system.update(0);
+    // The dt=0 birth settle pass submits Update with the current ordinal but does not consume it.
     expect(lastConsumedStep()).toBe(0);
-    expect(renderer.updateRandomStepSubmissions).toEqual([]);
+    expect(renderer.updateRandomStepSubmissions).toEqual([{ emitter: 'particles', step: 0 }]);
 
     await system.update(0.25);
     expect(lastConsumedStep()).toBe(1);
     expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'particles', step: 0 },
       { emitter: 'particles', step: 0 },
       { emitter: 'particles', step: 1 },
     ]);
@@ -2462,17 +2464,103 @@ describe('VFXSystem runtime scheduler', () => {
     instance.setTimeScale(0);
     await system.update(0.5);
     expect(lastConsumedStep()).toBe(1);
-    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 0, 1]);
 
     instance.setTimeScale(1);
     instance.applyHitStop(100);
     await system.update(0.1);
     expect(lastConsumedStep()).toBe(1);
-    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 0, 1]);
 
     await system.update(0.1);
     expect(lastConsumedStep()).toBe(2);
-    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1, 2]);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 0, 1, 2]);
+  });
+
+  describe('dt=0 birth settle pass', () => {
+    class SettleRenderer extends FakeRuntimeRenderer {
+      readonly updates: Array<{ deltaTime: unknown; spawnCount: unknown; step: unknown }> = [];
+      #tracked: VfxEmitterRuntimeView | undefined;
+
+      track(view: VfxEmitterRuntimeView): void {
+        this.#tracked = view;
+      }
+
+      override submitCompute(kernel: KernelComputeNode): void {
+        super.submitCompute(kernel);
+        if (this.#tracked && kernel === this.#tracked.kernels.update) {
+          const uniforms = this.#tracked.kernels.uniforms;
+          this.updates.push({
+            deltaTime: uniforms['Emitter.deltaTime']?.value,
+            spawnCount: uniforms['Emitter.spawnCount']?.value,
+            step: uniforms['Emitter.updateRandomStep']?.value,
+          });
+        }
+      }
+    }
+
+    const updatesOf = (renderer: SettleRenderer) =>
+      renderer.submissions.filter((name) => name === 'NachiEmitterUpdate');
+
+    it('runs Update once with deltaTime 0 for a burst born into update(0)', async () => {
+      const renderer = new SettleRenderer();
+      const system = new VFXSystem(renderer);
+      const instance = system.spawn(runtimeEffect({ duration: 1 }));
+      renderer.track(instance.getEmitter('particles')!);
+
+      await system.update(0);
+
+      expect(renderer.submissions.indexOf('NachiEmitterSpawn')).toBeLessThan(
+        renderer.submissions.indexOf('NachiEmitterUpdate'),
+      );
+      expect(renderer.updates).toEqual([{ deltaTime: 0, spawnCount: 1, step: 0 }]);
+      expect(instance.getEmitter('particles')?.kernels.uniforms['Emitter.age']?.value).toBe(0);
+      expect(instance.localTime).toBe(0);
+
+      await system.update(0);
+      expect(updatesOf(renderer)).toHaveLength(1);
+    });
+
+    it('settles a burst born under hit stop and hands over to the first real step', async () => {
+      const renderer = new SettleRenderer();
+      const system = new VFXSystem(renderer);
+      const instance = system.spawn(runtimeEffect({ duration: 1 }));
+      renderer.track(instance.getEmitter('particles')!);
+      instance.applyHitStop(150, 0);
+
+      await system.update(0.1);
+      expect(renderer.updates).toEqual([{ deltaTime: 0, spawnCount: 1, step: 0 }]);
+      expect(instance.localTime).toBe(0);
+
+      await system.update(0.1);
+      expect(updatesOf(renderer)).toHaveLength(2);
+      expect(renderer.updates.at(-1)).toMatchObject({ step: 0 });
+      expect(renderer.updates.at(-1)?.deltaTime).toBeCloseTo(0.05);
+      expect(instance.localTime).toBeCloseTo(0.05);
+    });
+
+    it('does not add a pass when the birth frame already stepped', async () => {
+      const renderer = new SettleRenderer();
+      const system = new VFXSystem(renderer);
+      const instance = system.spawn(runtimeEffect({ duration: 1 }));
+      renderer.track(instance.getEmitter('particles')!);
+
+      await system.update(0.1);
+      expect(renderer.updates).toEqual([{ deltaTime: 0.1, spawnCount: 1, step: 0 }]);
+    });
+
+    it('settles an initialize-only fixed-step frame', async () => {
+      const renderer = new SettleRenderer();
+      const system = new VFXSystem(renderer, undefined, { fixedTimeStep: { stepSeconds: 0.1 } });
+      const instance = system.spawn(runtimeEffect({ duration: 1 }));
+      renderer.track(instance.getEmitter('particles')!);
+
+      await system.update(0.04);
+      expect(renderer.updates).toEqual([{ deltaTime: 0, spawnCount: 1, step: 0 }]);
+
+      await system.update(0.06);
+      expect(renderer.updates.map(({ deltaTime }) => deltaTime)).toEqual([0, 0.1]);
+    });
   });
 
   it('does not advance the next Update random ordinal when submission rejects', async () => {
@@ -2793,17 +2881,18 @@ describe('VFXSystem runtime scheduler', () => {
     renderer.trackUpdateRandomStep('particles', instance.getEmitter('particles')!);
     await system.update(0);
     expect(instance.getEmitter('particles')?.spawnGeneration).toBe(0);
+    // [settle birth @0, step @0, settle re-fired birth @1]: settle passes never consume an ordinal.
     await system.update(0.1);
     expect(instance.getEmitter('particles')?.spawnGeneration).toBe(1);
-    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0]);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 0, 1]);
     expect(
       instance.getEmitter('particles')?.kernels.uniforms['Emitter.updateRandomStep']?.value,
-    ).toBe(0);
+    ).toBe(1);
     await system.update(0.1);
     expect(
       instance.getEmitter('particles')?.kernels.uniforms['Emitter.updateRandomStep']?.value,
     ).toBe(1);
-    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 1]);
+    expect(renderer.updateRandomStepSubmissions.map(({ step }) => step)).toEqual([0, 0, 1, 1]);
     expect(renderer.submissions.filter((name) => name === 'NachiEmitterSpawn')).toHaveLength(2);
   });
 
@@ -4538,6 +4627,7 @@ describe('VFXSystem runtime scheduler', () => {
     renderer.trackUpdateRandomStep('respawned', respawned.getEmitter('particles')!);
     await system.update(0.1);
     expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'first', step: 0 }, // dt=0 birth settle pass
       { emitter: 'first', step: 0 },
       { emitter: 'first', step: 1 },
       { emitter: 'respawned', step: 0 },
@@ -4567,10 +4657,12 @@ describe('VFXSystem runtime scheduler', () => {
     const uniforms = emitter.kernels.uniforms;
     renderer.trackUpdateRandomStep('particles', emitter);
     await system.update(0);
+    const settled = [{ emitter: 'particles', step: 0 }]; // dt=0 birth settle pass
+    expect(renderer.updateRandomStepSubmissions).toEqual(settled);
     instance.applyHitStop(100, 0);
     instance.setTransform([6, 0, 0]);
     await system.update(0.1);
-    expect(renderer.updateRandomStepSubmissions).toEqual([]);
+    expect(renderer.updateRandomStepSubmissions).toEqual(settled);
     expect(uniforms['Emitter.interpolationActive']?.value).toBe(1);
 
     await system.update(0.1);
@@ -4578,7 +4670,10 @@ describe('VFXSystem runtime scheduler', () => {
       uniforms['Emitter.transform']?.value,
     );
     expect(uniforms['Emitter.interpolationActive']?.value).toBe(0);
-    expect(renderer.updateRandomStepSubmissions).toEqual([{ emitter: 'particles', step: 0 }]);
+    expect(renderer.updateRandomStepSubmissions).toEqual([
+      ...settled,
+      { emitter: 'particles', step: 0 },
+    ]);
   });
 
   it('keeps prewarm on the direct-current transform branch', async () => {
@@ -5348,7 +5443,8 @@ describe('VFXSystem runtime scheduler', () => {
     renderer.trackUpdateRandomStep('event-target', target);
 
     await system.update(0);
-    expect(renderer.updateRandomStepSubmissions).toEqual([]);
+    // Event-input consumption on a dt=0 frame is settled with a non-consuming Update.
+    expect(renderer.updateRandomStepSubmissions).toEqual([{ emitter: 'event-target', step: 0 }]);
     instance.setTransform([3, 0, 0]);
     await system.update(0.1);
     expect(
@@ -5365,6 +5461,7 @@ describe('VFXSystem runtime scheduler', () => {
 
     expect(target.kernels.eventInputs).toHaveLength(1);
     expect(renderer.updateRandomStepSubmissions).toEqual([
+      { emitter: 'event-target', step: 0 },
       { emitter: 'event-target', step: 0 },
       { emitter: 'event-target', step: 1 },
     ]);
