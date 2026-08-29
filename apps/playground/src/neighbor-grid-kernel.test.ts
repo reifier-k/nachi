@@ -282,10 +282,12 @@ describe('M12 NeighborGrid Three r185 materialization', () => {
       defineEffect({ elements: { neighbors: grid, particles: emitter } }),
     );
     await system.update(0);
+    // The dt=0 birth settle pass schedules the full grid sequence once for the burst.
+    expect(instance.getNeighborGrid('neighbors')?.submissionCount).toBe(11);
     await system.update(1 / 60);
     expect(instance.diagnostics).toEqual([]);
     expect(instance.state).toBe('active');
-    // 3 * (clear + bucket + constraint) + final clear + bucket.
-    expect(instance.getNeighborGrid('neighbors')?.submissionCount).toBe(11);
+    // 3 * (clear + bucket + constraint) + final clear + bucket, per Update.
+    expect(instance.getNeighborGrid('neighbors')?.submissionCount).toBe(22);
   });
 });

@@ -1283,6 +1283,11 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
   #spawnOrderRequestTotal = 0;
   #spawnOrderWrapWarned = false;
   #spawnGeneration = 0;
+  // Set when a spawn batch (CPU or event-driven GPU spawn) was encoded and no Update kernel has
+  // run since. Particles born into a dt=0 frame (hit stop, `update(0)`) would otherwise be drawn
+  // with their Init values only: every Update-stage module that derives attributes from age
+  // (sizeOverLife, colorOverLife, custom TSL) has not written them yet.
+  #spawnedSinceUpdate = false;
   #updateRandomStep = 0;
   #capacityScale = 1;
   #profileComputeDispatches = 0;
@@ -1786,7 +1791,10 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
         this.#trackSpawnOrderRequests(input.binding.queue.capacity);
       }
     }
-    if (this.kernels.eventInputs.length > 0) await this.#compactAlive();
+    if (this.kernels.eventInputs.length > 0) {
+      this.#spawnedSinceUpdate = true;
+      await this.#compactAlive();
+    }
   }
 
   async advance(deltaSeconds: number, context: AdvanceContext): Promise<void> {
@@ -1865,6 +1873,23 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
       this.#drainRemaining = Math.max(0, this.#drainRemaining - deltaSeconds);
       await this.#compactAlive();
     }
+  }
+
+  /**
+   * Births encoded since the last Update kernel (activation burst under hit stop or `update(0)`,
+   * an initialize-only fixed-step frame, event-driven spawns while paused) would be drawn with
+   * their Init values only, because every age-derived attribute (sizeOverLife, colorOverLife,
+   * custom TSL) is written by the Update stage. Settle them with a zero-length Update once the
+   * frame is known to contain no real step: age, position and velocity are unchanged (every
+   * integrator scales by Emitter.deltaTime), over-life modules sample normalizedAge = 0, the
+   * alive set is untouched so no recompaction is needed, and the simulation random ordinal is
+   * left alone because no simulation time elapsed.
+   */
+  async settleBirths(context: AdvanceContext): Promise<void> {
+    if (!this.#spawnedSinceUpdate) return;
+    this.#setFrameUniforms(0, context, this.controller.loopIndex);
+    await this.#rebuildNeighborGrids();
+    await this.#submitSimulationUpdate(false);
   }
 
   #activationSpawnBatch(): SpawnBatch | undefined {
@@ -1978,6 +2003,7 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     const dispatchCount = Math.min(requestedCount, this.definition.capacity, logicalAvailability);
     if (dispatchCount <= 0) return;
     this.#profileSpawnCount += dispatchCount;
+    this.#spawnedSinceUpdate = true;
     this.#recordLogicalSpawn(dispatchCount);
     const cpuOverflow = Math.max(0, requestedCount - dispatchCount);
     if (cpuOverflow > 0 && logicalCapacity === this.definition.capacity) {
@@ -2178,15 +2204,16 @@ class RuntimeEmitter implements VfxEmitterRuntimeView {
     setUniform(this.#renderer, this.kernels.uniforms, 'Emitter.loopIndex', loopIndex);
   }
 
-  async #submitSimulationUpdate(): Promise<void> {
+  async #submitSimulationUpdate(advanceRandomStep = true): Promise<void> {
     setUniform(
       this.#renderer,
       this.kernels.uniforms,
       'Emitter.updateRandomStep',
       this.#updateRandomStep,
     );
+    this.#spawnedSinceUpdate = false;
     await this.#submitCompute(this.kernels.update, 'update');
-    this.#updateRandomStep = nextUpdateRandomStep(this.#updateRandomStep);
+    if (advanceRandomStep) this.#updateRandomStep = nextUpdateRandomStep(this.#updateRandomStep);
   }
 
   #trackSpawnOrderRequests(requested: number): void {
@@ -2916,6 +2943,15 @@ export class VfxEffectInstance<Definition extends RuntimeEffectDefinition = Runt
     }
   }
 
+  /** @internal Runs the zero-length Update for emitters whose births saw no Update step this frame. */
+  async settleBirths(systemTime: number, prewarmStepSeconds: number): Promise<void> {
+    if (this.#state !== 'active' || !this.#initialized) return;
+    const context = { prewarmStepSeconds, systemDelta: 0, systemTime };
+    for (const emitter of this.#emitters.values()) {
+      await this.#measureEmitter(emitter, () => emitter.settleBirths(context));
+    }
+  }
+
   #completeIfFinished(): void {
     if (this.#state !== 'active') return;
     const emitters = [...this.#emitters.values()];
@@ -3594,6 +3630,15 @@ export class VFXSystem<Renderer = unknown, Scene = unknown> {
           if (transformStep) {
             for (const instance of this.#instances.values()) instance.commitTransformStep();
           }
+        }
+        // Particles born this frame without a following Update step (dt=0, hit stop, an
+        // initialize-only fixed-step frame, event spawns while paused) get their age-derived
+        // attributes written before the next draw.
+        for (const instance of this.#instances.values()) {
+          if (instance.scalability.action === 'culled') continue;
+          await this.#advanceInstance(instance, () =>
+            instance.settleBirths(this.#systemTime, this.#prewarmStepSeconds),
+          );
         }
       } finally {
         try {
