@@ -1,6 +1,6 @@
 {
   "name": "@nachi-vfx/post",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Composable TSL post effects for Three.js RenderPipeline",
   "keywords": [
     "three.js",
