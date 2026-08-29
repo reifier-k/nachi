@@ -1,5 +1,12 @@
 # @nachi-vfx/react
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [e80bf7b]
+  - @nachi-vfx/core@0.3.1
+
 ## 0.3.0
 
 ### Patch Changes

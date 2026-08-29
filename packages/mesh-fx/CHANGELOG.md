@@ -1,5 +1,11 @@
 # @nachi-vfx/mesh-fx
 
+## 0.3.1
+
+### Patch Changes
+
+- @nachi-vfx/tsl-kit@0.3.1
+
 ## 0.3.0
 
 ### Patch Changes
