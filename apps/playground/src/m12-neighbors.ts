@@ -802,22 +802,39 @@ async function run() {
     origin: [-2, -2, -2],
     resolution: [4, 4, 4],
   });
-  const pbdEmitter = defineEmitter({
-    capacity: 2,
-    init: [layout(2, 1, 0.1), lifetime(100)],
-    integration: 'none',
-    lifecycle: { duration: 100 },
-    render: billboard({}),
-    spawn: burst({ count: 2 }),
-    update: [
-      pbdDistanceConstraint({ distance: 0.3, grid: 'neighbors', iterations: 4, stiffness: 1 }),
-    ],
-  });
+  const pbdEmitter = (constrained: boolean) =>
+    defineEmitter({
+      capacity: 2,
+      init: [layout(2, 1, 0.1), lifetime(100)],
+      integration: 'none',
+      lifecycle: { duration: 100 },
+      render: billboard({}),
+      spawn: burst({ count: 2 }),
+      update: constrained
+        ? [
+            pbdDistanceConstraint({
+              distance: 0.3,
+              grid: 'neighbors',
+              iterations: 4,
+              stiffness: 1,
+            }),
+          ]
+        : [],
+    });
   const pbdSystem = new VFXSystem(runtime);
   configureTestCamera(pbdSystem);
   const pbdInstance = pbdSystem.spawn(
-    defineEffect({ elements: { neighbors: pbdGrid, particles: pbdEmitter } }),
+    defineEffect({ elements: { neighbors: pbdGrid, particles: pbdEmitter(true) } }),
   );
+  // The dt=0 birth settle pass already applies the constraint, so the un-constrained control
+  // emitter is what proves the layout starts overlapping.
+  const pbdControlSystem = new VFXSystem(runtime);
+  configureTestCamera(pbdControlSystem);
+  const pbdControlInstance = pbdControlSystem.spawn(
+    defineEffect({ elements: { particles: pbdEmitter(false) } }),
+  );
+  await pbdControlSystem.update(0);
+  const pbdControl = minimumDistance(vectors(await capture(pbdControlInstance), 'position'));
   await pbdSystem.update(0);
   const pbdInitial = minimumDistance(vectors(await capture(pbdInstance), 'position'));
   await pbdSystem.update(1 / 60);
@@ -1028,7 +1045,7 @@ async function run() {
       denseSnapshot.dropped > 0 &&
       denseSnapshot.diagnostics.some(({ code }) => code === 'NACHI_NEIGHBOR_GRID_CELL_OVERFLOW') &&
       denseInstance.state === 'active',
-    pbdOverlapResolved: pbdInitial < 0.15 && pbdFinal >= 0.295,
+    pbdOverlapResolved: pbdControl < 0.15 && pbdInitial >= 0.295 && pbdFinal >= 0.295,
     pooledRuntimeRearmer: firstPooledDiagnosticCount === 1 && secondPooledDiagnosticCount === 1,
     rebuildEveryFrame: countView.submissionCount >= 2 && denseView.submissionCount >= 2,
     throwingRuntimeHandlerContained:
@@ -1058,7 +1075,7 @@ async function run() {
         throwing: { calls: throwingHandlerCalls, codes: throwingCodes },
       },
       overflow: denseSnapshot.dropped,
-      pbd: { final: pbdFinal, initial: pbdInitial },
+      pbd: { control: pbdControl, final: pbdFinal, initial: pbdInitial },
       submissions: {
         all: submissions,
         count: countView.submissionCount,
@@ -1072,6 +1089,7 @@ async function run() {
   flockInstance.release();
   controlInstance.release();
   pbdInstance.release();
+  pbdControlInstance.release();
   denseInstance.release();
   renderer.dispose();
   root.dataset.spikeResult = JSON.stringify(result);
