@@ -39,7 +39,7 @@
     "esbuild": "0.28.1",
     "playwright": "1.61.1",
     "typescript": "5.9.3",
-    "vitest": "4.1.0"
+    "vitest": "4.1.11"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
