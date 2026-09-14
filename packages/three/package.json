@@ -39,7 +39,7 @@
   },
   "peerDependencies": {
     "@types/three": ">=0.185.0 <0.186.0",
-    "three": "0.185.1"
+    "three": "0.186.0"
   },
   "peerDependenciesMeta": {
     "@types/three": {
@@ -52,6 +52,6 @@
   "devDependencies": {
     "@nachi-vfx/trails": "workspace:^",
     "@types/three": "0.185.0",
-    "three": "0.185.1"
+    "three": "0.186.0"
   }
 }
